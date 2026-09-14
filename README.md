@@ -24,7 +24,7 @@ Prebuilt binaries are on the
 | Platform | File | Notes |
 |----------|------|-------|
 | Windows 10/11 (64-bit) | `loop-automator-<version>-windows-x86_64.zip` | The supported platform: real input backend + overlay click-through. |
-| Linux (64-bit) | `loop-automator-<version>-linux-x86_64.tar.gz` | Experimental: Simulate mode only, overlay behaviour untested. |
+| Linux (64-bit) | `loop-automator-<version>-linux-x86_64.tar.gz` | Experimental: Safe mode only, overlay behaviour untested. |
 
 Unzip and run `Loop Automator.exe` — nothing to install. Windows SmartScreen may
 warn that the app is unrecognised because the binary is not code-signed; choose
@@ -55,7 +55,7 @@ layer 1, just broken out so you can view each layer's visuals separately.
 - **Move** — move the cursor to `(x, y)` (optional dwell duration).
 - **Click** — move to `(x, y)` and click Left / Right / Middle.
 - **Drag** — press at A, move to B, release.
-- **Key** — send keystrokes. On the Windows backend this uses the
+- **Key** — send keystrokes. In Live mode this uses the
   [`SendKeys`](https://learn.microsoft.com/dotnet/api/system.windows.forms.sendkeys)
   format, e.g. `abc`, `{ENTER}`, `^c` (Ctrl+C), `%{F4}` (Alt+F4). You can
   type the text by hand, or press the **⌨ button** next to the field: an
@@ -174,7 +174,7 @@ one). Both are saved with the loop.
 > Navigation keys are ignored while typing in a text field, so editing names,
 > keys, and comments still works normally.
 
-While a loop runs in **Execute** mode, **F8 stops it from any
+While a loop runs in **Live** mode, **F8 stops it from any
 window** — the loop clicks other programs and takes the keyboard focus with
 it, so the builder's own hotkeys would not reach it. A small helper holds F8
 as a system-wide hotkey for exactly as long as the loop runs (other programs
@@ -209,17 +209,17 @@ printable text, whatever a file holds.
 Godot cannot synthesize OS-wide input on its own, so input is sent through a
 pluggable `InputBackend`:
 
-- **Simulate** — *default*. Touches nothing on your OS; it only feeds the
+- **Safe** — *default*. Touches nothing on your OS; it only feeds the
   overlay/status so you can design and dry-run a loop safely. Pixel-detect always
   reports "found" so the flow continues.
-- **Execute** — *experimental*. Drives the real cursor/keyboard and reads
+- **Live** — *experimental*. Drives the real cursor/keyboard and reads
   screen pixels via a small generated PowerShell helper (`input_helper.ps1`,
   see [Generated helpers](#generated-helpers))
   using `SetCursorPos`, `mouse_event`, `SendKeys`, and `CopyFromScreen`.
   All of it — input actions and screen reads (Pixel Detect, colour sampling,
   cursor position) — goes to one long-running helper process, so an action or
   a check costs a few milliseconds and a follow-cursor Pixel Detect keeps up
-  with the mouse (~50 checks/s). The helper starts when you pick Windows mode
+  with the mouse (~50 checks/s). The helper starts when you pick Live mode
   (about 1.5 s, in the background); if it ever dies it is restarted on the
   next action.
   Switching the mode while a loop is running
@@ -351,14 +351,14 @@ Loop Automator sends real mouse/keyboard input when a real backend is selected.
 Use it only on systems and software you're permitted to automate; automating
 online games or third-party services may violate their terms of service.
 
-**Treat `.loop` files like scripts.** On the Windows backend a loop can type
+**Treat `.loop` files like scripts.** In Live mode a loop can type
 anything (`SendKeys` text) and click anywhere, which is enough to open a
 terminal and run commands — so a loop from someone else deserves the same
 caution as a script from them. Open it, read its Key actions (the action
-list shows their full text), and dry-run it in **Simulate** mode before
-you ever Execute it. The app keeps you in control either way: it starts in
-Simulate, switches back to Simulate whenever an Execute run stops, locks the
-editor while a loop executes, and **F8 stops an executing loop from any
+list shows their full text), and dry-run it in **Safe** mode before
+you ever run it Live. The app keeps you in control either way: it starts in
+Safe, switches back to Safe whenever a Live run stops, locks the
+editor while a loop runs Live, and **F8 stops a Live loop from any
 window**.
 
 ## License

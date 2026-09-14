@@ -213,8 +213,8 @@ func _build_toolbar() -> Control:
 	backend_lbl.text = "Mode"
 	hb.add_child(backend_lbl)
 	backend_option = OptionButton.new()
-	backend_option.add_item("Simulate", Playback.BackendKind.PREVIEW)
-	backend_option.add_item("Execute", Playback.BackendKind.WINDOWS)
+	backend_option.add_item("Safe", Playback.BackendKind.PREVIEW)
+	backend_option.add_item("Live", Playback.BackendKind.WINDOWS)
 	backend_option.item_selected.connect(_on_backend_selected)
 	hb.add_child(backend_option)
 
@@ -945,7 +945,7 @@ func _add_captures_field(a: LoopActionT) -> void:
 	row.add_child(cb)
 	var ghost := CheckBox.new()
 	ghost.text = "Ghost Cursor"
-	ghost.tooltip_text = "Hide the real cursor while this action runs and show a ghost cursor that keeps following you, so nothing appears to jump. Windows backend only."
+	ghost.tooltip_text = "Hide the real cursor while this action runs and show a ghost cursor that keeps following you, so nothing appears to jump. Live mode only."
 	ghost.button_pressed = a.ghost_cursor
 	ghost.disabled = not a.captures
 	ghost.toggled.connect(func(v):
@@ -1259,7 +1259,7 @@ func _on_pick_canceled() -> void:
 func _sample_color_into(a: LoopActionT, g: Vector2i) -> void:
 	var sampler := Playback.get_screen_sampler()
 	if sampler == null:
-		status_label.text = "Colour sampling needs the Windows backend (no real screen reader on this OS)."
+		status_label.text = "Colour sampling needs Live mode (no real screen reader on this OS)."
 		return
 	_sample_pending = true
 	var restore_overlay := overlay_btn.button_pressed
@@ -1524,7 +1524,7 @@ func _animate_stop_feedback(include_safety: bool) -> void:
 		if play_btn != null:
 			play_btn.text = "Safety."
 		if status_label != null:
-			status_label.text = "Switched to Simulate."
+			status_label.text = "Switched to Safe."
 		await get_tree().create_timer(STOP_COOLDOWN_STEP_SEC).timeout
 		if token != _stop_cooldown_token:
 			return
@@ -1627,7 +1627,7 @@ func _ask_import(path: String) -> void:
 		return
 	var keys: Array = peek["keys"]
 	var text := "Import \"%s\" as a new loop?\n\n" % path.get_file()
-	text += "A loop is like a script: run in Execute mode it can type anything and click anywhere. "
+	text += "A loop is like a script: run in Live mode it can type anything and click anywhere. "
 	text += "This one, \"%s\", has %d layer(s) and %d action(s)" % [peek["name"], peek["layers"], peek["actions"]]
 	if keys.is_empty():
 		text += ", none of them Key actions (nothing in it types).\n"
@@ -1640,7 +1640,7 @@ func _ask_import(path: String) -> void:
 			text += "    •  %s\n" % JSON.stringify(k)
 		if keys.size() > IMPORT_KEYS_SHOWN:
 			text += "    •  … and %d more\n" % (keys.size() - IMPORT_KEYS_SHOWN)
-	text += "\nIt opens in Simulate mode. Read its actions there and dry-run it before you ever Execute it."
+	text += "\nIt opens in Safe mode. Read its actions there and dry-run it before you ever run it Live."
 	var do_import := func():
 		var id := ProjectData.import_loop(path)
 		if id < 0:
