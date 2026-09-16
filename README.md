@@ -52,9 +52,11 @@ layer 1, just broken out so you can view each layer's visuals separately.
 
 ## Action types
 
-- **Move** — move the cursor to `(x, y)` (optional dwell duration).
+- **Move** — move the cursor to `(x, y)`; with a duration the cursor travels
+  there over that time instead of jumping (`~Duration` adds a little
+  hand-like wander on the way; start and end stay exact).
 - **Click** — move to `(x, y)` and click Left / Right / Middle.
-- **Drag** — press at A, move to B, release.
+- **Drag** — press at A, move to B over the duration, release.
 - **Key** — send keystrokes. In Live mode this uses the
   [`SendKeys`](https://learn.microsoft.com/dotnet/api/system.windows.forms.sendkeys)
   format, e.g. `abc`, `{ENTER}`, `^c` (Ctrl+C), `%{F4}` (Alt+F4). You can
@@ -67,7 +69,10 @@ layer 1, just broken out so you can view each layer's visuals separately.
   keys stay pressed for the next key; **Undo** removes the last captured
   key, **Clear** starts from an empty field. The window can be resized - the
   keys scale with it - and the size you leave it at is remembered. The
-  Windows key cannot be sent by `SendKeys`, so it is ignored.
+  Windows key cannot be sent by `SendKeys`, so it is ignored. Check the
+  **~Keys** box to type the text one key at a time with random pauses, the
+  way a person types, each key held a moment; a combo such as `^c` or
+  `+(abc)` stays one press (Ctrl down, `c` pressed and held, Ctrl up).
 - **Wait** — pause N milliseconds.
 - **Pixel Detect** — look for an expected colour (± tolerance) anywhere in a screen rect.
   The whole rect is scanned (the centre first). **Pick & sample** centres the
@@ -76,8 +81,9 @@ layer 1, just broken out so you can view each layer's visuals separately.
   picking, a swatch next to the cursor previews the colour under it. Tick
   **Follow Cursor** and the rect is centred on the mouse instead of X / Y — it
   moves with the mouse on the overlay and is scanned wherever the mouse is when
-  the action runs. If *not*
-  found you can **Continue**, **Skip the rest of the layer**, or **Stop** the loop.
+  the action runs. If *not* found the loop **skips the rest of the layer** or
+  **stops**; with **~If not found** checked (the default) a Safe run carries
+  on regardless, so the whole loop can be walked through.
 - **Capture** — **Save** remembers where the mouse is right now; **Load** moves
   it back to the last saved position. There is one saved position per run (it is
   cleared when you press Play). A Load that runs before anything was saved does
@@ -152,12 +158,12 @@ one). Both are saved with the loop.
      (a feedback loop). The overlay is never a target either way: it is
      click-through, and Pixel Detect never reads what the overlay draws.
 4. Toggle **Overlay: ON** to see the visuals drawn full-screen, always on top.
-   - `◀ Layer` / `Layer ▶` (or **←/→**, **PgUp/PgDn**, `[` / `]`) flip through
+   - The arrow buttons under **Overlay** (or **←/→**, **PgUp/PgDn**, `[` / `]`) flip through
      layers; the toolbar shows the current view (e.g. `View: 2/3 · Layer 2`).
      Flipping also selects that layer for editing.
    - Number keys **1–9** jump straight to a layer.
    - **Show All** (or `\`) toggles drawing every visible layer at once.
-5. Choose a **Backend** and press **▶ Run** (or **F5**).
+5. Choose a **Mode** and press **Run?** (Safe) or **Run!** (Live), or **F5**.
 
 > The status line lives in the **bottom bar**; the toolbar scrolls horizontally
 > if the window is too narrow to show every control.
@@ -187,7 +193,7 @@ whenever the builder has the focus.
 The toolbar keeps a stack of loops. **New** starts one: its first layer gets
 a random name from the Bible (`Moses`, then `Moses 2` if that is taken), and
 **a loop is named after its first layer** — rename or reorder the layers and
-the loop's name in the picker follows. The **Loop** picker and `◀` / `▶` flip
+the loop's name in the picker follows. The **Loop** picker and the arrows beside it flip
 between loops, **Save** writes the current one to its file (a `*` marks
 unsaved changes), the two-sheets icon duplicates it as a new, unsaved loop
 named `<name> copy`, and the trash icon deletes it, file included. A layer has
@@ -210,8 +216,9 @@ Godot cannot synthesize OS-wide input on its own, so input is sent through a
 pluggable `InputBackend`:
 
 - **Safe** — *default*. Touches nothing on your OS; it only feeds the
-  overlay/status so you can design and dry-run a loop safely. Pixel-detect always
-  reports "found" so the flow continues.
+  overlay/status so you can design and dry-run a loop safely. Pixel Detect
+  still reads the real screen (a read touches nothing), so a Safe run takes
+  the same turns a Live one would.
 - **Live** — *experimental*. Drives the real cursor/keyboard and reads
   screen pixels via a small generated PowerShell helper (`input_helper.ps1`,
   see [Generated helpers](#generated-helpers))

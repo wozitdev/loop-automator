@@ -12,6 +12,8 @@ const StopHotkeyT := preload("res://scripts/input/stop_hotkey.gd")
 const LoopActionT := preload("res://scripts/model/loop_action.gd")
 const LoopProjectT := preload("res://scripts/model/loop_project.gd")
 const LoopLayerT := preload("res://scripts/model/loop_layer.gd")
+const MousePathT := preload("res://scripts/model/mouse_path.gd")
+const KeyStrokesT := preload("res://scripts/model/key_strokes.gd")
 
 signal playback_started
 signal playback_stopped
@@ -41,6 +43,12 @@ var feedback: bool = false
 ## so the guides it draws around the rect never end up in the screen read.
 var detect_rect: Rect2i = Rect2i()
 var detect_rect_pinned: bool = false
+## What the action that just ran reported (a Pixel Detect's result), kept on
+## the status line through the delay that follows it, so the delay does not
+## hide why the loop is where it is.
+var _last_event: String = ""
+## Why the last run ended: "Stopped." unless an action or F8 ended it.
+var last_stop_reason: String = "Stopped."
 
 # Guard so a stop request issued mid-action breaks out cleanly.
 var _generation: int = 0
@@ -62,6 +70,16 @@ var _stop_hotkey := StopHotkeyT.new()
 func _ready() -> void:
 	set_process(false)
 	set_backend(BackendKind.PREVIEW)
+	# Another loop opened (switched to, created, imported…): the run ends with
+	# the loop it was started for. (A Live run locks the builder, so this is
+	# what stops a Safe run when the loop is changed under it.) Deferred so
+	# the reason lands on the status line after the builder's own refresh.
+	ProjectData.project_replaced.connect(func():
+		if is_running:
+			var gen := _generation
+			(func():
+				if is_running and gen == _generation:
+					stop("Stopped: another loop was opened.")).call_deferred())
 
 
 func _exit_tree() -> void:
@@ -74,8 +92,7 @@ func _process(_dt: float) -> void:
 		return
 	var before: int = _stop_hotkey.state
 	if _stop_hotkey.poll():
-		stop()
-		emit_signal("status", "Stopped: F8 pressed.")
+		stop("Stopped: F8 pressed.")
 		return
 	if _stop_hotkey.state == before:
 		return
@@ -150,15 +167,23 @@ func start() -> void:
 		# Only a real loop can take the focus away; a preview never needs it.
 		_stop_hotkey.start()
 		set_process(true)
+	else:
+		# A Safe run still reads the screen for its Pixel Detects: get the
+		# reader's helper up now rather than at the first detect.
+		var reader := get_screen_sampler()
+		if reader != null and reader.has_method("warm_up"):
+			reader.call("warm_up")
 	emit_signal("playback_started")
 	emit_signal("status", "Running…")
 	_run_loop(_generation)
 
 
-func stop() -> void:
+## Ends the run; `reason` is what the status line then says.
+func stop(reason: String = "Stopped.") -> void:
 	if not is_running:
 		return
 	is_running = false
+	last_stop_reason = reason
 	_generation += 1
 	_stop_hotkey.stop()
 	set_process(false)
@@ -168,7 +193,7 @@ func stop() -> void:
 	_set_tracker(Vector2i.ZERO, false, "")
 	emit_signal("action_executing", -1, -1)
 	emit_signal("playback_stopped")
-	emit_signal("status", "Stopped.")
+	emit_signal("status", reason)
 
 
 func _run_loop(gen: int) -> void:
@@ -192,17 +217,21 @@ func _run_loop(gen: int) -> void:
 					continue
 				current_layer_index = li
 				current_action_index = ai
+				_last_event = ""
 				emit_signal("action_executing", li, ai)
 				var result := await _execute_action(action, li, ai)
 				if result == LoopActionT.OnFail.STOP_LOOP:
-					stop()
+					stop("%s Loop stopped." % _last_event)
 					return
+				if result == LoopActionT.OnFail.SKIP_LAYER:
+					_last_event = _last_event.trim_suffix(".") + ", skipped the rest of \"%s\"." % layer.name
+					emit_signal("status", _last_event)
+					skip_layer = true
 				delayed_after_last = false
 				if project.delay_after_each_action and is_running and gen == _generation:
 					await _wait_loop_delay(project, gen, "Action delay")
 					delayed_after_last = true
-				if result == LoopActionT.OnFail.SKIP_LAYER:
-					skip_layer = true
+				if skip_layer:
 					break
 			if skip_layer:
 				continue
@@ -214,12 +243,16 @@ func _run_loop(gen: int) -> void:
 
 
 ## Waits one (rolled) loop delay, shown on the tracker and the status line
-## as `what`; nothing happens when the delay is 0.
+## as `what` (after what the last action reported, if it reported anything);
+## nothing happens when the delay is 0.
 func _wait_loop_delay(project: LoopProjectT, gen: int, what: String) -> void:
 	var delay := project.roll_loop_delay_ms()
 	if delay <= 0:
 		return
-	emit_signal("status", "%s: %d ms" % [what, delay])
+	var text := "%s: %d ms" % [what, delay]
+	if not _last_event.is_empty():
+		text = "%s %s" % [_last_event, text]
+	emit_signal("status", text)
 	_set_tracker(tracker_pos, tracker_visible, "DELAY %dms" % delay)
 	await _sleep_ms(delay)
 	if is_running and gen == _generation:
@@ -238,11 +271,7 @@ func _execute_action(action: LoopActionT, layer_index: int, action_index: int) -
 	match action.type:
 		LoopActionT.Type.MOVE:
 			var p := action.roll_point()
-			_set_tracker(p, true, "MOVE")
-			backend.move_to(p)
-			var dwell := action.roll_duration_ms()
-			if dwell > 0:
-				await _sleep_ms(dwell)
+			await _travel(_mouse_pos(), p, action.roll_duration_ms(), action.wiggle, "MOVE")
 		LoopActionT.Type.CLICK:
 			var p := action.roll_point()
 			_set_tracker(p, true, "CLICK")
@@ -253,16 +282,20 @@ func _execute_action(action: LoopActionT, layer_index: int, action_index: int) -
 			var p2 := action.roll_point2()
 			_set_tracker(p, true, "DRAG START")
 			backend.mouse_button(action.button, true, p)
-			var hold := action.roll_duration_ms()
-			if hold > 0:
-				await _sleep_ms(hold)
-			_set_tracker(p2, true, "DRAG END")
-			backend.mouse_button(action.button, false, p2)
-			_report_skipped(action)
+			if backend.last_skipped:
+				_report_skipped(action)
+			else:
+				# The button is always released, a stop mid-drag included.
+				await _travel(p, p2, action.roll_duration_ms(), action.wiggle, "DRAG")
+				_set_tracker(p2, true, "DRAG END")
+				backend.mouse_button(action.button, false, p2)
 		LoopActionT.Type.KEY:
 			_set_tracker(tracker_pos, tracker_visible, "KEY")
-			backend.send_keys(action.keys)
-			_report_skipped(action)
+			if action.keys_paced:
+				await _type_paced(action)
+			else:
+				backend.send_keys(action.keys)
+				_report_skipped(action)
 		LoopActionT.Type.WAIT:
 			var wait := action.roll_wait_ms()
 			emit_signal("status", "Wait: %d ms" % wait)
@@ -271,15 +304,16 @@ func _execute_action(action: LoopActionT, layer_index: int, action_index: int) -
 		LoopActionT.Type.PIXEL_DETECT:
 			var rect := action.roll_detect_rect(_mouse_pos())
 			# Pin the rect and let the overlay present a frame with its hole
-			# there before the screen is read (a follow-cursor hole would
-			# otherwise lag behind the mouse and the guides would be read).
-			# One frame is enough: the previous frame has been swapped (and,
-			# with vsync, scanned out) by the time process_frame fires —
-			# measured 0 leaks in 100 reads against the read server.
+			# there before the screen is read: the overlay cuts the rect out
+			# only while it is pinned, so whatever it draws inside (another
+			# step's marker, the grid) is on screen until then. Two frames:
+			# the first is drawn with the hole, the second gives the desktop
+			# compositor time to show it (one frame leaked 1 read in 100).
 			detect_rect = rect
 			detect_rect_pinned = true
 			_set_tracker(rect.get_center(), true, "DETECT")
 			var gen := _generation
+			await get_tree().process_frame
 			await get_tree().process_frame
 			if not is_running or gen != _generation:
 				detect_rect_pinned = false
@@ -289,8 +323,15 @@ func _execute_action(action: LoopActionT, layer_index: int, action_index: int) -
 			var found := hit.x >= 0
 			if found:
 				_set_tracker(hit, true, "DETECT")
-			emit_signal("status", "Pixel detect: %s" % (("FOUND at (%d, %d)" % [hit.x, hit.y]) if found else "not found"))
-			if not found:
+				_last_event = "Pixel detect: found at (%d, %d)." % [hit.x, hit.y]
+			else:
+				_last_event = "Pixel detect: not found."
+			# ~If not found: a Safe run walks on regardless.
+			var walk_on := not found and action.safe_continue and not backend.is_real()
+			if walk_on:
+				_last_event = "Pixel detect: not found (Safe: carrying on)."
+			emit_signal("status", _last_event)
+			if not found and not walk_on:
 				return action.on_fail
 		LoopActionT.Type.CAPTURE:
 			if action.capture_mode == LoopActionT.CaptureMode.SAVE:
@@ -327,18 +368,27 @@ func _execute_captured(action: LoopActionT) -> void:
 	var to := action.roll_point2()
 	var kind := "move"
 	var ms := action.roll_duration_ms()
+	# The travel the duration is spent on: a move gets there from where the
+	# cursor is, a drag goes from its first point to its second.
+	var path := MousePathT.make(_mouse_pos(), from, ms, action.wiggle)
 	match action.type:
 		LoopActionT.Type.CLICK:
 			kind = "click"
 			ms = 0
 		LoopActionT.Type.DRAG:
 			kind = "drag"
-	_set_tracker(from, true, kind.to_upper() + " ↩")
+			path = MousePathT.make(from, to, ms, action.wiggle)
+	var label := kind.to_upper() + " ↩"
+	_set_tracker(from, true, label)
 	var b := backend
 	var thread := Thread.new()
 	thread.start(func() -> Array:
-		return b.run_captured(kind, action.button, from, to, ms, action.ghost_cursor))
+		return b.run_captured(kind, action.button, from, to, ms, action.ghost_cursor, path))
+	# The tracker walks the path while the helper moves the real cursor.
+	var started := Time.get_ticks_msec()
 	while thread.is_alive():
+		if kind != "click" and ms > 0:
+			_set_tracker(Vector2i(MousePathT.at(path, float(Time.get_ticks_msec() - started) / float(ms)).round()), true, label)
 		await get_tree().process_frame
 	var result: Array = thread.wait_to_finish()
 	if result.size() != 2:
@@ -350,6 +400,127 @@ func _execute_captured(action: LoopActionT) -> void:
 	_saved_cursor = result[0]
 	_has_saved_cursor = true
 	_set_tracker(result[1], true, "RESTORE")
+
+
+## ~Keys: the pause between two keystrokes, and the longer one a hand
+## makes now and then (one keystroke in KEY_PAUSE_LONG_EVERY, on average).
+const KEY_PAUSE_MIN_MS := 40
+const KEY_PAUSE_MAX_MS := 160
+const KEY_PAUSE_LONG_MIN_MS := 200
+const KEY_PAUSE_LONG_MAX_MS := 420
+const KEY_PAUSE_LONG_EVERY := 9
+## ~Keys: how a press goes. Modifiers down, then the key after KEY_LEAD
+## (Ctrl … c), held KEY_HOLD, and the modifiers up KEY_TRAIL after it.
+const KEY_LEAD_MIN_MS := 30
+const KEY_LEAD_MAX_MS := 70
+const KEY_HOLD_MIN_MS := 35
+const KEY_HOLD_MAX_MS := 95
+const KEY_TRAIL_MIN_MS := 20
+const KEY_TRAIL_MAX_MS := 60
+## A group "(abc…)" longer than this is one helper call too long to stop;
+## SendKeys sends it instead.
+const KEY_GROUP_MAX := 32
+
+
+## Types a Key action's text one keystroke at a time (see KeyStrokes.split:
+## a combo stays one keystroke), each press with real timing — Ctrl goes
+## down, c is pressed and held a moment, Ctrl comes up — and a random pause
+## between presses, the way typing goes. A stroke the helper cannot press
+## key by key goes through SendKeys as it is. A stop ends the typing
+## between strokes.
+func _type_paced(action: LoopActionT) -> void:
+	var gen := _generation
+	var b := backend
+	# One entry per press: a repeated key ("{ENTER 3}") is three presses, so
+	# a stop lands between them and each gets its own timing.
+	var presses: Array = []
+	for stroke in KeyStrokesT.split(action.keys):
+		var press := KeyStrokesT.parse(stroke)
+		if press.is_empty() or (press["keys"] as PackedStringArray).size() > KEY_GROUP_MAX:
+			presses.append(stroke)   # SendKeys sends it as it is
+		else:
+			for r in press["repeat"]:
+				presses.append(press)
+	for i in presses.size():
+		if not is_running or gen != _generation:
+			return
+		var press: Variant = presses[i]
+		# The helper blocks for the whole press, so it runs off the main thread.
+		var thread := Thread.new()
+		if press is String:
+			thread.start(func(): b.send_keys(press))
+		else:
+			var lead := randi_range(KEY_LEAD_MIN_MS, KEY_LEAD_MAX_MS)
+			var hold := randi_range(KEY_HOLD_MIN_MS, KEY_HOLD_MAX_MS)
+			var gap := randi_range(KEY_PAUSE_MIN_MS, KEY_PAUSE_MAX_MS)
+			var trail := randi_range(KEY_TRAIL_MIN_MS, KEY_TRAIL_MAX_MS)
+			thread.start(func(): b.hold_keys(press["mods"], press["keys"], lead, hold, gap, trail))
+		while thread.is_alive():
+			await get_tree().process_frame
+		thread.wait_to_finish()
+		if b.last_skipped:
+			_report_skipped(action)
+			return
+		if i < presses.size() - 1:
+			var pause := randi_range(KEY_PAUSE_MIN_MS, KEY_PAUSE_MAX_MS)
+			if randi_range(1, KEY_PAUSE_LONG_EVERY) == 1:
+				pause = randi_range(KEY_PAUSE_LONG_MIN_MS, KEY_PAUSE_LONG_MAX_MS)
+			await _sleep_ms(pause)
+
+
+## A move with a duration is sent to the helper in pieces of about this
+## long, so a stop takes effect between them (a captured action is one
+## helper command and runs to its end).
+const TRAVEL_CHUNK_MS := 200
+
+
+## Moves the cursor from `from` to `to` over `ms` (see MousePath; `wiggle`
+## bends the route a little), showing the travel on the tracker as `label`.
+## With `ms` 0 it is a jump. A stop ends the travel where the cursor is.
+func _travel(from: Vector2i, to: Vector2i, ms: int, wiggle: bool, label: String) -> void:
+	var path := MousePathT.make(from, to, ms, wiggle)
+	if path.size() <= 2:
+		# A jump — or, going nowhere with a duration (a drag held in place),
+		# a stay of that long.
+		_set_tracker(to, true, label)
+		backend.move_to(to)
+		if ms > 0:
+			await _sleep_ms(ms)
+		return
+	var gen := _generation
+	var started := Time.get_ticks_msec()
+	if backend.is_real():
+		# The helper steps the real cursor, a piece of the path at a time on
+		# a worker thread; the tracker follows the clock meanwhile.
+		var b := backend
+		var pieces := maxi(1, ceili(float(ms) / float(TRAVEL_CHUNK_MS)))
+		var last := 0
+		for c in pieces:
+			if not is_running or gen != _generation:
+				return
+			var end := path.size() - 1 if c == pieces - 1 else roundi(float(path.size() - 1) * float(c + 1) / float(pieces))
+			var piece := path.slice(last, end + 1)
+			var piece_ms := roundi(float(ms) * float(end - last) / float(path.size() - 1))
+			last = end
+			var thread := Thread.new()
+			thread.start(func(): b.move_path(piece, piece_ms))
+			while thread.is_alive():
+				if is_running and gen == _generation:
+					_set_tracker(Vector2i(MousePathT.at(path, float(Time.get_ticks_msec() - started) / float(ms)).round()), true, label)
+				await get_tree().process_frame
+			thread.wait_to_finish()
+	else:
+		while true:
+			var t := float(Time.get_ticks_msec() - started) / float(ms)
+			if t >= 1.0 or not is_running or gen != _generation:
+				break
+			var p := Vector2i(MousePathT.at(path, t).round())
+			backend.move_to(p)
+			_set_tracker(p, true, label)
+			await get_tree().process_frame
+	if is_running and gen == _generation:
+		backend.move_to(to)
+		_set_tracker(to, true, label)
 
 
 ## Remembers the current mouse position. Returns false (leaving any earlier
@@ -389,14 +560,17 @@ func _mouse_pos() -> Vector2i:
 ## channel) anywhere in `rect` (the rect rolled for this run). Returns the
 ## screen position of the first match, or (-1, -1). The backend checks the
 ## rect's centre first — it is where "Pick & sample" read the colour from —
-## then a grid of every step-th pixel.
+## then a grid of every step-th pixel. A Safe run reads the real screen too
+## (a read touches nothing), through the same reader colour picking uses;
+## only where no screen reader exists at all is the colour taken as found,
+## so the loop still flows.
 func _find_color(action: LoopActionT, rect: Rect2i) -> Vector2i:
-	if not backend.is_real():
-		# Preview cannot read the real screen; treat as found so the loop flows.
+	var reader := backend if backend.is_real() else get_screen_sampler()
+	if reader == null:
 		return rect.get_center()
 	var step := maxi(1, int(ceil(sqrt(float(rect.size.x * rect.size.y) / float(DETECT_MAX_SAMPLES)))))
 	var tolerance := action.roll_tolerance()
-	var result := backend.find_color(rect, action.color, tolerance, step)
+	var result := reader.find_color(rect, action.color, tolerance, step)
 	if result.is_empty():
 		print("Pixel detect in [%d, %d, %d×%d]: screen read failed (see warning above) -> not found" % [rect.position.x, rect.position.y, rect.size.x, rect.size.y])
 		return Vector2i(-1, -1)

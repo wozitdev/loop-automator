@@ -8,6 +8,7 @@ class_name WindowsBackend
 ## is only the fallback when no server can be started.
 
 const PowerShellHostT := preload("res://scripts/powershell_host.gd")
+const MousePathT := preload("res://scripts/model/mouse_path.gd")
 const HELPER_FILE := "input_helper.ps1"
 
 ## Absolute path of the helper script, "" when it could not be written (no
@@ -73,6 +74,8 @@ public class Win32In {
   [DllImport(\"winmm.dll\")] public static extern uint timeBeginPeriod(uint ms);
   [DllImport(\"winmm.dll\")] public static extern uint timeEndPeriod(uint ms);
   [DllImport(\"user32.dll\")] public static extern bool ShowWindow(IntPtr h,int n);
+  [DllImport(\"user32.dll\")] public static extern void keybd_event(byte vk,byte scan,uint flags,IntPtr extra);
+  [DllImport(\"user32.dll\", CharSet=CharSet.Unicode)] public static extern short VkKeyScanW(char ch);
   [DllImport(\"user32.dll\")] public static extern int GetWindowLongW(IntPtr h,int i);
   [DllImport(\"user32.dll\")] public static extern int SetWindowLongW(IntPtr h,int i,int v);
   [DllImport(\"user32.dll\")] public static extern bool SetWindowPos(IntPtr h,IntPtr after,int x,int y,int cx,int cy,uint f);
@@ -236,10 +239,10 @@ function Ghost-Stop {
   if ($script:ghost -ne [IntPtr]::Zero) { [Win32In]::DestroyWindow($script:ghost) | Out-Null; $script:ghost = [IntPtr]::Zero }
   if ($script:ghostBmp -ne [IntPtr]::Zero) { [Win32In]::DeleteObject($script:ghostBmp) | Out-Null; $script:ghostBmp = [IntPtr]::Zero }
 }
-# Waits, keeping the real cursor pinned and the ghost on the user's hand
-# meanwhile (every ~1 ms, so each display frame gets the freshest position).
-function Wait-Ms([int]$ms) {
-  $sw = [System.Diagnostics.Stopwatch]::StartNew()
+# Waits until the stopwatch reads $due ms, keeping the real cursor pinned and
+# the ghost on the user's hand meanwhile (every ~1 ms, so each display frame
+# gets the freshest position).
+function Wait-Until($sw, [int]$due) {
   do {
     Read-Motion
     if ($script:ghost -ne [IntPtr]::Zero) {
@@ -247,7 +250,21 @@ function Wait-Ms([int]$ms) {
       [System.Windows.Forms.Application]::DoEvents()
     }
     [System.Threading.Thread]::Sleep(1)
-  } while ($sw.ElapsedMilliseconds -lt $ms)
+  } while ($sw.ElapsedMilliseconds -lt $due)
+}
+function Wait-Ms([int]$ms) { Wait-Until ([System.Diagnostics.Stopwatch]::StartNew()) $ms }
+# Walks the pinned cursor along a path (\"x,y;x,y;...\", the points evenly
+# spaced in time) over $ms: each point is due at its share of the time, and
+# the last one is exactly where the travel ends.
+function Glide([string]$path, [int]$ms) {
+  $pts = $path.Split(';')
+  $n = $pts.Count
+  $sw = [System.Diagnostics.Stopwatch]::StartNew()
+  for ($i = 0; $i -lt $n; $i++) {
+    $xy = $pts[$i].Split(',')
+    Jump ([int]$xy[0]) ([int]$xy[1])
+    if ($n -gt 1) { Wait-Until $sw ([int]([long]$ms * ($i + 1) / $n)) }
+  }
 }
 # True when $h belongs to the guarded process (see 'guard' above).
 function Guarded([IntPtr]$h) {
@@ -270,6 +287,21 @@ if ($a[0] -eq 'guard') { $script:guard = [int]$a[1]; $a = @($a | Select-Object -
 $cmd = $a[0]
 switch ($cmd) {
   'move' { [Win32In]::SetCursorPos([int]$a[1],[int]$a[2]) | Out-Null }
+  'path' {
+    # path <x,y;x,y;...> <ms>: move the cursor through the points, evenly
+    # spaced over the time (a Move or Drag with a duration).
+    $pts = ([string]$a[1]).Split(';'); $n = $pts.Count; $ms = [int]$a[2]
+    $timerRes = ([Win32In]::timeBeginPeriod(1) -eq 0)
+    try {
+      $sw = [System.Diagnostics.Stopwatch]::StartNew()
+      for ($i = 0; $i -lt $n; $i++) {
+        $xy = $pts[$i].Split(',')
+        [Win32In]::SetCursorPos([int]$xy[0],[int]$xy[1]) | Out-Null
+        $due = [int]([long]$ms * ($i + 1) / $n)
+        while ($sw.ElapsedMilliseconds -lt $due) { [System.Threading.Thread]::Sleep(1) }
+      }
+    } finally { if ($timerRes) { [Win32In]::timeEndPeriod(1) | Out-Null } }
+  }
   'down' {
     if (Guarded-Point ([int]$a[1]) ([int]$a[2])) { Write-Output 'skipped'; break }
     [Win32In]::MouseAt([int]$a[1],[int]$a[2],(Down-Flag $a[3]))
@@ -279,15 +311,18 @@ switch ($cmd) {
     [Win32In]::MouseAt([int]$a[1],[int]$a[2],(Up-Flag $a[3]))
   }
   'cap' {
-    # cap <move|click|drag> <ghost 0|1> <button> <x> <y> <x2> <y2> <ms>
+    # cap <move|click|drag> <ghost 0|1> <button> <x> <y> <x2> <y2> <ms> [path]
     # A whole Captures action in one process: remember the cursor, do the
     # action, put the cursor back where it was plus whatever the user moved it
     # meanwhile - so it is only away for a few milliseconds and the user's own
     # movement is never lost. With ghost=1 the real cursor is hidden for the
     # duration and a ghost cursor stands in for it, so nothing appears to jump.
+    # The path (\"x,y;x,y;...\") is the travel over $ms: to (x, y) for a
+    # move, from (x, y) to (x2, y2) for a drag; without one the cursor jumps.
     # Prints \"savedX,savedY,restoredX,restoredY\".
     $kind = $a[1]; $useGhost = ($a[2] -eq '1'); $btn = $a[3]
     $x = [int]$a[4]; $y = [int]$a[5]; $x2 = [int]$a[6]; $y2 = [int]$a[7]; $ms = [int]$a[8]
+    $path = ''; if ($a.Count -gt 9) { $path = [string]$a[9] }
     if ($kind -ne 'move' -and ((Guarded-Point $x $y) -or ($kind -eq 'drag' -and (Guarded-Point $x2 $y2)))) {
       Write-Output 'skipped'; break
     }
@@ -303,18 +338,20 @@ switch ($cmd) {
     $timerRes = ([Win32In]::timeBeginPeriod(1) -eq 0)
     try {
       if ($useGhost) { Ghost-Start }
-      Jump $x $y
       switch ($kind) {
-        'move' { Wait-Ms $ms }
+        'move' {
+          if ($path -ne '') { Glide $path $ms } else { Jump $x $y; Wait-Ms $ms }
+        }
         'click' {
+          Jump $x $y
           Wait-Ms 15
           [Win32In]::MouseAt($x,$y,(Down-Flag $btn)); Wait-Ms 15; [Win32In]::MouseAt($x,$y,(Up-Flag $btn))
         }
         'drag' {
+          Jump $x $y
           Wait-Ms 15
           [Win32In]::MouseAt($x,$y,(Down-Flag $btn))
-          Wait-Ms $ms
-          Jump $x2 $y2
+          if ($path -ne '') { Glide $path $ms } else { Wait-Ms $ms; Jump $x2 $y2 }
           Wait-Ms 15
           [Win32In]::MouseAt($x2,$y2,(Up-Flag $btn))
         }
@@ -342,6 +379,55 @@ switch ($cmd) {
     Add-Type -AssemblyName System.Windows.Forms
     $text = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([string]$a[1]))
     [System.Windows.Forms.SendKeys]::SendWait($text)
+  }
+  'hold' {
+    # hold <mods|-> <keys> <lead> <hold> <gap> <trail>: one keystroke with
+    # real timing (~Keys). The modifiers (letters c / s / a) go down, $lead
+    # ms later each key (\"c<code>\" a character found on the keyboard
+    # layout, \"v<vk>\" a virtual key) is held $hold ms, $gap ms apart, and
+    # $trail ms after the last the modifiers come up. A character the
+    # layout has no key for is sent by SendKeys instead.
+    if (Guarded ([Win32In]::GetForegroundWindow())) { Write-Output 'skipped'; break }
+    $mods = [string]$a[1]; $keys = ([string]$a[2]).Split(',')
+    $lead = [int]$a[3]; $hold = [int]$a[4]; $gap = [int]$a[5]; $trail = [int]$a[6]
+    $down = @()
+    if ($mods.Contains('c')) { $down += 0x11 }
+    if ($mods.Contains('s')) { $down += 0x10 }
+    if ($mods.Contains('a')) { $down += 0x12 }
+    try {
+      foreach ($m in $down) { [Win32In]::keybd_event([byte]$m, 0, 0, [IntPtr]::Zero) }
+      if ($down.Count -gt 0) { [System.Threading.Thread]::Sleep($lead) }
+      for ($i = 0; $i -lt $keys.Count; $i++) {
+        $k = $keys[$i]; $vk = 0; $shift = $false
+        if ($k.StartsWith('v')) { $vk = [int]$k.Substring(1) }
+        else {
+          $ch = [char][int]$k.Substring(1)
+          $scan = [Win32In]::VkKeyScanW($ch)
+          # No key for it, or one that needs Ctrl / Alt (AltGr) on this
+          # layout: SendKeys knows how to type it.
+          if ($scan -eq -1 -or ((($scan -shr 8) -band 6) -ne 0)) {
+            Add-Type -AssemblyName System.Windows.Forms
+            $t = [string]$ch; if ('+^%~(){}[]'.Contains($t)) { $t = '{' + $t + '}' }
+            [System.Windows.Forms.SendKeys]::SendWait($t)
+            if ($i -lt $keys.Count - 1) { [System.Threading.Thread]::Sleep($gap) }
+            continue
+          }
+          $vk = $scan -band 0xFF; $shift = ((($scan -shr 8) -band 1) -eq 1) -and -not $mods.Contains('s')
+        }
+        # KEYEVENTF_EXTENDEDKEY for the navigation keys, as the keyboard sends them.
+        $ext = 0; if (($vk -ge 0x21 -and $vk -le 0x28) -or $vk -eq 0x2D -or $vk -eq 0x2E) { $ext = 1 }
+        if ($shift) { [Win32In]::keybd_event(0x10, 0, 0, [IntPtr]::Zero) }
+        [Win32In]::keybd_event([byte]$vk, 0, $ext, [IntPtr]::Zero)
+        [System.Threading.Thread]::Sleep($hold)
+        [Win32In]::keybd_event([byte]$vk, 0, ($ext -bor 2), [IntPtr]::Zero)
+        if ($shift) { [Win32In]::keybd_event(0x10, 0, 2, [IntPtr]::Zero) }
+        if ($i -lt $keys.Count - 1) { [System.Threading.Thread]::Sleep($gap) }
+      }
+      if ($down.Count -gt 0) { [System.Threading.Thread]::Sleep($trail) }
+    } finally {
+      [array]::Reverse($down)
+      foreach ($m in $down) { [Win32In]::keybd_event([byte]$m, 0, 2, [IntPtr]::Zero) }
+    }
   }
   'cursor' {
     # Where the real cursor is right now, as "x,y" (Capture actions).
@@ -518,6 +604,10 @@ static func _loggable(cmd: String) -> String:
 		if parts[i] == "key":
 			parts[i + 1] = "<%d chars>" % parts[i + 1].length()
 			break
+	# A travel path is hundreds of points; its length says enough.
+	for i in parts.size():
+		if parts[i].contains(";"):
+			parts[i] = "<%d points>" % (parts[i].count(";") + 1)
 	return " ".join(parts)
 
 
@@ -688,10 +778,21 @@ func mouse_button(button: int, pressed: bool, pos: Vector2i) -> void:
 	_run_sync(PackedStringArray([verb, str(pos.x), str(pos.y), str(button)]))
 
 
-func run_captured(kind: String, button: int, from: Vector2i, to: Vector2i, ms: int, ghost: bool) -> Array:
-	var line := _run_sync(PackedStringArray([
+## Moves the real cursor through `path` over `ms` (the helper's 'path').
+func move_path(path: PackedVector2Array, ms: int) -> void:
+	if path.is_empty():
+		return
+	_last_pos = Vector2i(path[path.size() - 1].round())
+	_run_sync(PackedStringArray(["path", MousePathT.encode(path), str(ms)]), ms + SERVER_READ_TIMEOUT_MS)
+
+
+func run_captured(kind: String, button: int, from: Vector2i, to: Vector2i, ms: int, ghost: bool, path: PackedVector2Array) -> Array:
+	var cmd := PackedStringArray([
 		"cap", kind, "1" if ghost else "0", str(button),
-		str(from.x), str(from.y), str(to.x), str(to.y), str(ms)]), ms + 10000)
+		str(from.x), str(from.y), str(to.x), str(to.y), str(ms)])
+	if kind != "click" and path.size() > 1:
+		cmd.append(MousePathT.encode(path))
+	var line := _run_sync(cmd, ms + 10000)
 	if last_skipped:
 		return []
 	var saved := _parse_point(line, 0)
@@ -714,6 +815,14 @@ func send_keys(text: String) -> void:
 	if clean.is_empty():
 		return
 	_run_sync(PackedStringArray(["key", Marshalls.utf8_to_base64(clean)]), 30000)
+
+
+func hold_keys(mods: String, keys: PackedStringArray, lead: int, hold: int, gap: int, trail: int) -> void:
+	if keys.is_empty():
+		return
+	var total := lead + trail + keys.size() * (hold + gap)
+	_run_sync(PackedStringArray(["hold", mods if not mods.is_empty() else "-", ",".join(keys),
+		str(lead), str(hold), str(gap), str(trail)]), total + SERVER_READ_TIMEOUT_MS)
 
 
 func get_cursor_pos() -> Vector2i:

@@ -154,11 +154,17 @@ func _build_ui() -> void:
 
 	root.add_child(_build_toolbar())
 
+	# The panels sit in a plain Control (not a container) so the lock
+	# blocker can lie over them: a container would lay the blocker out as
+	# one more pane and squeeze it to nothing.
+	var stage := Control.new()
+	stage.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	stage.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	root.add_child(stage)
 	var split := HSplitContainer.new()
-	split.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	split.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	split.set_anchors_preset(Control.PRESET_FULL_RECT)
 	split.split_offset = 280
-	root.add_child(split)
+	stage.add_child(split)
 	_main_split = split
 
 	split.add_child(_build_layer_panel())
@@ -177,13 +183,14 @@ func _build_ui() -> void:
 	editor_panel.size_flags_stretch_ratio = 2.0
 	right_split.add_child(editor_panel)
 
+	# Over the panels while a Live run locks the builder: dims them and
+	# swallows every click (the toolbar above stays usable: Run / Stop).
 	_edit_lock_blocker = ColorRect.new()
 	_edit_lock_blocker.set_anchors_preset(Control.PRESET_FULL_RECT)
 	_edit_lock_blocker.color = Color(0.0, 0.0, 0.0, 0.20)
 	_edit_lock_blocker.mouse_filter = Control.MOUSE_FILTER_STOP
 	_edit_lock_blocker.visible = false
-	split.add_child(_edit_lock_blocker)
-	_edit_lock_blocker.move_to_front()
+	stage.add_child(_edit_lock_blocker)
 
 	root.add_child(_build_status_bar())
 
@@ -206,7 +213,8 @@ func _build_toolbar() -> Control:
 	hb.add_theme_constant_override("separation", 6)
 
 	# --- Playback ---------------------------------------------------------
-	play_btn = _tool_button("▶ Run!", _on_play_pressed)
+	play_btn = _icon_button(UiIconsT.play(), "", _on_play_pressed)
+	play_btn.text = _run_label()
 	hb.add_child(play_btn)
 
 	var backend_lbl := Label.new()
@@ -227,14 +235,19 @@ func _build_toolbar() -> Control:
 	var loop_lbl := Label.new()
 	loop_lbl.text = "Loop"
 	hb.add_child(loop_lbl)
-	loop_prev_btn = _tool_button("◀", func(): _switch_loop(-1))
+	loop_prev_btn = _icon_button(UiIconsT.left(), "Previous loop", func(): _switch_loop(-1))
 	hb.add_child(loop_prev_btn)
 	loop_picker = OptionButton.new()
-	loop_picker.custom_minimum_size = Vector2(170, 0)
+	# One width whatever the loop is called: room for "1. @@@@@@@@ *", a
+	# longer name is cut with "…" (the list that drops down shows it whole).
+	loop_picker.fit_to_longest_item = false
+	loop_picker.clip_text = true
+	loop_picker.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+	loop_picker.custom_minimum_size = Vector2(_option_button_width(loop_picker, "1. @@@@@@@@ *"), 0)
 	loop_picker.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
 	loop_picker.item_selected.connect(_on_loop_picker_selected)
 	hb.add_child(loop_picker)
-	loop_next_btn = _tool_button("▶", func(): _switch_loop(1))
+	loop_next_btn = _icon_button(UiIconsT.right(), "Next loop", func(): _switch_loop(1))
 	hb.add_child(loop_next_btn)
 
 	save_btn = _tool_button("Save", _on_save)
@@ -346,9 +359,9 @@ func _build_layer_panel() -> Control:
 	vb.add_child(layer_list)
 
 	var btns := HBoxContainer.new()
-	btns.add_child(_tool_button("＋", func(): ProjectData.add_layer()))
-	btns.add_child(_tool_button("▲", func(): ProjectData.move_layer(ProjectData.active_layer_index, -1)))
-	btns.add_child(_tool_button("▼", func(): ProjectData.move_layer(ProjectData.active_layer_index, 1)))
+	btns.add_child(_icon_button(UiIconsT.plus(), "Add a layer", func(): ProjectData.add_layer()))
+	btns.add_child(_icon_button(UiIconsT.up(), "Move this layer up", func(): ProjectData.move_layer(ProjectData.active_layer_index, -1)))
+	btns.add_child(_icon_button(UiIconsT.down(), "Move this layer down", func(): ProjectData.move_layer(ProjectData.active_layer_index, 1)))
 	btns.add_child(_tool_button("Rename", func(): _rename_layer_dialog(ProjectData.active_layer_index)))
 	btns.add_child(_icon_button(UiIconsT.copy(), "Duplicate this layer", func(): ProjectData.duplicate_layer(ProjectData.active_layer_index)))
 	btns.add_child(_icon_button(UiIconsT.trash(), "Delete this layer", _confirm_delete_layer))
@@ -375,8 +388,7 @@ func _build_layer_panel() -> Control:
 	vb.add_child(ov_row)
 
 	var nav_row := HBoxContainer.new()
-	var prev_layer_btn := _tool_button("◀", func(): _go_overlay_layer(-1))
-	prev_layer_btn.tooltip_text = "Previous layer"
+	var prev_layer_btn := _icon_button(UiIconsT.left(), "Previous layer", func(): _go_overlay_layer(-1))
 	nav_row.add_child(prev_layer_btn)
 	overlay_label = Label.new()
 	overlay_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -384,8 +396,7 @@ func _build_layer_panel() -> Control:
 	overlay_label.clip_text = true
 	overlay_label.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 	nav_row.add_child(overlay_label)
-	var next_layer_btn := _tool_button("▶", func(): _go_overlay_layer(1))
-	next_layer_btn.tooltip_text = "Next layer"
+	var next_layer_btn := _icon_button(UiIconsT.right(), "Next layer", func(): _go_overlay_layer(1))
 	nav_row.add_child(next_layer_btn)
 	vb.add_child(nav_row)
 
@@ -443,7 +454,8 @@ func _build_action_panel() -> Control:
 
 	var btns := HBoxContainer.new()
 	var add_btn := MenuButton.new()
-	add_btn.text = "＋ Add Action"
+	add_btn.text = "Add Action"
+	add_btn.icon = UiIconsT.plus()
 	add_btn.flat = false
 	var pm := add_btn.get_popup()
 	for t in [LoopActionT.Type.MOVE, LoopActionT.Type.CLICK, LoopActionT.Type.DRAG,
@@ -455,8 +467,8 @@ func _build_action_panel() -> Control:
 	var dup_btn := _icon_button(UiIconsT.copy(), "Duplicate the selected action", func(): ProjectData.duplicate_action(ProjectData.selected_action_index))
 	dup_btn.text = "Duplicate"
 	btns.add_child(dup_btn)
-	btns.add_child(_tool_button("▲", func(): ProjectData.move_action(ProjectData.selected_action_index, -1)))
-	btns.add_child(_tool_button("▼", func(): ProjectData.move_action(ProjectData.selected_action_index, 1)))
+	btns.add_child(_icon_button(UiIconsT.up(), "Move the selected action up", func(): ProjectData.move_action(ProjectData.selected_action_index, -1)))
+	btns.add_child(_icon_button(UiIconsT.down(), "Move the selected action down", func(): ProjectData.move_action(ProjectData.selected_action_index, 1)))
 	var delete_btn := _icon_button(UiIconsT.trash(), "Delete the selected action", _confirm_delete_action)
 	delete_btn.text = "Delete"
 	btns.add_child(delete_btn)
@@ -496,7 +508,8 @@ func _connect_signals() -> void:
 	Playback.playback_started.connect(func():
 		_stop_cooldown_token += 1
 		_stop_cooldown_active = false
-		play_btn.text = "■ Stop"
+		play_btn.icon = UiIconsT.stop()
+		play_btn.text = "Stop"
 		_refresh_edit_lock())
 	Playback.playback_stopped.connect(func():
 		var was_real := Playback.backend != null and Playback.backend.is_real()
@@ -533,10 +546,26 @@ func _on_project_replaced() -> void:
 	_refresh_loop_stack_ui()
 
 
-func _on_action_executing(layer_index: int, action_index: int) -> void:
-	if layer_index == ProjectData.active_layer_index and action_index >= 0 \
-			and action_index < action_list.item_count:
-		action_list.select(action_index)
+## The tint behind the step (and the layer) a run is on. The selection is
+## left alone: what you picked stays picked and the editor keeps showing it.
+const RUNNING_TINT := Color(0.25, 0.55, 1.0, 0.28)
+
+
+func _on_action_executing(_layer_index: int, _action_index: int) -> void:
+	_refresh_running_marks()
+
+
+## Tints the row of the step a run is on in the action list (when its layer
+## is the one shown) and of its layer in the layer list; clears both when
+## nothing runs.
+func _refresh_running_marks() -> void:
+	var li := Playback.current_layer_index if Playback.is_running else -1
+	var ai := Playback.current_action_index if Playback.is_running else -1
+	for i in action_list.item_count:
+		var on := li == _shown_layer_index and i == ai
+		action_list.set_item_custom_bg_color(i, RUNNING_TINT if on else Color(0, 0, 0, 0))
+	for i in layer_list.item_count:
+		layer_list.set_item_custom_bg_color(i, RUNNING_TINT if i == li else Color(0, 0, 0, 0))
 
 
 # ======================================================================
@@ -546,10 +575,15 @@ func _refresh_layers() -> void:
 	layer_list.clear()
 	for i in ProjectData.project.layers.size():
 		var l: LoopLayerT = ProjectData.project.layers[i]
-		var mark := "" if l.enabled else " (off)"
-		layer_list.add_item("%s%s" % [l.name, mark])
+		# Two marks in front of the name: runs / does not run, drawn / not
+		# drawn on the overlay (the same check and cross as the action list).
+		layer_list.add_item(l.name, UiIconsT.layer_marks(l.enabled, l.visible))
 		layer_list.set_item_custom_fg_color(i, l.color)
+		var tip := "Runs in the loop" if l.enabled else "Does not run (off)"
+		tip += ", drawn on the overlay" if l.visible else ", not drawn on the overlay"
+		layer_list.set_item_tooltip(i, tip)
 	_refresh_layers_selection()
+	_refresh_running_marks()
 
 
 func _refresh_layers_selection() -> void:
@@ -574,8 +608,7 @@ func _refresh_actions() -> void:
 		actions_header.text = "Actions — %s" % l.name
 		for i in l.actions.size():
 			var a: LoopActionT = l.actions[i]
-			var prefix := "✔ " if a.enabled else "✖ "
-			action_list.add_item("%s%d. %s" % [prefix, i + 1, a.describe()])
+			action_list.add_item("%d. %s" % [i + 1, a.describe()], UiIconsT.mark(a.enabled))
 			if not a.comment.is_empty():
 				action_list.set_item_tooltip(i, a.comment)
 	else:
@@ -583,6 +616,7 @@ func _refresh_actions() -> void:
 	# Remember which layer is shown so selection_changed knows when to repopulate.
 	_shown_layer_index = ProjectData.active_layer_index
 	_refresh_actions_selection()
+	_refresh_running_marks()
 
 
 func _refresh_actions_selection() -> void:
@@ -598,8 +632,8 @@ func _update_list_item(layer_index: int, index: int) -> void:
 	if layer_index != _shown_layer_index or index < 0 or index >= action_list.item_count:
 		return
 	var a: LoopActionT = ProjectData.project.layers[layer_index].actions[index]
-	var prefix := "✔ " if a.enabled else "✖ "
-	action_list.set_item_text(index, "%s%d. %s" % [prefix, index + 1, a.describe()])
+	action_list.set_item_text(index, "%d. %s" % [index + 1, a.describe()])
+	action_list.set_item_icon(index, UiIconsT.mark(a.enabled))
 
 
 ## True while the action the editor was built for is still at the place it
@@ -666,9 +700,7 @@ func _rebuild_editor() -> void:
 	match a.type:
 		LoopActionT.Type.MOVE:
 			_add_point_fields(a, false)
-			_add_range_field("Duration (ms)", a.duration_ms, a.duration_ms_max, 0, 60000, func(lo: int, hi: int):
-				a.duration_ms = lo
-				a.duration_ms_max = hi)
+			_add_duration_field(a)
 			_add_captures_field(a)
 		LoopActionT.Type.CLICK:
 			_add_point_fields(a, false)
@@ -677,9 +709,7 @@ func _rebuild_editor() -> void:
 		LoopActionT.Type.DRAG:
 			_add_point_fields(a, true)
 			_add_button_field(a)
-			_add_range_field("Duration (ms)", a.duration_ms, a.duration_ms_max, 0, 60000, func(lo: int, hi: int):
-				a.duration_ms = lo
-				a.duration_ms_max = hi)
+			_add_duration_field(a)
 			_add_captures_field(a)
 		LoopActionT.Type.KEY:
 			_add_keys_field(a)
@@ -698,6 +728,10 @@ func _rebuild_editor() -> void:
 			_add_capture_mode_field(a)
 
 	_add_comment_field(a)
+	# Built during a Live run (the engine can switch an action off): locked
+	# like everything else.
+	if _is_interaction_locked():
+		_set_controls_locked(editor_box, true)
 	_loading_editor = false
 
 
@@ -724,7 +758,7 @@ func _add_point_fields(a: LoopActionT, second: bool) -> void:
 	_add_range_field("Y", a.y, a.y_max, -20000, 20000, func(lo: int, hi: int):
 		a.y = lo
 		a.y_max = hi)
-	editor_box.add_child(_grab_button("🎯 Pick on screen", func():
+	editor_box.add_child(_grab_button(UiIconsT.target(), "Pick on screen", func():
 		_begin_point_pick(func(g: Vector2i):
 			var rx := _recentre_range(a.x, a.x_max, g.x)
 			var ry := _recentre_range(a.y, a.y_max, g.y)
@@ -740,7 +774,7 @@ func _add_point_fields(a: LoopActionT, second: bool) -> void:
 		_add_range_field("Y2", a.y2, a.y2_max, -20000, 20000, func(lo: int, hi: int):
 			a.y2 = lo
 			a.y2_max = hi)
-		editor_box.add_child(_grab_button("🎯 Pick B on screen", func():
+		editor_box.add_child(_grab_button(UiIconsT.target(), "Pick B on screen", func():
 			_begin_point_pick(func(g: Vector2i):
 				var rx := _recentre_range(a.x2, a.x2_max, g.x)
 				var ry := _recentre_range(a.y2, a.y2_max, g.y)
@@ -779,7 +813,7 @@ func _add_rect_fields(a: LoopActionT) -> void:
 		set_xy_editable.call(not v)
 		_after_edit())
 	row.add_child(follow)
-	row.add_child(_grab_button("🎯 Pick rect on screen", func():
+	row.add_child(_grab_button(UiIconsT.target(), "Pick rect on screen", func():
 		_begin_rect_pick(func(r: Rect2i):
 			# A dragged rect is exact: fixed position and size.
 			a.x = r.position.x
@@ -808,7 +842,13 @@ func _add_button_field(a: LoopActionT) -> void:
 
 
 func _add_keys_field(a: LoopActionT) -> void:
-	var row := _row("Keys")
+	# The label is the "~Keys" checkbox: checked, the keys are typed
+	# one at a time with random pauses, like a hand (a combo stays together).
+	var row := _row_toggle("Keys", a.keys_paced,
+		"What to type, in SendKeys format.\nChecked: typed one key at a time with random pauses between them, like a person would; combos such as ^c stay one press.",
+		func(v: bool):
+			a.keys_paced = v
+			_after_edit())
 	var le := LineEdit.new()
 	le.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	le.text = a.keys
@@ -882,13 +922,13 @@ func _add_color_field(a: LoopActionT) -> void:
 	# The two sample buttons on their own row, so the editor never needs to
 	# scroll sideways.
 	var buttons := HBoxContainer.new()
-	var just := _grab_button("🎨 Just sample", func():
+	var just := _grab_button(UiIconsT.dropper(), "Just sample", func():
 		# Pick a point and read its colour only; the rect stays where it is.
 		_begin_point_pick(func(g: Vector2i):
 			_sample_color_into(a, g), true))
 	just.tooltip_text = "Sample a colour on screen without moving the rect."
 	buttons.add_child(just)
-	var pick := _grab_button("🎯 Pick & sample", func():
+	var pick := _grab_button(UiIconsT.target(), "Pick & sample", func():
 		_begin_point_pick(func(g: Vector2i):
 			# Centre the (smallest) rect on the picked point, so the pixel
 			# sampled here is inside every rect playback can scan (and is the
@@ -904,13 +944,20 @@ func _add_color_field(a: LoopActionT) -> void:
 	editor_box.add_child(buttons)
 
 
+## What a colour that is not found does: skip the rest of the layer or stop
+## the loop. The label is the "~If not found" checkbox: checked (the
+## default), a Safe run carries on regardless, so the whole loop can be
+## walked through; Live keeps to the choice.
 func _add_on_fail_field(a: LoopActionT) -> void:
-	var row := _row("If not found")
+	var row := _row_toggle("If not found", a.safe_continue,
+		"What happens when the colour is not there.\nChecked: in Safe mode nothing is skipped or stopped, so you can walk through the whole loop; Live keeps to the choice.",
+		func(v: bool):
+			a.safe_continue = v
+			_after_edit())
 	var opt := OptionButton.new()
-	opt.add_item("Continue", LoopActionT.OnFail.CONTINUE)
 	opt.add_item("Skip rest of layer", LoopActionT.OnFail.SKIP_LAYER)
 	opt.add_item("Stop loop", LoopActionT.OnFail.STOP_LOOP)
-	opt.select(a.on_fail)
+	opt.select(opt.get_item_index(a.on_fail))
 	opt.item_selected.connect(func(i):
 		a.on_fail = opt.get_item_id(i)
 		_after_edit())
@@ -1085,13 +1132,31 @@ class RangePair:
 ## Adds a labelled RangePair row to the editor and returns the pair (for
 ## callers that need to toggle it later). `setter` receives (lo, hi).
 func _add_range_field(label: String, lo: int, hi: int, min_v: int, max_v: int, setter: Callable) -> RangePair:
-	var row := _row(label)
+	return _add_range_field_in(_row(label), lo, hi, min_v, max_v, setter)
+
+
+## A RangePair added to `row` (which already holds its label or toggle).
+func _add_range_field_in(row: Container, lo: int, hi: int, min_v: int, max_v: int, setter: Callable) -> RangePair:
 	var pair := RangePair.new()
 	pair.build(row, lo, hi, min_v, max_v, func(l: int, h: int):
 		setter.call(l, h)
 		_after_edit())
 	editor_box.add_child(row)
 	return pair
+
+
+## A Move / Drag's duration: how long the travel takes. Its label is a
+## checkbox, "~Duration (ms)": checked, the cursor wanders a
+## little on the way, like a hand, without moving where it starts or lands.
+func _add_duration_field(a: LoopActionT) -> void:
+	var row := _row_toggle("Duration (ms)", a.wiggle,
+		"How long the cursor takes to get there (ms).\nChecked: it wanders a little on the way, like a hand would; where it starts and lands stays exact.",
+		func(v: bool):
+			a.wiggle = v
+			_after_edit())
+	_add_range_field_in(row, a.duration_ms, a.duration_ms_max, 0, 60000, func(lo: int, hi: int):
+		a.duration_ms = lo
+		a.duration_ms_max = hi)
 
 
 # ======================================================================
@@ -1399,7 +1464,8 @@ func _refresh_loop_stack_ui() -> void:
 		if name.is_empty():
 			name = str(id)
 		var dirty_mark := " *" if ProjectData.loop_is_pending(id) else ""
-		loop_picker.add_item("%d. %s%s" % [id, _shorten_text(name, 28), dirty_mark], id)
+		# Numbered by place in the list (the store id behind it only ever grows).
+		loop_picker.add_item("%d. %s%s" % [loop_picker.item_count + 1, _shorten_text(name, 28), dirty_mark], id)
 		if id == previous_id:
 			active_idx = loop_picker.item_count - 1
 	if active_idx >= 0:
@@ -1414,8 +1480,13 @@ func _refresh_loop_stack_ui() -> void:
 		save_btn.text = "Save%s" % pending_mark
 	var loop_name := _shorten_text(ProjectData.active_loop_display_name(), 32)
 	var pending_text := " (unsaved)" if ProjectData.active_loop_is_pending() else ""
-	var idx := maxi(0, ProjectData.active_loop_stack_index()) + 1
-	status_label.text = "Loop %d/%d · %s%s" % [idx, maxi(1, total), loop_name, pending_text]
+	status_label.text = "Loop %d/%d · %s%s" % [_active_loop_number(), maxi(1, total), loop_name, pending_text]
+
+
+## The open loop's number as the picker and the status line show it: its
+## place in the list, 1 up (not its store id, which only ever grows).
+func _active_loop_number() -> int:
+	return maxi(0, ProjectData.active_loop_stack_index()) + 1
 
 
 func _on_play_pressed() -> void:
@@ -1442,6 +1513,21 @@ func _switch_loop(delta: int) -> void:
 func _on_backend_selected(i: int) -> void:
 	Playback.set_backend(backend_option.get_item_id(i))
 	_refresh_edit_lock()
+	_refresh_run_label()
+
+
+## "Run?" in Safe mode (nothing real happens), "Run!" in Live. Left alone
+## while a run is going or the button is counting down after one.
+func _refresh_run_label() -> void:
+	if play_btn == null or Playback.is_running or _stop_cooldown_active:
+		return
+	play_btn.icon = UiIconsT.play()
+	play_btn.text = _run_label()
+
+
+func _run_label() -> String:
+	var live := Playback.backend != null and Playback.backend.is_real()
+	return "Run!" if live else "Run?"
 
 
 func _refresh_edit_lock() -> void:
@@ -1478,6 +1564,11 @@ func _set_controls_locked(node: Node, locked: bool) -> void:
 		(node as TextEdit).editable = not locked
 	elif node is SpinBox:
 		(node as SpinBox).editable = not locked
+	elif node is ItemList:
+		# The lists have no disabled state: shut their input off instead, so
+		# no click or arrow key moves the selection (and rebuilds the editor).
+		(node as ItemList).mouse_filter = Control.MOUSE_FILTER_IGNORE if locked else Control.MOUSE_FILTER_STOP
+		(node as ItemList).focus_mode = Control.FOCUS_NONE if locked else Control.FOCUS_ALL
 	elif node.has_method("set_disabled"):
 		node.call("set_disabled", locked)
 
@@ -1524,7 +1615,7 @@ func _animate_stop_feedback(include_safety: bool) -> void:
 		if play_btn != null:
 			play_btn.text = "Safety."
 		if status_label != null:
-			status_label.text = "Switched to Safe."
+			status_label.text = "%s Switched to Safe." % Playback.last_stop_reason
 		await get_tree().create_timer(STOP_COOLDOWN_STEP_SEC).timeout
 		if token != _stop_cooldown_token:
 			return
@@ -1539,8 +1630,7 @@ func _animate_stop_feedback(include_safety: bool) -> void:
 		if token != _stop_cooldown_token:
 			return
 	_stop_cooldown_active = false
-	if play_btn != null:
-		play_btn.text = "▶ Run!"
+	_refresh_run_label()
 	_refresh_edit_lock()
 
 
@@ -1550,7 +1640,7 @@ func _animate_stop_feedback(include_safety: bool) -> void:
 func _on_new() -> void:
 	_commit_pending_edits()
 	var id := ProjectData.create_loop(true)
-	status_label.text = "Opened new loop %d, \"%s\"." % [id, ProjectData.active_loop_display_name()]
+	status_label.text = "Opened new loop %d, \"%s\"." % [_active_loop_number(), ProjectData.active_loop_display_name()]
 
 
 func _on_save() -> void:
@@ -1566,7 +1656,7 @@ func _on_duplicate_loop() -> void:
 	var id := ProjectData.duplicate_loop()
 	if id < 0:
 		return
-	status_label.text = "Duplicated \"%s\" as loop %d, \"%s\"." % [from, id, ProjectData.active_loop_display_name()]
+	status_label.text = "Duplicated \"%s\" as loop %d, \"%s\"." % [from, _active_loop_number(), ProjectData.active_loop_display_name()]
 
 
 func _confirm_delete_loop() -> void:
@@ -1574,10 +1664,11 @@ func _confirm_delete_loop() -> void:
 	if id < 0 or ProjectData.project == null:
 		return
 	var layers := ProjectData.project.layers.size()
-	_confirm("Delete loop \"%s\" and its %d layer(s)? Its file is removed too." % [ProjectData.active_loop_display_name(), layers],
+	var name := ProjectData.active_loop_display_name()
+	_confirm("Delete loop \"%s\" and its %d layer(s)? Its file is removed too." % [name, layers],
 		func():
 			if ProjectData.delete_loop(id):
-				status_label.text = "Deleted loop %d." % id)
+				status_label.text = "Deleted loop \"%s\"." % name)
 
 
 func _on_export() -> void:
@@ -1646,7 +1737,7 @@ func _ask_import(path: String) -> void:
 		if id < 0:
 			status_label.text = "Import failed: %s is not a readable .loop file." % path.get_file()
 		else:
-			status_label.text = "Imported \"%s\" as loop %d." % [ProjectData.active_loop_display_name(), id]
+			status_label.text = "Imported \"%s\" as loop %d." % [ProjectData.active_loop_display_name(), _active_loop_number()]
 	_confirm(text, do_import, "Import")
 
 
@@ -1835,8 +1926,12 @@ func _tool_button(text: String, cb: Callable) -> Button:
 	return b
 
 
-func _grab_button(text: String, cb: Callable) -> Button:
+## An editor button that starts a pick on screen: an icon and what it picks.
+func _grab_button(icon: Texture2D, text: String, cb: Callable) -> Button:
 	var b := Button.new()
+	b.icon = icon
+	# Text right next to the icon, not centred away from it.
+	b.alignment = HORIZONTAL_ALIGNMENT_LEFT
 	b.text = text
 	b.focus_mode = Control.FOCUS_NONE
 	b.pressed.connect(cb)
@@ -1853,6 +1948,16 @@ func _icon_button(icon: Texture2D, tip: String, cb: Callable) -> Button:
 	return b
 
 
+## The width `btn` needs to show `sample` in full: the text, the drop-down
+## arrow and the button's own margins.
+func _option_button_width(btn: OptionButton, sample: String) -> float:
+	var font := btn.get_theme_font("font")
+	var text_w := font.get_string_size(sample, HORIZONTAL_ALIGNMENT_LEFT, -1, btn.get_theme_font_size("font_size")).x
+	var arrow_w := btn.get_theme_icon("arrow").get_width() + btn.get_theme_constant("arrow_margin")
+	var margins := btn.get_theme_stylebox("normal").get_minimum_size().x
+	return ceilf(text_w + arrow_w + margins + 2.0 * btn.get_theme_constant("h_separation"))
+
+
 func _row(label: String) -> HBoxContainer:
 	var row := HBoxContainer.new()
 	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -1860,6 +1965,23 @@ func _row(label: String) -> HBoxContainer:
 	l.text = label
 	l.custom_minimum_size = Vector2(120, 0)
 	row.add_child(l)
+	return row
+
+
+## A row whose label is a "~" checkbox ("~Keys"), like the toolbar's ~Delay
+## ms / ~Edit / ~Self: the "~" marks a setting with a random, hand-like
+## side that the box turns on. `on_toggle` gets the new state.
+func _row_toggle(label: String, checked: bool, tip: String, on_toggle: Callable) -> HBoxContainer:
+	var row := HBoxContainer.new()
+	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	var cb := CheckBox.new()
+	cb.text = "~" + label
+	cb.tooltip_text = tip
+	cb.focus_mode = Control.FOCUS_NONE
+	cb.button_pressed = checked
+	cb.custom_minimum_size = Vector2(120, 0)
+	cb.toggled.connect(on_toggle)
+	row.add_child(cb)
 	return row
 
 

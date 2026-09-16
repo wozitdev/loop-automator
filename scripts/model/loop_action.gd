@@ -25,7 +25,9 @@ const BUTTON_MIDDLE := 2
 
 ## How PIXEL_DETECT influences the rest of the layer when the colour is NOT found.
 enum OnFail {
-	CONTINUE,     ## Do nothing special, keep running
+	CONTINUE,     ## Keep running (what playback returns for a found colour; no
+	              ## longer offered as a setting — a file that has it is read
+	              ## as SKIP_LAYER)
 	SKIP_LAYER,   ## Skip the remaining actions in this layer this iteration
 	STOP_LOOP,    ## Stop playback entirely
 }
@@ -50,6 +52,13 @@ var capture_mode: int = CaptureMode.SAVE
 ## PIXEL_DETECT: centre the rect on the mouse (and keep it there as the mouse
 ## moves) instead of using the stored x / y.
 var follow_cursor: bool = false
+## MOVE / DRAG: wander a little on the way (see MousePath), the way a hand
+## does; where the travel starts and lands is not affected.
+var wiggle: bool = false
+## KEY: send the keys one at a time with a random pause between them, the
+## way typing goes, instead of all at once (see KeyStrokes for what "one
+## at a time" keeps together).
+var keys_paced: bool = false
 
 # Geometry / parameters (only the relevant ones are used per type). Every
 # numeric setting is a range: `x` .. `x_max` and so on. Each time the action
@@ -76,7 +85,11 @@ var duration_ms_max: int = 0
 var color: Color = Color(1, 1, 1, 1)
 var tolerance: int = 16
 var tolerance_max: int = 16
-var on_fail: int = OnFail.CONTINUE
+var on_fail: int = OnFail.SKIP_LAYER
+## PIXEL_DETECT: in Safe mode a colour that is not found changes nothing
+## (no skip, no stop), so a whole loop can be walked through; Live keeps
+## to `on_fail`.
+var safe_continue: bool = true
 
 
 ## A random integer in [lo, hi] (either order); lo == hi is just that value.
@@ -273,10 +286,13 @@ func to_dict() -> Dictionary:
 		"tolerance": tolerance,
 		"tolerance_max": tolerance_max,
 		"on_fail": on_fail,
+		"safe_continue": safe_continue,
 		"captures": captures,
 		"ghost_cursor": ghost_cursor,
 		"capture_mode": capture_mode,
 		"follow_cursor": follow_cursor,
+		"wiggle": wiggle,
+		"keys_paced": keys_paced,
 	}
 
 
@@ -308,12 +324,17 @@ static func from_dict(d: Dictionary) -> Self:
 	a.color = Color.html(String(d.get("color", "ffffffff")))
 	a.tolerance = int(d.get("tolerance", 16))
 	a.tolerance_max = int(d.get("tolerance_max", a.tolerance))
-	a.on_fail = int(d.get("on_fail", OnFail.CONTINUE))
+	a.on_fail = int(d.get("on_fail", OnFail.SKIP_LAYER))
+	if a.on_fail == OnFail.CONTINUE:
+		a.on_fail = OnFail.SKIP_LAYER
+	a.safe_continue = bool(d.get("safe_continue", true))
 	a.captures = bool(d.get("captures", false))
 	# "lag_compensation" is the pre-release name of the same option.
 	a.ghost_cursor = bool(d.get("ghost_cursor", d.get("lag_compensation", false)))
 	a.capture_mode = int(d.get("capture_mode", CaptureMode.SAVE))
 	a.follow_cursor = bool(d.get("follow_cursor", false))
+	a.wiggle = bool(d.get("wiggle", false))
+	a.keys_paced = bool(d.get("keys_paced", false))
 	return a
 
 
