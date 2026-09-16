@@ -206,7 +206,7 @@ func _build_toolbar() -> Control:
 	hb.add_theme_constant_override("separation", 6)
 
 	# --- Playback ---------------------------------------------------------
-	play_btn = _tool_button("▶ Run!", _on_play_pressed)
+	play_btn = _tool_button(_run_label(), _on_play_pressed)
 	hb.add_child(play_btn)
 
 	var backend_lbl := Label.new()
@@ -1453,6 +1453,20 @@ func _switch_loop(delta: int) -> void:
 func _on_backend_selected(i: int) -> void:
 	Playback.set_backend(backend_option.get_item_id(i))
 	_refresh_edit_lock()
+	_refresh_run_label()
+
+
+## "Run?" in Safe mode (nothing real happens), "Run!" in Live. Left alone
+## while a run is going or the button is counting down after one.
+func _refresh_run_label() -> void:
+	if play_btn == null or Playback.is_running or _stop_cooldown_active:
+		return
+	play_btn.text = _run_label()
+
+
+func _run_label() -> String:
+	var live := Playback.backend != null and Playback.backend.is_real()
+	return "▶ Run!" if live else "▶ Run?"
 
 
 func _refresh_edit_lock() -> void:
@@ -1550,8 +1564,7 @@ func _animate_stop_feedback(include_safety: bool) -> void:
 		if token != _stop_cooldown_token:
 			return
 	_stop_cooldown_active = false
-	if play_btn != null:
-		play_btn.text = "▶ Run!"
+	_refresh_run_label()
 	_refresh_edit_lock()
 
 
