@@ -215,8 +215,9 @@ Godot cannot synthesize OS-wide input on its own, so input is sent through a
 pluggable `InputBackend`:
 
 - **Safe** — *default*. Touches nothing on your OS; it only feeds the
-  overlay/status so you can design and dry-run a loop safely. Pixel-detect always
-  reports "found" so the flow continues.
+  overlay/status so you can design and dry-run a loop safely. Pixel Detect
+  still reads the real screen (a read touches nothing), so a Safe run takes
+  the same turns a Live one would.
 - **Live** — *experimental*. Drives the real cursor/keyboard and reads
   screen pixels via a small generated PowerShell helper (`input_helper.ps1`,
   see [Generated helpers](#generated-helpers))

@@ -164,6 +164,12 @@ func start() -> void:
 		# Only a real loop can take the focus away; a preview never needs it.
 		_stop_hotkey.start()
 		set_process(true)
+	else:
+		# A Safe run still reads the screen for its Pixel Detects: get the
+		# reader's helper up now rather than at the first detect.
+		var reader := get_screen_sampler()
+		if reader != null and reader.has_method("warm_up"):
+			reader.call("warm_up")
 	emit_signal("playback_started")
 	emit_signal("status", "Running…")
 	_run_loop(_generation)
@@ -535,14 +541,17 @@ func _mouse_pos() -> Vector2i:
 ## channel) anywhere in `rect` (the rect rolled for this run). Returns the
 ## screen position of the first match, or (-1, -1). The backend checks the
 ## rect's centre first — it is where "Pick & sample" read the colour from —
-## then a grid of every step-th pixel.
+## then a grid of every step-th pixel. A Safe run reads the real screen too
+## (a read touches nothing), through the same reader colour picking uses;
+## only where no screen reader exists at all is the colour taken as found,
+## so the loop still flows.
 func _find_color(action: LoopActionT, rect: Rect2i) -> Vector2i:
-	if not backend.is_real():
-		# Preview cannot read the real screen; treat as found so the loop flows.
+	var reader := backend if backend.is_real() else get_screen_sampler()
+	if reader == null:
 		return rect.get_center()
 	var step := maxi(1, int(ceil(sqrt(float(rect.size.x * rect.size.y) / float(DETECT_MAX_SAMPLES)))))
 	var tolerance := action.roll_tolerance()
-	var result := backend.find_color(rect, action.color, tolerance, step)
+	var result := reader.find_color(rect, action.color, tolerance, step)
 	if result.is_empty():
 		print("Pixel detect in [%d, %d, %d×%d]: screen read failed (see warning above) -> not found" % [rect.position.x, rect.position.y, rect.size.x, rect.size.y])
 		return Vector2i(-1, -1)
