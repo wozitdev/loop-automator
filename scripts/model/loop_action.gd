@@ -25,7 +25,9 @@ const BUTTON_MIDDLE := 2
 
 ## How PIXEL_DETECT influences the rest of the layer when the colour is NOT found.
 enum OnFail {
-	CONTINUE,     ## Do nothing special, keep running
+	CONTINUE,     ## Keep running (what playback returns for a found colour; no
+	              ## longer offered as a setting — a file that has it is read
+	              ## as SKIP_LAYER)
 	SKIP_LAYER,   ## Skip the remaining actions in this layer this iteration
 	STOP_LOOP,    ## Stop playback entirely
 }
@@ -83,7 +85,11 @@ var duration_ms_max: int = 0
 var color: Color = Color(1, 1, 1, 1)
 var tolerance: int = 16
 var tolerance_max: int = 16
-var on_fail: int = OnFail.CONTINUE
+var on_fail: int = OnFail.SKIP_LAYER
+## PIXEL_DETECT: in Safe mode a colour that is not found changes nothing
+## (no skip, no stop), so a whole loop can be walked through; Live keeps
+## to `on_fail`.
+var safe_continue: bool = true
 
 
 ## A random integer in [lo, hi] (either order); lo == hi is just that value.
@@ -280,6 +286,7 @@ func to_dict() -> Dictionary:
 		"tolerance": tolerance,
 		"tolerance_max": tolerance_max,
 		"on_fail": on_fail,
+		"safe_continue": safe_continue,
 		"captures": captures,
 		"ghost_cursor": ghost_cursor,
 		"capture_mode": capture_mode,
@@ -317,7 +324,10 @@ static func from_dict(d: Dictionary) -> Self:
 	a.color = Color.html(String(d.get("color", "ffffffff")))
 	a.tolerance = int(d.get("tolerance", 16))
 	a.tolerance_max = int(d.get("tolerance_max", a.tolerance))
-	a.on_fail = int(d.get("on_fail", OnFail.CONTINUE))
+	a.on_fail = int(d.get("on_fail", OnFail.SKIP_LAYER))
+	if a.on_fail == OnFail.CONTINUE:
+		a.on_fail = OnFail.SKIP_LAYER
+	a.safe_continue = bool(d.get("safe_continue", true))
 	a.captures = bool(d.get("captures", false))
 	# "lag_compensation" is the pre-release name of the same option.
 	a.ghost_cursor = bool(d.get("ghost_cursor", d.get("lag_compensation", false)))

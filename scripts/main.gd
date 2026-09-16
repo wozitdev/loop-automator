@@ -944,13 +944,20 @@ func _add_color_field(a: LoopActionT) -> void:
 	editor_box.add_child(buttons)
 
 
+## What a colour that is not found does: skip the rest of the layer or stop
+## the loop. The label is the "~If not found" checkbox: checked (the
+## default), a Safe run carries on regardless, so the whole loop can be
+## walked through; Live keeps to the choice.
 func _add_on_fail_field(a: LoopActionT) -> void:
-	var row := _row("If not found")
+	var row := _row_toggle("If not found", a.safe_continue,
+		"What happens when the colour is not there.\nChecked: in Safe mode nothing is skipped or stopped, so you can walk through the whole loop; Live keeps to the choice.",
+		func(v: bool):
+			a.safe_continue = v
+			_after_edit())
 	var opt := OptionButton.new()
-	opt.add_item("Continue", LoopActionT.OnFail.CONTINUE)
 	opt.add_item("Skip rest of layer", LoopActionT.OnFail.SKIP_LAYER)
 	opt.add_item("Stop loop", LoopActionT.OnFail.STOP_LOOP)
-	opt.select(a.on_fail)
+	opt.select(opt.get_item_index(a.on_fail))
 	opt.item_selected.connect(func(i):
 		a.on_fail = opt.get_item_id(i)
 		_after_edit())

@@ -322,8 +322,12 @@ func _execute_action(action: LoopActionT, layer_index: int, action_index: int) -
 				_last_event = "Pixel detect: found at (%d, %d)." % [hit.x, hit.y]
 			else:
 				_last_event = "Pixel detect: not found."
+			# ~If not found: a Safe run walks on regardless.
+			var walk_on := not found and action.safe_continue and not backend.is_real()
+			if walk_on:
+				_last_event = "Pixel detect: not found (Safe: carrying on)."
 			emit_signal("status", _last_event)
-			if not found:
+			if not found and not walk_on:
 				return action.on_fail
 		LoopActionT.Type.CAPTURE:
 			if action.capture_mode == LoopActionT.CaptureMode.SAVE:

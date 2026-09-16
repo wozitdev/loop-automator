@@ -81,8 +81,9 @@ layer 1, just broken out so you can view each layer's visuals separately.
   picking, a swatch next to the cursor previews the colour under it. Tick
   **Follow Cursor** and the rect is centred on the mouse instead of X / Y — it
   moves with the mouse on the overlay and is scanned wherever the mouse is when
-  the action runs. If *not*
-  found you can **Continue**, **Skip the rest of the layer**, or **Stop** the loop.
+  the action runs. If *not* found the loop **skips the rest of the layer** or
+  **stops**; with **~If not found** checked (the default) a Safe run carries
+  on regardless, so the whole loop can be walked through.
 - **Capture** — **Save** remembers where the mouse is right now; **Load** moves
   it back to the last saved position. There is one saved position per run (it is
   cleared when you press Play). A Load that runs before anything was saved does
