@@ -206,7 +206,8 @@ func _build_toolbar() -> Control:
 	hb.add_theme_constant_override("separation", 6)
 
 	# --- Playback ---------------------------------------------------------
-	play_btn = _tool_button(_run_label(), _on_play_pressed)
+	play_btn = _icon_button(UiIconsT.play(), "", _on_play_pressed)
+	play_btn.text = _run_label()
 	hb.add_child(play_btn)
 
 	var backend_lbl := Label.new()
@@ -227,7 +228,7 @@ func _build_toolbar() -> Control:
 	var loop_lbl := Label.new()
 	loop_lbl.text = "Loop"
 	hb.add_child(loop_lbl)
-	loop_prev_btn = _tool_button("◀", func(): _switch_loop(-1))
+	loop_prev_btn = _icon_button(UiIconsT.left(), "Previous loop", func(): _switch_loop(-1))
 	hb.add_child(loop_prev_btn)
 	loop_picker = OptionButton.new()
 	# One width whatever the loop is called: room for "1. @@@@@@@@ *", a
@@ -239,7 +240,7 @@ func _build_toolbar() -> Control:
 	loop_picker.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
 	loop_picker.item_selected.connect(_on_loop_picker_selected)
 	hb.add_child(loop_picker)
-	loop_next_btn = _tool_button("▶", func(): _switch_loop(1))
+	loop_next_btn = _icon_button(UiIconsT.right(), "Next loop", func(): _switch_loop(1))
 	hb.add_child(loop_next_btn)
 
 	save_btn = _tool_button("Save", _on_save)
@@ -351,9 +352,9 @@ func _build_layer_panel() -> Control:
 	vb.add_child(layer_list)
 
 	var btns := HBoxContainer.new()
-	btns.add_child(_tool_button("＋", func(): ProjectData.add_layer()))
-	btns.add_child(_tool_button("▲", func(): ProjectData.move_layer(ProjectData.active_layer_index, -1)))
-	btns.add_child(_tool_button("▼", func(): ProjectData.move_layer(ProjectData.active_layer_index, 1)))
+	btns.add_child(_icon_button(UiIconsT.plus(), "Add a layer", func(): ProjectData.add_layer()))
+	btns.add_child(_icon_button(UiIconsT.up(), "Move this layer up", func(): ProjectData.move_layer(ProjectData.active_layer_index, -1)))
+	btns.add_child(_icon_button(UiIconsT.down(), "Move this layer down", func(): ProjectData.move_layer(ProjectData.active_layer_index, 1)))
 	btns.add_child(_tool_button("Rename", func(): _rename_layer_dialog(ProjectData.active_layer_index)))
 	btns.add_child(_icon_button(UiIconsT.copy(), "Duplicate this layer", func(): ProjectData.duplicate_layer(ProjectData.active_layer_index)))
 	btns.add_child(_icon_button(UiIconsT.trash(), "Delete this layer", _confirm_delete_layer))
@@ -380,8 +381,7 @@ func _build_layer_panel() -> Control:
 	vb.add_child(ov_row)
 
 	var nav_row := HBoxContainer.new()
-	var prev_layer_btn := _tool_button("◀", func(): _go_overlay_layer(-1))
-	prev_layer_btn.tooltip_text = "Previous layer"
+	var prev_layer_btn := _icon_button(UiIconsT.left(), "Previous layer", func(): _go_overlay_layer(-1))
 	nav_row.add_child(prev_layer_btn)
 	overlay_label = Label.new()
 	overlay_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -389,8 +389,7 @@ func _build_layer_panel() -> Control:
 	overlay_label.clip_text = true
 	overlay_label.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 	nav_row.add_child(overlay_label)
-	var next_layer_btn := _tool_button("▶", func(): _go_overlay_layer(1))
-	next_layer_btn.tooltip_text = "Next layer"
+	var next_layer_btn := _icon_button(UiIconsT.right(), "Next layer", func(): _go_overlay_layer(1))
 	nav_row.add_child(next_layer_btn)
 	vb.add_child(nav_row)
 
@@ -448,7 +447,8 @@ func _build_action_panel() -> Control:
 
 	var btns := HBoxContainer.new()
 	var add_btn := MenuButton.new()
-	add_btn.text = "＋ Add Action"
+	add_btn.text = "Add Action"
+	add_btn.icon = UiIconsT.plus()
 	add_btn.flat = false
 	var pm := add_btn.get_popup()
 	for t in [LoopActionT.Type.MOVE, LoopActionT.Type.CLICK, LoopActionT.Type.DRAG,
@@ -460,8 +460,8 @@ func _build_action_panel() -> Control:
 	var dup_btn := _icon_button(UiIconsT.copy(), "Duplicate the selected action", func(): ProjectData.duplicate_action(ProjectData.selected_action_index))
 	dup_btn.text = "Duplicate"
 	btns.add_child(dup_btn)
-	btns.add_child(_tool_button("▲", func(): ProjectData.move_action(ProjectData.selected_action_index, -1)))
-	btns.add_child(_tool_button("▼", func(): ProjectData.move_action(ProjectData.selected_action_index, 1)))
+	btns.add_child(_icon_button(UiIconsT.up(), "Move the selected action up", func(): ProjectData.move_action(ProjectData.selected_action_index, -1)))
+	btns.add_child(_icon_button(UiIconsT.down(), "Move the selected action down", func(): ProjectData.move_action(ProjectData.selected_action_index, 1)))
 	var delete_btn := _icon_button(UiIconsT.trash(), "Delete the selected action", _confirm_delete_action)
 	delete_btn.text = "Delete"
 	btns.add_child(delete_btn)
@@ -501,7 +501,8 @@ func _connect_signals() -> void:
 	Playback.playback_started.connect(func():
 		_stop_cooldown_token += 1
 		_stop_cooldown_active = false
-		play_btn.text = "■ Stop"
+		play_btn.icon = UiIconsT.stop()
+		play_btn.text = "Stop"
 		_refresh_edit_lock())
 	Playback.playback_stopped.connect(func():
 		var was_real := Playback.backend != null and Playback.backend.is_real()
@@ -579,8 +580,7 @@ func _refresh_actions() -> void:
 		actions_header.text = "Actions — %s" % l.name
 		for i in l.actions.size():
 			var a: LoopActionT = l.actions[i]
-			var prefix := "✔ " if a.enabled else "✖ "
-			action_list.add_item("%s%d. %s" % [prefix, i + 1, a.describe()])
+			action_list.add_item("%d. %s" % [i + 1, a.describe()], UiIconsT.mark(a.enabled))
 			if not a.comment.is_empty():
 				action_list.set_item_tooltip(i, a.comment)
 	else:
@@ -603,8 +603,8 @@ func _update_list_item(layer_index: int, index: int) -> void:
 	if layer_index != _shown_layer_index or index < 0 or index >= action_list.item_count:
 		return
 	var a: LoopActionT = ProjectData.project.layers[layer_index].actions[index]
-	var prefix := "✔ " if a.enabled else "✖ "
-	action_list.set_item_text(index, "%s%d. %s" % [prefix, index + 1, a.describe()])
+	action_list.set_item_text(index, "%d. %s" % [index + 1, a.describe()])
+	action_list.set_item_icon(index, UiIconsT.mark(a.enabled))
 
 
 ## True while the action the editor was built for is still at the place it
@@ -729,7 +729,7 @@ func _add_point_fields(a: LoopActionT, second: bool) -> void:
 	_add_range_field("Y", a.y, a.y_max, -20000, 20000, func(lo: int, hi: int):
 		a.y = lo
 		a.y_max = hi)
-	editor_box.add_child(_grab_button("🎯 Pick on screen", func():
+	editor_box.add_child(_grab_button(UiIconsT.target(), "Pick on screen", func():
 		_begin_point_pick(func(g: Vector2i):
 			var rx := _recentre_range(a.x, a.x_max, g.x)
 			var ry := _recentre_range(a.y, a.y_max, g.y)
@@ -745,7 +745,7 @@ func _add_point_fields(a: LoopActionT, second: bool) -> void:
 		_add_range_field("Y2", a.y2, a.y2_max, -20000, 20000, func(lo: int, hi: int):
 			a.y2 = lo
 			a.y2_max = hi)
-		editor_box.add_child(_grab_button("🎯 Pick B on screen", func():
+		editor_box.add_child(_grab_button(UiIconsT.target(), "Pick B on screen", func():
 			_begin_point_pick(func(g: Vector2i):
 				var rx := _recentre_range(a.x2, a.x2_max, g.x)
 				var ry := _recentre_range(a.y2, a.y2_max, g.y)
@@ -784,7 +784,7 @@ func _add_rect_fields(a: LoopActionT) -> void:
 		set_xy_editable.call(not v)
 		_after_edit())
 	row.add_child(follow)
-	row.add_child(_grab_button("🎯 Pick rect on screen", func():
+	row.add_child(_grab_button(UiIconsT.target(), "Pick rect on screen", func():
 		_begin_rect_pick(func(r: Rect2i):
 			# A dragged rect is exact: fixed position and size.
 			a.x = r.position.x
@@ -887,13 +887,13 @@ func _add_color_field(a: LoopActionT) -> void:
 	# The two sample buttons on their own row, so the editor never needs to
 	# scroll sideways.
 	var buttons := HBoxContainer.new()
-	var just := _grab_button("🎨 Just sample", func():
+	var just := _grab_button(UiIconsT.dropper(), "Just sample", func():
 		# Pick a point and read its colour only; the rect stays where it is.
 		_begin_point_pick(func(g: Vector2i):
 			_sample_color_into(a, g), true))
 	just.tooltip_text = "Sample a colour on screen without moving the rect."
 	buttons.add_child(just)
-	var pick := _grab_button("🎯 Pick & sample", func():
+	var pick := _grab_button(UiIconsT.target(), "Pick & sample", func():
 		_begin_point_pick(func(g: Vector2i):
 			# Centre the (smallest) rect on the picked point, so the pixel
 			# sampled here is inside every rect playback can scan (and is the
@@ -1461,12 +1461,13 @@ func _on_backend_selected(i: int) -> void:
 func _refresh_run_label() -> void:
 	if play_btn == null or Playback.is_running or _stop_cooldown_active:
 		return
+	play_btn.icon = UiIconsT.play()
 	play_btn.text = _run_label()
 
 
 func _run_label() -> String:
 	var live := Playback.backend != null and Playback.backend.is_real()
-	return "▶ Run!" if live else "▶ Run?"
+	return "Run!" if live else "Run?"
 
 
 func _refresh_edit_lock() -> void:
@@ -1860,8 +1861,10 @@ func _tool_button(text: String, cb: Callable) -> Button:
 	return b
 
 
-func _grab_button(text: String, cb: Callable) -> Button:
+## An editor button that starts a pick on screen: an icon and what it picks.
+func _grab_button(icon: Texture2D, text: String, cb: Callable) -> Button:
 	var b := Button.new()
+	b.icon = icon
 	b.text = text
 	b.focus_mode = Control.FOCUS_NONE
 	b.pressed.connect(cb)

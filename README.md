@@ -152,12 +152,12 @@ one). Both are saved with the loop.
      (a feedback loop). The overlay is never a target either way: it is
      click-through, and Pixel Detect never reads what the overlay draws.
 4. Toggle **Overlay: ON** to see the visuals drawn full-screen, always on top.
-   - `◀ Layer` / `Layer ▶` (or **←/→**, **PgUp/PgDn**, `[` / `]`) flip through
+   - The arrow buttons under **Overlay** (or **←/→**, **PgUp/PgDn**, `[` / `]`) flip through
      layers; the toolbar shows the current view (e.g. `View: 2/3 · Layer 2`).
      Flipping also selects that layer for editing.
    - Number keys **1–9** jump straight to a layer.
    - **Show All** (or `\`) toggles drawing every visible layer at once.
-5. Choose a **Backend** and press **▶ Run** (or **F5**).
+5. Choose a **Mode** and press **Run?** (Safe) or **Run!** (Live), or **F5**.
 
 > The status line lives in the **bottom bar**; the toolbar scrolls horizontally
 > if the window is too narrow to show every control.
@@ -187,7 +187,7 @@ whenever the builder has the focus.
 The toolbar keeps a stack of loops. **New** starts one: its first layer gets
 a random name from the Bible (`Moses`, then `Moses 2` if that is taken), and
 **a loop is named after its first layer** — rename or reorder the layers and
-the loop's name in the picker follows. The **Loop** picker and `◀` / `▶` flip
+the loop's name in the picker follows. The **Loop** picker and the arrows beside it flip
 between loops, **Save** writes the current one to its file (a `*` marks
 unsaved changes), the two-sheets icon duplicates it as a new, unsaved loop
 named `<name> copy`, and the trash icon deletes it, file included. A layer has
