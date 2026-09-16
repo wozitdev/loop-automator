@@ -8,7 +8,7 @@ class_name MousePath
 ## Points per second of travel, and the most points one path may hold (a
 ## long travel then steps a little further each time).
 const POINTS_PER_SECOND := 250
-const MAX_POINTS := 400
+const MAX_POINTS := 2000
 
 ## A wiggle bows the route sideways by up to this share of its length
 ## (never less / more than these pixels), and adds a hand's tremor.

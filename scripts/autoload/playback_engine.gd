@@ -76,7 +76,10 @@ func _ready() -> void:
 	# the reason lands on the status line after the builder's own refresh.
 	ProjectData.project_replaced.connect(func():
 		if is_running:
-			stop.call_deferred("Stopped: another loop was opened."))
+			var gen := _generation
+			(func():
+				if is_running and gen == _generation:
+					stop("Stopped: another loop was opened.")).call_deferred())
 
 
 func _exit_tree() -> void:
@@ -414,6 +417,9 @@ const KEY_HOLD_MIN_MS := 35
 const KEY_HOLD_MAX_MS := 95
 const KEY_TRAIL_MIN_MS := 20
 const KEY_TRAIL_MAX_MS := 60
+## A group "(abc…)" longer than this is one helper call too long to stop;
+## SendKeys sends it instead.
+const KEY_GROUP_MAX := 32
 
 
 ## Types a Key action's text one keystroke at a time (see KeyStrokes.split:
@@ -424,34 +430,38 @@ const KEY_TRAIL_MAX_MS := 60
 ## between strokes.
 func _type_paced(action: LoopActionT) -> void:
 	var gen := _generation
-	var strokes := KeyStrokesT.split(action.keys)
 	var b := backend
-	for i in strokes.size():
+	# One entry per press: a repeated key ("{ENTER 3}") is three presses, so
+	# a stop lands between them and each gets its own timing.
+	var presses: Array = []
+	for stroke in KeyStrokesT.split(action.keys):
+		var press := KeyStrokesT.parse(stroke)
+		if press.is_empty() or (press["keys"] as PackedStringArray).size() > KEY_GROUP_MAX:
+			presses.append(stroke)   # SendKeys sends it as it is
+		else:
+			for r in press["repeat"]:
+				presses.append(press)
+	for i in presses.size():
 		if not is_running or gen != _generation:
 			return
-		var stroke := strokes[i]
-		var press := KeyStrokesT.parse(stroke)
+		var press: Variant = presses[i]
 		# The helper blocks for the whole press, so it runs off the main thread.
 		var thread := Thread.new()
-		if press.is_empty():
-			thread.start(func(): b.send_keys(stroke))
+		if press is String:
+			thread.start(func(): b.send_keys(press))
 		else:
-			var keys: PackedStringArray = press["keys"]
-			var all := PackedStringArray()
-			for r in press["repeat"]:
-				all.append_array(keys)
 			var lead := randi_range(KEY_LEAD_MIN_MS, KEY_LEAD_MAX_MS)
 			var hold := randi_range(KEY_HOLD_MIN_MS, KEY_HOLD_MAX_MS)
 			var gap := randi_range(KEY_PAUSE_MIN_MS, KEY_PAUSE_MAX_MS)
 			var trail := randi_range(KEY_TRAIL_MIN_MS, KEY_TRAIL_MAX_MS)
-			thread.start(func(): b.hold_keys(press["mods"], all, lead, hold, gap, trail))
+			thread.start(func(): b.hold_keys(press["mods"], press["keys"], lead, hold, gap, trail))
 		while thread.is_alive():
 			await get_tree().process_frame
 		thread.wait_to_finish()
 		if b.last_skipped:
 			_report_skipped(action)
 			return
-		if i < strokes.size() - 1:
+		if i < presses.size() - 1:
 			var pause := randi_range(KEY_PAUSE_MIN_MS, KEY_PAUSE_MAX_MS)
 			if randi_range(1, KEY_PAUSE_LONG_EVERY) == 1:
 				pause = randi_range(KEY_PAUSE_LONG_MIN_MS, KEY_PAUSE_LONG_MAX_MS)
@@ -470,8 +480,12 @@ const TRAVEL_CHUNK_MS := 200
 func _travel(from: Vector2i, to: Vector2i, ms: int, wiggle: bool, label: String) -> void:
 	var path := MousePathT.make(from, to, ms, wiggle)
 	if path.size() <= 2:
+		# A jump — or, going nowhere with a duration (a drag held in place),
+		# a stay of that long.
 		_set_tracker(to, true, label)
 		backend.move_to(to)
+		if ms > 0:
+			await _sleep_ms(ms)
 		return
 	var gen := _generation
 	var started := Time.get_ticks_msec()

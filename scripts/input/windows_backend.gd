@@ -403,7 +403,9 @@ switch ($cmd) {
         else {
           $ch = [char][int]$k.Substring(1)
           $scan = [Win32In]::VkKeyScanW($ch)
-          if ($scan -eq -1) {
+          # No key for it, or one that needs Ctrl / Alt (AltGr) on this
+          # layout: SendKeys knows how to type it.
+          if ($scan -eq -1 -or ((($scan -shr 8) -band 6) -ne 0)) {
             Add-Type -AssemblyName System.Windows.Forms
             $t = [string]$ch; if ('+^%~(){}[]'.Contains($t)) { $t = '{' + $t + '}' }
             [System.Windows.Forms.SendKeys]::SendWait($t)
