@@ -91,6 +91,7 @@ func add_layer() -> void:
 	active_layer_index = project.layers.size() - 1
 	selected_action_index = -1
 	_mark_pending()
+	_view_follows_active()
 	emit_signal("layers_changed")
 	emit_signal("selection_changed")
 
@@ -103,6 +104,7 @@ func remove_layer(index: int) -> void:
 	selected_action_index = -1
 	_mark_pending()
 	_sync_loop_name()
+	_view_follows_active()
 	emit_signal("layers_changed")
 	emit_signal("selection_changed")
 
@@ -125,6 +127,7 @@ func duplicate_layer(index: int) -> void:
 	selected_action_index = -1
 	_mark_pending()
 	_sync_loop_name()
+	_view_follows_active()
 	emit_signal("layers_changed")
 	emit_signal("selection_changed")
 
@@ -139,8 +142,19 @@ func move_layer(index: int, delta: int) -> void:
 	active_layer_index = target
 	_mark_pending()
 	_sync_loop_name()
+	_view_follows_active()
 	emit_signal("layers_changed")
 	emit_signal("selection_changed")
+
+
+## Points the overlay view at the active layer (what clicking a layer in
+## the list does), so the "View:" line keeps up when a layer is added,
+## copied, moved or removed. Showing all layers is left as it is.
+func _view_follows_active() -> void:
+	if overlay_show_all or overlay_layer_index == active_layer_index:
+		return
+	overlay_layer_index = active_layer_index
+	emit_signal("overlay_view_changed")
 
 
 func rename_layer(index: int, new_name: String) -> void:
