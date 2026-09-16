@@ -261,7 +261,7 @@ func _execute_action(action: LoopActionT, layer_index: int, action_index: int) -
 	match action.type:
 		LoopActionT.Type.MOVE:
 			var p := action.roll_point()
-			await _travel(_mouse_pos(), p, action.roll_duration_ms(), "MOVE")
+			await _travel(_mouse_pos(), p, action.roll_duration_ms(), action.wiggle, "MOVE")
 		LoopActionT.Type.CLICK:
 			var p := action.roll_point()
 			_set_tracker(p, true, "CLICK")
@@ -276,7 +276,7 @@ func _execute_action(action: LoopActionT, layer_index: int, action_index: int) -
 				_report_skipped(action)
 			else:
 				# The button is always released, a stop mid-drag included.
-				await _travel(p, p2, action.roll_duration_ms(), "DRAG")
+				await _travel(p, p2, action.roll_duration_ms(), action.wiggle, "DRAG")
 				_set_tracker(p2, true, "DRAG END")
 				backend.mouse_button(action.button, false, p2)
 		LoopActionT.Type.KEY:
@@ -352,14 +352,14 @@ func _execute_captured(action: LoopActionT) -> void:
 	var ms := action.roll_duration_ms()
 	# The travel the duration is spent on: a move gets there from where the
 	# cursor is, a drag goes from its first point to its second.
-	var path := MousePathT.make(_mouse_pos(), from, ms)
+	var path := MousePathT.make(_mouse_pos(), from, ms, action.wiggle)
 	match action.type:
 		LoopActionT.Type.CLICK:
 			kind = "click"
 			ms = 0
 		LoopActionT.Type.DRAG:
 			kind = "drag"
-			path = MousePathT.make(from, to, ms)
+			path = MousePathT.make(from, to, ms, action.wiggle)
 	var label := kind.to_upper() + " ↩"
 	_set_tracker(from, true, label)
 	var b := backend
@@ -390,11 +390,11 @@ func _execute_captured(action: LoopActionT) -> void:
 const TRAVEL_CHUNK_MS := 200
 
 
-## Moves the cursor from `from` to `to` over `ms` (see MousePath), showing
-## the travel on the tracker as `label`. With `ms` 0 it is a jump. A stop
-## ends the travel where the cursor is.
-func _travel(from: Vector2i, to: Vector2i, ms: int, label: String) -> void:
-	var path := MousePathT.make(from, to, ms)
+## Moves the cursor from `from` to `to` over `ms` (see MousePath; `wiggle`
+## bends the route a little), showing the travel on the tracker as `label`.
+## With `ms` 0 it is a jump. A stop ends the travel where the cursor is.
+func _travel(from: Vector2i, to: Vector2i, ms: int, wiggle: bool, label: String) -> void:
+	var path := MousePathT.make(from, to, ms, wiggle)
 	if path.size() <= 2:
 		_set_tracker(to, true, label)
 		backend.move_to(to)

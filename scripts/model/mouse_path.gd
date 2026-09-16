@@ -10,11 +10,22 @@ class_name MousePath
 const POINTS_PER_SECOND := 250
 const MAX_POINTS := 400
 
+## A wiggle bows the route sideways by up to this share of its length
+## (never less / more than these pixels), and adds a hand's tremor.
+const WIGGLE_SHARE := 0.06
+const WIGGLE_MIN_PX := 1.5
+const WIGGLE_MAX_PX := 24.0
+const TREMOR_PX := 0.6
+## How often a wiggle is nearly nothing: a hand does not wander every time.
+const WIGGLE_CALM_CHANCE := 0.35
+
 
 ## The path from `from` to `to` taking `ms`: straight, easing in and out
-## like a hand does. A duration of 0 (or the same point) is just the two
-## ends, which playback treats as a jump.
-static func make(from: Vector2i, to: Vector2i, ms: int) -> PackedVector2Array:
+## like a hand does. With `wiggle` the route bows and wobbles a little on
+## the way (a fresh random shape each time), the ends staying exact. A
+## duration of 0 (or the same point) is just the two ends, which playback
+## treats as a jump.
+static func make(from: Vector2i, to: Vector2i, ms: int, wiggle: bool = false) -> PackedVector2Array:
 	var path := PackedVector2Array()
 	if ms <= 0 or from == to:
 		path.append(Vector2(from))
@@ -23,9 +34,28 @@ static func make(from: Vector2i, to: Vector2i, ms: int) -> PackedVector2Array:
 	var steps := clampi(ms * POINTS_PER_SECOND / 1000, 2, MAX_POINTS)
 	var a := Vector2(from)
 	var b := Vector2(to)
+	var side := (b - a).orthogonal().normalized()
+	# The wiggle's shape for this travel: a bow one way or the other, with a
+	# slower wave laid over it so it is never the same arc twice.
+	var bow := 0.0
+	var wave_turns := 0.0
+	var wave_phase := 0.0
+	if wiggle and a.distance_to(b) >= 2.0:
+		bow = randf_range(-1.0, 1.0) * clampf(a.distance_to(b) * WIGGLE_SHARE, WIGGLE_MIN_PX, WIGGLE_MAX_PX)
+		if randf() < WIGGLE_CALM_CHANCE:
+			bow *= 0.15
+		wave_turns = randf_range(1.5, 3.0)
+		wave_phase = randf_range(0.0, TAU)
 	for i in steps + 1:
 		var t := float(i) / float(steps)
-		path.append(a.lerp(b, _ease(t)))
+		var p := a.lerp(b, _ease(t))
+		if bow != 0.0:
+			# sin(PI t) is 0 at both ends, so the offset fades in and out.
+			var envelope := sin(PI * t)
+			var off := bow * envelope * (1.0 + 0.3 * sin(TAU * wave_turns * t + wave_phase))
+			off += randf_range(-TREMOR_PX, TREMOR_PX) * envelope
+			p += side * off
+		path.append(p)
 	# The ends are exact whatever the easing rounds to.
 	path[0] = a
 	path[steps] = b

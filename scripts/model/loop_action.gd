@@ -50,6 +50,9 @@ var capture_mode: int = CaptureMode.SAVE
 ## PIXEL_DETECT: centre the rect on the mouse (and keep it there as the mouse
 ## moves) instead of using the stored x / y.
 var follow_cursor: bool = false
+## MOVE / DRAG: wander a little on the way (see MousePath), the way a hand
+## does; where the travel starts and lands is not affected.
+var wiggle: bool = false
 
 # Geometry / parameters (only the relevant ones are used per type). Every
 # numeric setting is a range: `x` .. `x_max` and so on. Each time the action
@@ -277,6 +280,7 @@ func to_dict() -> Dictionary:
 		"ghost_cursor": ghost_cursor,
 		"capture_mode": capture_mode,
 		"follow_cursor": follow_cursor,
+		"wiggle": wiggle,
 	}
 
 
@@ -314,6 +318,7 @@ static func from_dict(d: Dictionary) -> Self:
 	a.ghost_cursor = bool(d.get("ghost_cursor", d.get("lag_compensation", false)))
 	a.capture_mode = int(d.get("capture_mode", CaptureMode.SAVE))
 	a.follow_cursor = bool(d.get("follow_cursor", false))
+	a.wiggle = bool(d.get("wiggle", false))
 	return a
 
 

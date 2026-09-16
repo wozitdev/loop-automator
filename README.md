@@ -53,7 +53,8 @@ layer 1, just broken out so you can view each layer's visuals separately.
 ## Action types
 
 - **Move** — move the cursor to `(x, y)`; with a duration the cursor travels
-  there over that time instead of jumping.
+  there over that time instead of jumping (`~Duration` adds a little
+  hand-like wander on the way; start and end stay exact).
 - **Click** — move to `(x, y)` and click Left / Right / Middle.
 - **Drag** — press at A, move to B over the duration, release.
 - **Key** — send keystrokes. In Live mode this uses the

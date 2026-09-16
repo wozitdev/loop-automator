@@ -675,9 +675,7 @@ func _rebuild_editor() -> void:
 	match a.type:
 		LoopActionT.Type.MOVE:
 			_add_point_fields(a, false)
-			_add_range_field("Duration (ms)", a.duration_ms, a.duration_ms_max, 0, 60000, func(lo: int, hi: int):
-				a.duration_ms = lo
-				a.duration_ms_max = hi)
+			_add_duration_field(a)
 			_add_captures_field(a)
 		LoopActionT.Type.CLICK:
 			_add_point_fields(a, false)
@@ -686,9 +684,7 @@ func _rebuild_editor() -> void:
 		LoopActionT.Type.DRAG:
 			_add_point_fields(a, true)
 			_add_button_field(a)
-			_add_range_field("Duration (ms)", a.duration_ms, a.duration_ms_max, 0, 60000, func(lo: int, hi: int):
-				a.duration_ms = lo
-				a.duration_ms_max = hi)
+			_add_duration_field(a)
 			_add_captures_field(a)
 		LoopActionT.Type.KEY:
 			_add_keys_field(a)
@@ -1094,13 +1090,31 @@ class RangePair:
 ## Adds a labelled RangePair row to the editor and returns the pair (for
 ## callers that need to toggle it later). `setter` receives (lo, hi).
 func _add_range_field(label: String, lo: int, hi: int, min_v: int, max_v: int, setter: Callable) -> RangePair:
-	var row := _row(label)
+	return _add_range_field_in(_row(label), lo, hi, min_v, max_v, setter)
+
+
+## A RangePair added to `row` (which already holds its label or toggle).
+func _add_range_field_in(row: Container, lo: int, hi: int, min_v: int, max_v: int, setter: Callable) -> RangePair:
 	var pair := RangePair.new()
 	pair.build(row, lo, hi, min_v, max_v, func(l: int, h: int):
 		setter.call(l, h)
 		_after_edit())
 	editor_box.add_child(row)
 	return pair
+
+
+## A Move / Drag's duration: how long the travel takes. Its label is a
+## checkbox, "~Duration (ms)" when checked: the cursor then wanders a
+## little on the way, like a hand, without moving where it starts or lands.
+func _add_duration_field(a: LoopActionT) -> void:
+	var row := _row_toggle("Duration (ms)", a.wiggle,
+		"How long the cursor takes to get there (ms).\nChecked: it wanders a little on the way, like a hand would; where it starts and lands stays exact.",
+		func(v: bool):
+			a.wiggle = v
+			_after_edit())
+	_add_range_field_in(row, a.duration_ms, a.duration_ms_max, 0, 60000, func(lo: int, hi: int):
+		a.duration_ms = lo
+		a.duration_ms_max = hi)
 
 
 # ======================================================================
@@ -1869,6 +1883,8 @@ func _tool_button(text: String, cb: Callable) -> Button:
 func _grab_button(icon: Texture2D, text: String, cb: Callable) -> Button:
 	var b := Button.new()
 	b.icon = icon
+	# Text right next to the icon, not centred away from it.
+	b.alignment = HORIZONTAL_ALIGNMENT_LEFT
 	b.text = text
 	b.focus_mode = Control.FOCUS_NONE
 	b.pressed.connect(cb)
@@ -1902,6 +1918,25 @@ func _row(label: String) -> HBoxContainer:
 	l.text = label
 	l.custom_minimum_size = Vector2(120, 0)
 	row.add_child(l)
+	return row
+
+
+## A row whose label is a checkbox: `label` unchecked, "~" + `label` when
+## checked (the "~" marks the setting's random side being on). `on_toggle`
+## gets the new state.
+func _row_toggle(label: String, checked: bool, tip: String, on_toggle: Callable) -> HBoxContainer:
+	var row := HBoxContainer.new()
+	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	var cb := CheckBox.new()
+	cb.text = ("~" if checked else "") + label
+	cb.tooltip_text = tip
+	cb.focus_mode = Control.FOCUS_NONE
+	cb.button_pressed = checked
+	cb.custom_minimum_size = Vector2(120, 0)
+	cb.toggled.connect(func(v: bool):
+		cb.text = ("~" if v else "") + label
+		on_toggle.call(v))
+	row.add_child(cb)
 	return row
 
 
