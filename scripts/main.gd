@@ -1524,7 +1524,7 @@ func _animate_stop_feedback(include_safety: bool) -> void:
 		if play_btn != null:
 			play_btn.text = "Safety."
 		if status_label != null:
-			status_label.text = "Switched to Safe."
+			status_label.text = "%s Switched to Safe." % Playback.last_stop_reason
 		await get_tree().create_timer(STOP_COOLDOWN_STEP_SEC).timeout
 		if token != _stop_cooldown_token:
 			return

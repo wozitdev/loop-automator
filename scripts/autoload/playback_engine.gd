@@ -41,6 +41,12 @@ var feedback: bool = false
 ## so the guides it draws around the rect never end up in the screen read.
 var detect_rect: Rect2i = Rect2i()
 var detect_rect_pinned: bool = false
+## What the action that just ran reported (a Pixel Detect's result), kept on
+## the status line through the delay that follows it, so the delay does not
+## hide why the loop is where it is.
+var _last_event: String = ""
+## Why the last run ended: "Stopped." unless an action or F8 ended it.
+var last_stop_reason: String = "Stopped."
 
 # Guard so a stop request issued mid-action breaks out cleanly.
 var _generation: int = 0
@@ -74,8 +80,7 @@ func _process(_dt: float) -> void:
 		return
 	var before: int = _stop_hotkey.state
 	if _stop_hotkey.poll():
-		stop()
-		emit_signal("status", "Stopped: F8 pressed.")
+		stop("Stopped: F8 pressed.")
 		return
 	if _stop_hotkey.state == before:
 		return
@@ -155,10 +160,12 @@ func start() -> void:
 	_run_loop(_generation)
 
 
-func stop() -> void:
+## Ends the run; `reason` is what the status line then says.
+func stop(reason: String = "Stopped.") -> void:
 	if not is_running:
 		return
 	is_running = false
+	last_stop_reason = reason
 	_generation += 1
 	_stop_hotkey.stop()
 	set_process(false)
@@ -168,7 +175,7 @@ func stop() -> void:
 	_set_tracker(Vector2i.ZERO, false, "")
 	emit_signal("action_executing", -1, -1)
 	emit_signal("playback_stopped")
-	emit_signal("status", "Stopped.")
+	emit_signal("status", reason)
 
 
 func _run_loop(gen: int) -> void:
@@ -192,17 +199,21 @@ func _run_loop(gen: int) -> void:
 					continue
 				current_layer_index = li
 				current_action_index = ai
+				_last_event = ""
 				emit_signal("action_executing", li, ai)
 				var result := await _execute_action(action, li, ai)
 				if result == LoopActionT.OnFail.STOP_LOOP:
-					stop()
+					stop("%s Loop stopped." % _last_event)
 					return
+				if result == LoopActionT.OnFail.SKIP_LAYER:
+					_last_event = _last_event.trim_suffix(".") + ", skipped the rest of \"%s\"." % layer.name
+					emit_signal("status", _last_event)
+					skip_layer = true
 				delayed_after_last = false
 				if project.delay_after_each_action and is_running and gen == _generation:
 					await _wait_loop_delay(project, gen, "Action delay")
 					delayed_after_last = true
-				if result == LoopActionT.OnFail.SKIP_LAYER:
-					skip_layer = true
+				if skip_layer:
 					break
 			if skip_layer:
 				continue
@@ -214,12 +225,16 @@ func _run_loop(gen: int) -> void:
 
 
 ## Waits one (rolled) loop delay, shown on the tracker and the status line
-## as `what`; nothing happens when the delay is 0.
+## as `what` (after what the last action reported, if it reported anything);
+## nothing happens when the delay is 0.
 func _wait_loop_delay(project: LoopProjectT, gen: int, what: String) -> void:
 	var delay := project.roll_loop_delay_ms()
 	if delay <= 0:
 		return
-	emit_signal("status", "%s: %d ms" % [what, delay])
+	var text := "%s: %d ms" % [what, delay]
+	if not _last_event.is_empty():
+		text = "%s %s" % [_last_event, text]
+	emit_signal("status", text)
 	_set_tracker(tracker_pos, tracker_visible, "DELAY %dms" % delay)
 	await _sleep_ms(delay)
 	if is_running and gen == _generation:
@@ -289,7 +304,10 @@ func _execute_action(action: LoopActionT, layer_index: int, action_index: int) -
 			var found := hit.x >= 0
 			if found:
 				_set_tracker(hit, true, "DETECT")
-			emit_signal("status", "Pixel detect: %s" % (("FOUND at (%d, %d)" % [hit.x, hit.y]) if found else "not found"))
+				_last_event = "Pixel detect: found at (%d, %d)." % [hit.x, hit.y]
+			else:
+				_last_event = "Pixel detect: not found."
+			emit_signal("status", _last_event)
 			if not found:
 				return action.on_fail
 		LoopActionT.Type.CAPTURE:
