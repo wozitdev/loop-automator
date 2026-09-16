@@ -74,6 +74,8 @@ public class Win32In {
   [DllImport(\"winmm.dll\")] public static extern uint timeBeginPeriod(uint ms);
   [DllImport(\"winmm.dll\")] public static extern uint timeEndPeriod(uint ms);
   [DllImport(\"user32.dll\")] public static extern bool ShowWindow(IntPtr h,int n);
+  [DllImport(\"user32.dll\")] public static extern void keybd_event(byte vk,byte scan,uint flags,IntPtr extra);
+  [DllImport(\"user32.dll\", CharSet=CharSet.Unicode)] public static extern short VkKeyScanW(char ch);
   [DllImport(\"user32.dll\")] public static extern int GetWindowLongW(IntPtr h,int i);
   [DllImport(\"user32.dll\")] public static extern int SetWindowLongW(IntPtr h,int i,int v);
   [DllImport(\"user32.dll\")] public static extern bool SetWindowPos(IntPtr h,IntPtr after,int x,int y,int cx,int cy,uint f);
@@ -377,6 +379,53 @@ switch ($cmd) {
     Add-Type -AssemblyName System.Windows.Forms
     $text = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([string]$a[1]))
     [System.Windows.Forms.SendKeys]::SendWait($text)
+  }
+  'hold' {
+    # hold <mods|-> <keys> <lead> <hold> <gap> <trail>: one keystroke with
+    # real timing (~Keys). The modifiers (letters c / s / a) go down, $lead
+    # ms later each key (\"c<code>\" a character found on the keyboard
+    # layout, \"v<vk>\" a virtual key) is held $hold ms, $gap ms apart, and
+    # $trail ms after the last the modifiers come up. A character the
+    # layout has no key for is sent by SendKeys instead.
+    if (Guarded ([Win32In]::GetForegroundWindow())) { Write-Output 'skipped'; break }
+    $mods = [string]$a[1]; $keys = ([string]$a[2]).Split(',')
+    $lead = [int]$a[3]; $hold = [int]$a[4]; $gap = [int]$a[5]; $trail = [int]$a[6]
+    $down = @()
+    if ($mods.Contains('c')) { $down += 0x11 }
+    if ($mods.Contains('s')) { $down += 0x10 }
+    if ($mods.Contains('a')) { $down += 0x12 }
+    try {
+      foreach ($m in $down) { [Win32In]::keybd_event([byte]$m, 0, 0, [IntPtr]::Zero) }
+      if ($down.Count -gt 0) { [System.Threading.Thread]::Sleep($lead) }
+      for ($i = 0; $i -lt $keys.Count; $i++) {
+        $k = $keys[$i]; $vk = 0; $shift = $false
+        if ($k.StartsWith('v')) { $vk = [int]$k.Substring(1) }
+        else {
+          $ch = [char][int]$k.Substring(1)
+          $scan = [Win32In]::VkKeyScanW($ch)
+          if ($scan -eq -1) {
+            Add-Type -AssemblyName System.Windows.Forms
+            $t = [string]$ch; if ('+^%~(){}[]'.Contains($t)) { $t = '{' + $t + '}' }
+            [System.Windows.Forms.SendKeys]::SendWait($t)
+            if ($i -lt $keys.Count - 1) { [System.Threading.Thread]::Sleep($gap) }
+            continue
+          }
+          $vk = $scan -band 0xFF; $shift = ((($scan -shr 8) -band 1) -eq 1) -and -not $mods.Contains('s')
+        }
+        # KEYEVENTF_EXTENDEDKEY for the navigation keys, as the keyboard sends them.
+        $ext = 0; if (($vk -ge 0x21 -and $vk -le 0x28) -or $vk -eq 0x2D -or $vk -eq 0x2E) { $ext = 1 }
+        if ($shift) { [Win32In]::keybd_event(0x10, 0, 0, [IntPtr]::Zero) }
+        [Win32In]::keybd_event([byte]$vk, 0, $ext, [IntPtr]::Zero)
+        [System.Threading.Thread]::Sleep($hold)
+        [Win32In]::keybd_event([byte]$vk, 0, ($ext -bor 2), [IntPtr]::Zero)
+        if ($shift) { [Win32In]::keybd_event(0x10, 0, 2, [IntPtr]::Zero) }
+        if ($i -lt $keys.Count - 1) { [System.Threading.Thread]::Sleep($gap) }
+      }
+      if ($down.Count -gt 0) { [System.Threading.Thread]::Sleep($trail) }
+    } finally {
+      [array]::Reverse($down)
+      foreach ($m in $down) { [Win32In]::keybd_event([byte]$m, 0, 2, [IntPtr]::Zero) }
+    }
   }
   'cursor' {
     # Where the real cursor is right now, as "x,y" (Capture actions).
@@ -764,6 +813,14 @@ func send_keys(text: String) -> void:
 	if clean.is_empty():
 		return
 	_run_sync(PackedStringArray(["key", Marshalls.utf8_to_base64(clean)]), 30000)
+
+
+func hold_keys(mods: String, keys: PackedStringArray, lead: int, hold: int, gap: int, trail: int) -> void:
+	if keys.is_empty():
+		return
+	var total := lead + trail + keys.size() * (hold + gap)
+	_run_sync(PackedStringArray(["hold", mods if not mods.is_empty() else "-", ",".join(keys),
+		str(lead), str(hold), str(gap), str(trail)]), total + SERVER_READ_TIMEOUT_MS)
 
 
 func get_cursor_pos() -> Vector2i:

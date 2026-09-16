@@ -37,6 +37,14 @@ func click(button: int, pos: Vector2i) -> void:
 func send_keys(_text: String) -> void:
 	pass
 
+## One keystroke with real timing (~Keys): the modifiers in `mods` (letters
+## c / s / a for Ctrl / Shift / Alt) go down, `lead` ms later each key in
+## `keys` (see KeyStrokes.parse) is held `hold` ms, `gap` ms apart, and
+## `trail` ms after the last one the modifiers come back up. Blocks for the
+## whole press (callers run it off the main thread).
+func hold_keys(_mods: String, _keys: PackedStringArray, _lead: int, _hold: int, _gap: int, _trail: int) -> void:
+	pass
+
 ## Returns the colour of a single screen pixel, or a transparent colour
 ## if the backend cannot read the screen.
 func get_pixel(_pos: Vector2i) -> Color:

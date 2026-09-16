@@ -13,6 +13,7 @@ const LoopActionT := preload("res://scripts/model/loop_action.gd")
 const LoopProjectT := preload("res://scripts/model/loop_project.gd")
 const LoopLayerT := preload("res://scripts/model/loop_layer.gd")
 const MousePathT := preload("res://scripts/model/mouse_path.gd")
+const KeyStrokesT := preload("res://scripts/model/key_strokes.gd")
 
 signal playback_started
 signal playback_stopped
@@ -394,19 +395,49 @@ const KEY_PAUSE_MAX_MS := 160
 const KEY_PAUSE_LONG_MIN_MS := 200
 const KEY_PAUSE_LONG_MAX_MS := 420
 const KEY_PAUSE_LONG_EVERY := 9
+## ~Keys: how a press goes. Modifiers down, then the key after KEY_LEAD
+## (Ctrl … c), held KEY_HOLD, and the modifiers up KEY_TRAIL after it.
+const KEY_LEAD_MIN_MS := 30
+const KEY_LEAD_MAX_MS := 70
+const KEY_HOLD_MIN_MS := 35
+const KEY_HOLD_MAX_MS := 95
+const KEY_TRAIL_MIN_MS := 20
+const KEY_TRAIL_MAX_MS := 60
 
 
-## Sends a Key action's text one keystroke at a time (see
-## LoopAction.split_keys: a combo stays one keystroke) with a random pause
-## between them, the way typing goes. A stop ends it between keystrokes.
+## Types a Key action's text one keystroke at a time (see KeyStrokes.split:
+## a combo stays one keystroke), each press with real timing — Ctrl goes
+## down, c is pressed and held a moment, Ctrl comes up — and a random pause
+## between presses, the way typing goes. A stroke the helper cannot press
+## key by key goes through SendKeys as it is. A stop ends the typing
+## between strokes.
 func _type_paced(action: LoopActionT) -> void:
 	var gen := _generation
-	var strokes := LoopActionT.split_keys(action.keys)
+	var strokes := KeyStrokesT.split(action.keys)
+	var b := backend
 	for i in strokes.size():
 		if not is_running or gen != _generation:
 			return
-		backend.send_keys(strokes[i])
-		if backend.last_skipped:
+		var stroke := strokes[i]
+		var press := KeyStrokesT.parse(stroke)
+		# The helper blocks for the whole press, so it runs off the main thread.
+		var thread := Thread.new()
+		if press.is_empty():
+			thread.start(func(): b.send_keys(stroke))
+		else:
+			var keys: PackedStringArray = press["keys"]
+			var all := PackedStringArray()
+			for r in press["repeat"]:
+				all.append_array(keys)
+			var lead := randi_range(KEY_LEAD_MIN_MS, KEY_LEAD_MAX_MS)
+			var hold := randi_range(KEY_HOLD_MIN_MS, KEY_HOLD_MAX_MS)
+			var gap := randi_range(KEY_PAUSE_MIN_MS, KEY_PAUSE_MAX_MS)
+			var trail := randi_range(KEY_TRAIL_MIN_MS, KEY_TRAIL_MAX_MS)
+			thread.start(func(): b.hold_keys(press["mods"], all, lead, hold, gap, trail))
+		while thread.is_alive():
+			await get_tree().process_frame
+		thread.wait_to_finish()
+		if b.last_skipped:
 			_report_skipped(action)
 			return
 		if i < strokes.size() - 1:

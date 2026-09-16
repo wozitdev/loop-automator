@@ -54,7 +54,7 @@ var follow_cursor: bool = false
 ## does; where the travel starts and lands is not affected.
 var wiggle: bool = false
 ## KEY: send the keys one at a time with a random pause between them, the
-## way typing goes, instead of all at once (see split_keys for what "one
+## way typing goes, instead of all at once (see KeyStrokes for what "one
 ## at a time" keeps together).
 var keys_paced: bool = false
 
@@ -127,41 +127,6 @@ func roll_duration_ms() -> int:
 
 func roll_tolerance() -> int:
 	return clampi(roll(tolerance, tolerance_max), 0, 255)
-
-
-## `text` (SendKeys format) cut into the keystrokes it stands for, so
-## paced typing can send them one at a time: a plain character, a braced
-## key ("{ENTER}", "{F4 3}", "{{}", "{}}"), or a group "(abc)", each with
-## the ^ + % modifiers in front of it kept attached ("^c", "+(ab)", "%{F4}"
-## stay one keystroke, so a combo is pressed as one).
-static func split_keys(text: String) -> PackedStringArray:
-	var out := PackedStringArray()
-	var mods := ""
-	var i := 0
-	var n := text.length()
-	while i < n:
-		var ch := text[i]
-		if ch == "^" or ch == "+" or ch == "%":
-			mods += ch
-			i += 1
-			continue
-		var end := i + 1
-		if ch == "{":
-			# "{}}" is a literal "}"; otherwise the token runs to the next "}".
-			if i + 2 < n and text[i + 1] == "}" and text[i + 2] == "}":
-				end = i + 3
-			else:
-				var close := text.find("}", i + 1)
-				end = n if close < 0 else close + 1
-		elif ch == "(":
-			var close := text.find(")", i + 1)
-			end = n if close < 0 else close + 1
-		out.append(mods + text.substr(i, end - i))
-		mods = ""
-		i = end
-	if not mods.is_empty():
-		out.append(mods)
-	return out
 
 
 ## Where point A (MOVE / CLICK / DRAG start) can land.

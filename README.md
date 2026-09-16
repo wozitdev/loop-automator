@@ -71,7 +71,8 @@ layer 1, just broken out so you can view each layer's visuals separately.
   keys scale with it - and the size you leave it at is remembered. The
   Windows key cannot be sent by `SendKeys`, so it is ignored. Check the
   **~Keys** box to type the text one key at a time with random pauses, the
-  way a person types; a combo such as `^c` or `+(abc)` stays one press.
+  way a person types, each key held a moment; a combo such as `^c` or
+  `+(abc)` stays one press (Ctrl down, `c` pressed and held, Ctrl up).
 - **Wait** — pause N milliseconds.
 - **Pixel Detect** — look for an expected colour (± tolerance) anywhere in a screen rect.
   The whole rect is scanned (the centre first). **Pick & sample** centres the
