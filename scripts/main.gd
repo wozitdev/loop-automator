@@ -154,11 +154,17 @@ func _build_ui() -> void:
 
 	root.add_child(_build_toolbar())
 
+	# The panels sit in a plain Control (not a container) so the lock
+	# blocker can lie over them: a container would lay the blocker out as
+	# one more pane and squeeze it to nothing.
+	var stage := Control.new()
+	stage.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	stage.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	root.add_child(stage)
 	var split := HSplitContainer.new()
-	split.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	split.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	split.set_anchors_preset(Control.PRESET_FULL_RECT)
 	split.split_offset = 280
-	root.add_child(split)
+	stage.add_child(split)
 	_main_split = split
 
 	split.add_child(_build_layer_panel())
@@ -177,13 +183,14 @@ func _build_ui() -> void:
 	editor_panel.size_flags_stretch_ratio = 2.0
 	right_split.add_child(editor_panel)
 
+	# Over the panels while a Live run locks the builder: dims them and
+	# swallows every click (the toolbar above stays usable: Run / Stop).
 	_edit_lock_blocker = ColorRect.new()
 	_edit_lock_blocker.set_anchors_preset(Control.PRESET_FULL_RECT)
 	_edit_lock_blocker.color = Color(0.0, 0.0, 0.0, 0.20)
 	_edit_lock_blocker.mouse_filter = Control.MOUSE_FILTER_STOP
 	_edit_lock_blocker.visible = false
-	split.add_child(_edit_lock_blocker)
-	_edit_lock_blocker.move_to_front()
+	stage.add_child(_edit_lock_blocker)
 
 	root.add_child(_build_status_bar())
 
@@ -721,6 +728,10 @@ func _rebuild_editor() -> void:
 			_add_capture_mode_field(a)
 
 	_add_comment_field(a)
+	# Built during a Live run (the engine can switch an action off): locked
+	# like everything else.
+	if _is_interaction_locked():
+		_set_controls_locked(editor_box, true)
 	_loading_editor = false
 
 
@@ -1546,6 +1557,11 @@ func _set_controls_locked(node: Node, locked: bool) -> void:
 		(node as TextEdit).editable = not locked
 	elif node is SpinBox:
 		(node as SpinBox).editable = not locked
+	elif node is ItemList:
+		# The lists have no disabled state: shut their input off instead, so
+		# no click or arrow key moves the selection (and rebuilds the editor).
+		(node as ItemList).mouse_filter = Control.MOUSE_FILTER_IGNORE if locked else Control.MOUSE_FILTER_STOP
+		(node as ItemList).focus_mode = Control.FOCUS_NONE if locked else Control.FOCUS_ALL
 	elif node.has_method("set_disabled"):
 		node.call("set_disabled", locked)
 
