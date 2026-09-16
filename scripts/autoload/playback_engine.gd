@@ -68,6 +68,13 @@ var _stop_hotkey := StopHotkeyT.new()
 func _ready() -> void:
 	set_process(false)
 	set_backend(BackendKind.PREVIEW)
+	# Another loop opened (switched to, created, imported…): the run ends with
+	# the loop it was started for. (A Live run locks the builder, so this is
+	# what stops a Safe run when the loop is changed under it.) Deferred so
+	# the reason lands on the status line after the builder's own refresh.
+	ProjectData.project_replaced.connect(func():
+		if is_running:
+			stop.call_deferred("Stopped: another loop was opened."))
 
 
 func _exit_tree() -> void:
