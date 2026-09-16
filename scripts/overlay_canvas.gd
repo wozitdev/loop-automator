@@ -473,7 +473,8 @@ func _draw_execution_tracker(offset: Vector2) -> void:
 ## A PIXEL_DETECT action is checked anywhere inside its rect (see
 ## PlaybackEngine._find_color). Every such rect — in every layer, since all
 ## enabled layers run — is passed to the shader so nothing drawn here (other
-## guides, the grid, the tracker) can tint the screen read.
+## guides, the grid, the tracker) can tint the screen read. A switched-off
+## action is neither read nor drawn, so it gets no hole.
 func _update_capture_holes(project: LoopProjectT, offset: Vector2) -> void:
 	var rects := PackedVector4Array()
 	_follows_mouse = false
@@ -481,7 +482,7 @@ func _update_capture_holes(project: LoopProjectT, offset: Vector2) -> void:
 		var layer: LoopLayerT = project.layers[li]
 		for ai in layer.actions.size():
 			var a: LoopActionT = layer.actions[ai]
-			if a.type == LoopActionT.Type.PIXEL_DETECT and rects.size() < 128:
+			if a.type == LoopActionT.Type.PIXEL_DETECT and a.enabled and rects.size() < 128:
 				# Same integer rect playback reads from the screen.
 				var r := _detect_rect(a, li, ai)
 				rects.append(Vector4(r.position.x - offset.x, r.position.y - offset.y, r.size.x, r.size.y))
