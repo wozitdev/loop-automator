@@ -301,15 +301,16 @@ func _execute_action(action: LoopActionT, layer_index: int, action_index: int) -
 		LoopActionT.Type.PIXEL_DETECT:
 			var rect := action.roll_detect_rect(_mouse_pos())
 			# Pin the rect and let the overlay present a frame with its hole
-			# there before the screen is read (a follow-cursor hole would
-			# otherwise lag behind the mouse and the guides would be read).
-			# One frame is enough: the previous frame has been swapped (and,
-			# with vsync, scanned out) by the time process_frame fires —
-			# measured 0 leaks in 100 reads against the read server.
+			# there before the screen is read: the overlay cuts the rect out
+			# only while it is pinned, so whatever it draws inside (another
+			# step's marker, the grid) is on screen until then. Two frames:
+			# the first is drawn with the hole, the second gives the desktop
+			# compositor time to show it (one frame leaked 1 read in 100).
 			detect_rect = rect
 			detect_rect_pinned = true
 			_set_tracker(rect.get_center(), true, "DETECT")
 			var gen := _generation
+			await get_tree().process_frame
 			await get_tree().process_frame
 			if not is_running or gen != _generation:
 				detect_rect_pinned = false

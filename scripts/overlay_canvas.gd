@@ -33,8 +33,9 @@ func _ready() -> void:
 	position = Vector2.ZERO
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_font = ThemeDB.fallback_font
-	# Leave every Pixel Detect rect transparent so playback reads the desktop
-	# there rather than our guides (see capture_hole.gdshader).
+	# The Pixel Detect rect playback is about to read is left transparent, so
+	# it reads the desktop there rather than our guides (see
+	# capture_hole.gdshader and _update_capture_holes).
 	material = ShaderMaterial.new()
 	material.shader = CaptureHoleShader
 	ProjectData.layers_changed.connect(_redraw)
@@ -72,6 +73,7 @@ func _draw() -> void:
 		return
 	var offset := _screen_offset()
 	_mouse = DisplayServer.mouse_get_position()
+	_claimed.clear()
 	_update_capture_holes(project, offset)
 
 	# Editor-style viewport chrome (grid, axes, rulers) underneath everything.
@@ -192,9 +194,9 @@ func _draw_layer(li: int, layer: LoopLayerT, offset: Vector2) -> void:
 		var positioned := LoopActionT.has_position(action.type)
 		var p := action.overlay_point(_mouse)
 		# Where the chips of the position-less actions that follow hang from.
-		# A Pixel Detect's inside is kept see-through (see
-		# _update_capture_holes), so anything drawn there vanishes: chips hang
-		# from its bottom-left corner, below the rect, not from its top-left.
+		# A Pixel Detect's inside is left clear so the target stays visible:
+		# chips hang from its bottom-left corner, below the rect, not from its
+		# top-left.
 		var tag_anchor := p
 		var detect_rect := Rect2i()
 		if action.type == LoopActionT.Type.PIXEL_DETECT:
@@ -229,8 +231,7 @@ func _draw_layer(li: int, layer: LoopLayerT, offset: Vector2) -> void:
 		if positioned:
 			# Positioned action: ordered step badge + execution highlight. A
 			# Pixel Detect's badge sits above its top-left corner; with no room
-			# above it goes below the rect (inside, it would vanish into the
-			# see-through hole).
+			# above it goes below the rect, not inside it.
 			step += 1
 			var badge := local + Vector2(13, -13)
 			if action.type == LoopActionT.Type.PIXEL_DETECT and badge.y - 9.0 < RULER + 2.0:
@@ -295,8 +296,8 @@ func _draw_range_box(extent: Rect2i, offset: Vector2, col: Color) -> void:
 
 ## PIXEL_DETECT: frame the rect with an outline and corner ticks, with the
 ## expected colour swatch and a size/tolerance label above it. Everything sits
-## *outside* the rect: playback scans the whole rect on screen, so the inside
-## is kept transparent (see _update_capture_holes) and must stay undrawn.
+## *outside* the rect, so the target inside stays visible (and, while playback
+## reads it, the inside is cut out altogether: see _update_capture_holes).
 ## With ranges the framed rect is the extent every possible rect lies in.
 func _draw_detect_guide(action: LoopActionT, screen_rect: Rect2i, offset: Vector2, col: Color, selected: bool) -> void:
 	var rect := Rect2(Vector2(screen_rect.position) - offset, Vector2(screen_rect.size))
@@ -305,8 +306,7 @@ func _draw_detect_guide(action: LoopActionT, screen_rect: Rect2i, offset: Vector
 	_draw_corner_ticks(rect.grow(3.0), col)
 	# Expected colour swatch + label on a strip above the rect, to the right of
 	# the step badge that sits at the top-left corner. With no room above (the
-	# rect at the top of the screen) the strip goes below the rect instead:
-	# inside it, it would vanish into the see-through hole.
+	# rect at the top of the screen) the strip goes below the rect instead.
 	var text := "detect  %s×%s  ±%s" % [
 		LoopActionT.range_text(action.w, action.w_max), LoopActionT.range_text(action.h, action.h_max),
 		LoopActionT.range_text(action.tolerance, action.tolerance_max)]
@@ -318,7 +318,7 @@ func _draw_detect_guide(action: LoopActionT, screen_rect: Rect2i, offset: Vector
 		top.y = rect.end.y + 8.0
 	# Clear of the step badge, which is pushed right of the ruler at the edge.
 	top.x = maxf(top.x, RULER + 26.0)
-	top = _fit(Rect2(top, Vector2(strip_w, 16))).position
+	top = _claim(Rect2(top, Vector2(strip_w, 16))).position
 	draw_rect(Rect2(top, Vector2(16, 16)), action.color, true)
 	draw_rect(Rect2(top, Vector2(16, 16)), Color.BLACK, false, 1.0)
 	_label(top + Vector2(20, 12), text, col)
@@ -392,7 +392,7 @@ func _draw_tag(pos: Vector2, col: Color, text: String, selected: bool) -> Rect2:
 	var tw := 16.0
 	if _font != null:
 		tw = _font.get_string_size(text, HORIZONTAL_ALIGNMENT_LEFT, -1, 13).x + 20.0
-	var rect := _fit(Rect2(pos, Vector2(tw, 20.0)))
+	var rect := _claim(Rect2(pos, Vector2(tw, 20.0)))
 	pos = rect.position
 	draw_rect(rect, Color(0, 0, 0, 0.72), true)
 	draw_rect(rect, col, false, 1.5)
@@ -415,7 +415,7 @@ func _draw_arrow_head(from: Vector2, to: Vector2, col: Color) -> void:
 
 
 func _draw_badge(pos: Vector2, text: String, col: Color) -> void:
-	pos = _fit(Rect2(pos - Vector2(9, 9), Vector2(18, 18))).get_center()
+	pos = _claim(Rect2(pos - Vector2(9, 9), Vector2(18, 18))).get_center()
 	draw_circle(pos, 9, Color(0, 0, 0, 0.65))
 	draw_arc(pos, 9, 0, TAU, 20, col, 1.5)
 	_label(pos - Vector2(text.length() * 3.0, -4), text, Color.WHITE, 12)
@@ -430,6 +430,37 @@ func _fit(rect: Rect2) -> Rect2:
 	var hi := size - rect.size - Vector2(2.0, 2.0)
 	rect.position = Vector2(clampf(rect.position.x, lo.x, maxf(lo.x, hi.x)), clampf(rect.position.y, lo.y, maxf(lo.y, hi.y)))
 	return rect
+
+
+## What has been written on this frame so far (badges, chips, strips), so
+## steps that share a spot do not write over one another.
+var _claimed: Array[Rect2] = []
+## Where a label is tried next when its place is taken: right, below, and
+## on outwards, a little further each time.
+const CLAIM_STEPS: Array[Vector2] = [
+	Vector2(0, 0), Vector2(1, 0), Vector2(0, 1), Vector2(1, 1), Vector2(2, 0), Vector2(0, 2),
+	Vector2(2, 1), Vector2(1, 2), Vector2(2, 2), Vector2(3, 0), Vector2(0, 3), Vector2(3, 1),
+	Vector2(1, 3), Vector2(3, 2), Vector2(2, 3), Vector2(3, 3),
+]
+
+
+## `rect` fitted on screen (see _fit) and moved off anything written
+## earlier this frame; claims the place it ends up at. Fresh from _draw.
+func _claim(rect: Rect2) -> Rect2:
+	var step := rect.size + Vector2(4.0, 4.0)
+	var placed := _fit(rect)
+	for offset in CLAIM_STEPS:
+		var candidate := _fit(Rect2(rect.position + offset * step, rect.size))
+		var free := true
+		for taken in _claimed:
+			if candidate.intersects(taken):
+				free = false
+				break
+		if free:
+			placed = candidate
+			break
+	_claimed.append(placed)
+	return placed
 
 
 ## The baseline position for `text` so that it stays on screen (see _fit).
@@ -513,28 +544,29 @@ func _draw_execution_tracker(offset: Vector2) -> void:
 
 # ------------------------------------------------------------ capture holes
 ## A PIXEL_DETECT action is checked anywhere inside its rect (see
-## PlaybackEngine._find_color). Every such rect — in every layer, since all
-## enabled layers run — is passed to the shader so nothing drawn here (other
-## guides, the grid, the tracker) can tint the screen read. A switched-off
-## action is neither read nor drawn, so it gets no hole.
+## PlaybackEngine._find_color). While playback has a rect pinned for a read
+## (the one frame before it reads the screen) that rect is cut out of the
+## overlay by the shader, so nothing drawn here — other guides, the grid,
+## the tracker — can tint the read. The rest of the time nothing is cut:
+## the inside of a rect is left undecorated so the target stays visible,
+## but a step that happens to lie inside another action's rect still shows.
 func _update_capture_holes(project: LoopProjectT, offset: Vector2) -> void:
 	var rects := PackedVector4Array()
-	_follows_mouse = false
-	for li in project.layers.size():
-		var layer: LoopLayerT = project.layers[li]
-		for ai in layer.actions.size():
-			var a: LoopActionT = layer.actions[ai]
-			if a.type == LoopActionT.Type.PIXEL_DETECT and a.enabled and rects.size() < 128:
-				# Same integer rect playback reads from the screen.
-				var r := _detect_rect(a, li, ai)
-				rects.append(Vector4(r.position.x - offset.x, r.position.y - offset.y, r.size.x, r.size.y))
-				if a.follow_cursor:
-					_follows_mouse = true
+	if Playback.detect_rect_pinned:
+		var r := Playback.detect_rect
+		rects.append(Vector4(r.position.x - offset.x, r.position.y - offset.y, r.size.x, r.size.y))
 	material.set_shader_parameter("rect_count", rects.size())
 	material.set_shader_parameter("rects", rects)
+	# Follow-cursor rects move with the mouse: keep _process watching it.
+	_follows_mouse = false
+	for layer in project.layers:
+		for a in layer.actions:
+			if a.type == LoopActionT.Type.PIXEL_DETECT and a.enabled and a.follow_cursor:
+				_follows_mouse = true
+				return
 
 
-## The screen rect a Pixel Detect is drawn (and left see-through) at. While
+## The screen rect a Pixel Detect is drawn at. While
 ## playback is reading the action at (li, ai) it is the rect pinned for that
 ## read (see PlaybackEngine.detect_rect); otherwise it is the extent of every
 ## rect the ranges allow, following the mouse or at the stored position.
