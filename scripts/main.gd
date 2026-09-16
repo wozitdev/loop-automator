@@ -552,9 +552,13 @@ func _refresh_layers() -> void:
 	layer_list.clear()
 	for i in ProjectData.project.layers.size():
 		var l: LoopLayerT = ProjectData.project.layers[i]
-		var mark := "" if l.enabled else " (off)"
-		layer_list.add_item("%s%s" % [l.name, mark])
+		# Two marks in front of the name: runs / does not run, drawn / not
+		# drawn on the overlay (the same check and cross as the action list).
+		layer_list.add_item(l.name, UiIconsT.layer_marks(l.enabled, l.visible))
 		layer_list.set_item_custom_fg_color(i, l.color)
+		var tip := "Runs in the loop" if l.enabled else "Does not run (off)"
+		tip += ", drawn on the overlay" if l.visible else ", not drawn on the overlay"
+		layer_list.set_item_tooltip(i, tip)
 	_refresh_layers_selection()
 
 
