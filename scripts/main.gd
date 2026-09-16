@@ -813,7 +813,7 @@ func _add_button_field(a: LoopActionT) -> void:
 
 
 func _add_keys_field(a: LoopActionT) -> void:
-	# The label is a checkbox, "~Keys" when checked: the keys are then typed
+	# The label is the "~Keys" checkbox: checked, the keys are typed
 	# one at a time with random pauses, like a hand (a combo stays together).
 	var row := _row_toggle("Keys", a.keys_paced,
 		"What to type, in SendKeys format.\nChecked: typed one key at a time with random pauses between them, like a person would; combos such as ^c stay one press.",
@@ -1110,7 +1110,7 @@ func _add_range_field_in(row: Container, lo: int, hi: int, min_v: int, max_v: in
 
 
 ## A Move / Drag's duration: how long the travel takes. Its label is a
-## checkbox, "~Duration (ms)" when checked: the cursor then wanders a
+## checkbox, "~Duration (ms)": checked, the cursor wanders a
 ## little on the way, like a hand, without moving where it starts or lands.
 func _add_duration_field(a: LoopActionT) -> void:
 	var row := _row_toggle("Duration (ms)", a.wiggle,
@@ -1927,21 +1927,19 @@ func _row(label: String) -> HBoxContainer:
 	return row
 
 
-## A row whose label is a checkbox: `label` unchecked, "~" + `label` when
-## checked (the "~" marks the setting's random side being on). `on_toggle`
-## gets the new state.
+## A row whose label is a "~" checkbox ("~Keys"), like the toolbar's ~Delay
+## ms / ~Edit / ~Self: the "~" marks a setting with a random, hand-like
+## side that the box turns on. `on_toggle` gets the new state.
 func _row_toggle(label: String, checked: bool, tip: String, on_toggle: Callable) -> HBoxContainer:
 	var row := HBoxContainer.new()
 	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	var cb := CheckBox.new()
-	cb.text = ("~" if checked else "") + label
+	cb.text = "~" + label
 	cb.tooltip_text = tip
 	cb.focus_mode = Control.FOCUS_NONE
 	cb.button_pressed = checked
 	cb.custom_minimum_size = Vector2(120, 0)
-	cb.toggled.connect(func(v: bool):
-		cb.text = ("~" if v else "") + label
-		on_toggle.call(v))
+	cb.toggled.connect(on_toggle)
 	row.add_child(cb)
 	return row
 
