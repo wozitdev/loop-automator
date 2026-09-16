@@ -12,6 +12,7 @@ const StopHotkeyT := preload("res://scripts/input/stop_hotkey.gd")
 const LoopActionT := preload("res://scripts/model/loop_action.gd")
 const LoopProjectT := preload("res://scripts/model/loop_project.gd")
 const LoopLayerT := preload("res://scripts/model/loop_layer.gd")
+const MousePathT := preload("res://scripts/model/mouse_path.gd")
 
 signal playback_started
 signal playback_stopped
@@ -260,11 +261,7 @@ func _execute_action(action: LoopActionT, layer_index: int, action_index: int) -
 	match action.type:
 		LoopActionT.Type.MOVE:
 			var p := action.roll_point()
-			_set_tracker(p, true, "MOVE")
-			backend.move_to(p)
-			var dwell := action.roll_duration_ms()
-			if dwell > 0:
-				await _sleep_ms(dwell)
+			await _travel(_mouse_pos(), p, action.roll_duration_ms(), "MOVE")
 		LoopActionT.Type.CLICK:
 			var p := action.roll_point()
 			_set_tracker(p, true, "CLICK")
@@ -275,12 +272,13 @@ func _execute_action(action: LoopActionT, layer_index: int, action_index: int) -
 			var p2 := action.roll_point2()
 			_set_tracker(p, true, "DRAG START")
 			backend.mouse_button(action.button, true, p)
-			var hold := action.roll_duration_ms()
-			if hold > 0:
-				await _sleep_ms(hold)
-			_set_tracker(p2, true, "DRAG END")
-			backend.mouse_button(action.button, false, p2)
-			_report_skipped(action)
+			if backend.last_skipped:
+				_report_skipped(action)
+			else:
+				# The button is always released, a stop mid-drag included.
+				await _travel(p, p2, action.roll_duration_ms(), "DRAG")
+				_set_tracker(p2, true, "DRAG END")
+				backend.mouse_button(action.button, false, p2)
 		LoopActionT.Type.KEY:
 			_set_tracker(tracker_pos, tracker_visible, "KEY")
 			backend.send_keys(action.keys)
@@ -352,18 +350,27 @@ func _execute_captured(action: LoopActionT) -> void:
 	var to := action.roll_point2()
 	var kind := "move"
 	var ms := action.roll_duration_ms()
+	# The travel the duration is spent on: a move gets there from where the
+	# cursor is, a drag goes from its first point to its second.
+	var path := MousePathT.make(_mouse_pos(), from, ms)
 	match action.type:
 		LoopActionT.Type.CLICK:
 			kind = "click"
 			ms = 0
 		LoopActionT.Type.DRAG:
 			kind = "drag"
-	_set_tracker(from, true, kind.to_upper() + " ↩")
+			path = MousePathT.make(from, to, ms)
+	var label := kind.to_upper() + " ↩"
+	_set_tracker(from, true, label)
 	var b := backend
 	var thread := Thread.new()
 	thread.start(func() -> Array:
-		return b.run_captured(kind, action.button, from, to, ms, action.ghost_cursor))
+		return b.run_captured(kind, action.button, from, to, ms, action.ghost_cursor, path))
+	# The tracker walks the path while the helper moves the real cursor.
+	var started := Time.get_ticks_msec()
 	while thread.is_alive():
+		if kind != "click" and ms > 0:
+			_set_tracker(Vector2i(MousePathT.at(path, float(Time.get_ticks_msec() - started) / float(ms)).round()), true, label)
 		await get_tree().process_frame
 	var result: Array = thread.wait_to_finish()
 	if result.size() != 2:
@@ -375,6 +382,57 @@ func _execute_captured(action: LoopActionT) -> void:
 	_saved_cursor = result[0]
 	_has_saved_cursor = true
 	_set_tracker(result[1], true, "RESTORE")
+
+
+## A move with a duration is sent to the helper in pieces of about this
+## long, so a stop takes effect between them (a captured action is one
+## helper command and runs to its end).
+const TRAVEL_CHUNK_MS := 200
+
+
+## Moves the cursor from `from` to `to` over `ms` (see MousePath), showing
+## the travel on the tracker as `label`. With `ms` 0 it is a jump. A stop
+## ends the travel where the cursor is.
+func _travel(from: Vector2i, to: Vector2i, ms: int, label: String) -> void:
+	var path := MousePathT.make(from, to, ms)
+	if path.size() <= 2:
+		_set_tracker(to, true, label)
+		backend.move_to(to)
+		return
+	var gen := _generation
+	var started := Time.get_ticks_msec()
+	if backend.is_real():
+		# The helper steps the real cursor, a piece of the path at a time on
+		# a worker thread; the tracker follows the clock meanwhile.
+		var b := backend
+		var pieces := maxi(1, ceili(float(ms) / float(TRAVEL_CHUNK_MS)))
+		var last := 0
+		for c in pieces:
+			if not is_running or gen != _generation:
+				return
+			var end := path.size() - 1 if c == pieces - 1 else roundi(float(path.size() - 1) * float(c + 1) / float(pieces))
+			var piece := path.slice(last, end + 1)
+			var piece_ms := roundi(float(ms) * float(end - last) / float(path.size() - 1))
+			last = end
+			var thread := Thread.new()
+			thread.start(func(): b.move_path(piece, piece_ms))
+			while thread.is_alive():
+				if is_running and gen == _generation:
+					_set_tracker(Vector2i(MousePathT.at(path, float(Time.get_ticks_msec() - started) / float(ms)).round()), true, label)
+				await get_tree().process_frame
+			thread.wait_to_finish()
+	else:
+		while true:
+			var t := float(Time.get_ticks_msec() - started) / float(ms)
+			if t >= 1.0 or not is_running or gen != _generation:
+				break
+			var p := Vector2i(MousePathT.at(path, t).round())
+			backend.move_to(p)
+			_set_tracker(p, true, label)
+			await get_tree().process_frame
+	if is_running and gen == _generation:
+		backend.move_to(to)
+		_set_tracker(to, true, label)
 
 
 ## Remembers the current mouse position. Returns false (leaving any earlier

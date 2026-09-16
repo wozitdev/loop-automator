@@ -52,9 +52,10 @@ layer 1, just broken out so you can view each layer's visuals separately.
 
 ## Action types
 
-- **Move** — move the cursor to `(x, y)` (optional dwell duration).
+- **Move** — move the cursor to `(x, y)`; with a duration the cursor travels
+  there over that time instead of jumping.
 - **Click** — move to `(x, y)` and click Left / Right / Middle.
-- **Drag** — press at A, move to B, release.
+- **Drag** — press at A, move to B over the duration, release.
 - **Key** — send keystrokes. In Live mode this uses the
   [`SendKeys`](https://learn.microsoft.com/dotnet/api/system.windows.forms.sendkeys)
   format, e.g. `abc`, `{ENTER}`, `^c` (Ctrl+C), `%{F4}` (Alt+F4). You can

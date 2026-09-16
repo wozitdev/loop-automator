@@ -20,6 +20,13 @@ func is_real() -> bool:
 func move_to(pos: Vector2i) -> void:
 	pass
 
+## Moves the cursor through `path` (see MousePath) over `ms`, blocking for
+## the whole travel (callers run it off the main thread). The default just
+## lands on the last point.
+func move_path(path: PackedVector2Array, _ms: int) -> void:
+	if not path.is_empty():
+		move_to(Vector2i(path[path.size() - 1].round()))
+
 func mouse_button(_button: int, _pressed: bool, _pos: Vector2i) -> void:
 	pass
 
@@ -90,11 +97,13 @@ func get_cursor_pos() -> Vector2i:
 ## is, do the action, put the cursor back where it was plus whatever the user
 ## moved the mouse meanwhile. Backends do this as atomically as they can so
 ## the cursor is away for as short a time as possible.
-##   kind: "move" (dwell `ms` at `from`), "click" (`button` at `from`), or
-##         "drag" (`button` from `from` to `to`, holding `ms`).
+##   kind: "move" (travel to `from` over `ms`), "click" (`button` at `from`),
+##         or "drag" (`button` down at `from`, travel to `to` over `ms`, up).
 ##   ghost: hide the real cursor for the duration and show a ghost cursor that
 ##         keeps following the user, so nothing appears to jump.
+##   path: the travel (see MousePath): for a move it starts where the cursor
+##         is and ends at `from`; for a drag it runs from `from` to `to`.
 ## Blocks for the whole action (callers run it off the main thread). Returns
 ## [saved_pos, restored_pos], or [] if the action could not be performed.
-func run_captured(_kind: String, _button: int, _from: Vector2i, _to: Vector2i, _ms: int, _ghost: bool) -> Array:
+func run_captured(_kind: String, _button: int, _from: Vector2i, _to: Vector2i, _ms: int, _ghost: bool, _path: PackedVector2Array) -> Array:
 	return []
