@@ -539,10 +539,26 @@ func _on_project_replaced() -> void:
 	_refresh_loop_stack_ui()
 
 
-func _on_action_executing(layer_index: int, action_index: int) -> void:
-	if layer_index == ProjectData.active_layer_index and action_index >= 0 \
-			and action_index < action_list.item_count:
-		action_list.select(action_index)
+## The tint behind the step (and the layer) a run is on. The selection is
+## left alone: what you picked stays picked and the editor keeps showing it.
+const RUNNING_TINT := Color(0.25, 0.55, 1.0, 0.28)
+
+
+func _on_action_executing(_layer_index: int, _action_index: int) -> void:
+	_refresh_running_marks()
+
+
+## Tints the row of the step a run is on in the action list (when its layer
+## is the one shown) and of its layer in the layer list; clears both when
+## nothing runs.
+func _refresh_running_marks() -> void:
+	var li := Playback.current_layer_index if Playback.is_running else -1
+	var ai := Playback.current_action_index if Playback.is_running else -1
+	for i in action_list.item_count:
+		var on := li == _shown_layer_index and i == ai
+		action_list.set_item_custom_bg_color(i, RUNNING_TINT if on else Color(0, 0, 0, 0))
+	for i in layer_list.item_count:
+		layer_list.set_item_custom_bg_color(i, RUNNING_TINT if i == li else Color(0, 0, 0, 0))
 
 
 # ======================================================================
@@ -560,6 +576,7 @@ func _refresh_layers() -> void:
 		tip += ", drawn on the overlay" if l.visible else ", not drawn on the overlay"
 		layer_list.set_item_tooltip(i, tip)
 	_refresh_layers_selection()
+	_refresh_running_marks()
 
 
 func _refresh_layers_selection() -> void:
@@ -592,6 +609,7 @@ func _refresh_actions() -> void:
 	# Remember which layer is shown so selection_changed knows when to repopulate.
 	_shown_layer_index = ProjectData.active_layer_index
 	_refresh_actions_selection()
+	_refresh_running_marks()
 
 
 func _refresh_actions_selection() -> void:
