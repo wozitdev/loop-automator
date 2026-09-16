@@ -53,6 +53,10 @@ var follow_cursor: bool = false
 ## MOVE / DRAG: wander a little on the way (see MousePath), the way a hand
 ## does; where the travel starts and lands is not affected.
 var wiggle: bool = false
+## KEY: send the keys one at a time with a random pause between them, the
+## way typing goes, instead of all at once (see split_keys for what "one
+## at a time" keeps together).
+var keys_paced: bool = false
 
 # Geometry / parameters (only the relevant ones are used per type). Every
 # numeric setting is a range: `x` .. `x_max` and so on. Each time the action
@@ -123,6 +127,41 @@ func roll_duration_ms() -> int:
 
 func roll_tolerance() -> int:
 	return clampi(roll(tolerance, tolerance_max), 0, 255)
+
+
+## `text` (SendKeys format) cut into the keystrokes it stands for, so
+## paced typing can send them one at a time: a plain character, a braced
+## key ("{ENTER}", "{F4 3}", "{{}", "{}}"), or a group "(abc)", each with
+## the ^ + % modifiers in front of it kept attached ("^c", "+(ab)", "%{F4}"
+## stay one keystroke, so a combo is pressed as one).
+static func split_keys(text: String) -> PackedStringArray:
+	var out := PackedStringArray()
+	var mods := ""
+	var i := 0
+	var n := text.length()
+	while i < n:
+		var ch := text[i]
+		if ch == "^" or ch == "+" or ch == "%":
+			mods += ch
+			i += 1
+			continue
+		var end := i + 1
+		if ch == "{":
+			# "{}}" is a literal "}"; otherwise the token runs to the next "}".
+			if i + 2 < n and text[i + 1] == "}" and text[i + 2] == "}":
+				end = i + 3
+			else:
+				var close := text.find("}", i + 1)
+				end = n if close < 0 else close + 1
+		elif ch == "(":
+			var close := text.find(")", i + 1)
+			end = n if close < 0 else close + 1
+		out.append(mods + text.substr(i, end - i))
+		mods = ""
+		i = end
+	if not mods.is_empty():
+		out.append(mods)
+	return out
 
 
 ## Where point A (MOVE / CLICK / DRAG start) can land.
@@ -281,6 +320,7 @@ func to_dict() -> Dictionary:
 		"capture_mode": capture_mode,
 		"follow_cursor": follow_cursor,
 		"wiggle": wiggle,
+		"keys_paced": keys_paced,
 	}
 
 
@@ -319,6 +359,7 @@ static func from_dict(d: Dictionary) -> Self:
 	a.capture_mode = int(d.get("capture_mode", CaptureMode.SAVE))
 	a.follow_cursor = bool(d.get("follow_cursor", false))
 	a.wiggle = bool(d.get("wiggle", false))
+	a.keys_paced = bool(d.get("keys_paced", false))
 	return a
 
 

@@ -281,8 +281,11 @@ func _execute_action(action: LoopActionT, layer_index: int, action_index: int) -
 				backend.mouse_button(action.button, false, p2)
 		LoopActionT.Type.KEY:
 			_set_tracker(tracker_pos, tracker_visible, "KEY")
-			backend.send_keys(action.keys)
-			_report_skipped(action)
+			if action.keys_paced:
+				await _type_paced(action)
+			else:
+				backend.send_keys(action.keys)
+				_report_skipped(action)
 		LoopActionT.Type.WAIT:
 			var wait := action.roll_wait_ms()
 			emit_signal("status", "Wait: %d ms" % wait)
@@ -382,6 +385,35 @@ func _execute_captured(action: LoopActionT) -> void:
 	_saved_cursor = result[0]
 	_has_saved_cursor = true
 	_set_tracker(result[1], true, "RESTORE")
+
+
+## ~Keys: the pause between two keystrokes, and the longer one a hand
+## makes now and then (one keystroke in KEY_PAUSE_LONG_EVERY, on average).
+const KEY_PAUSE_MIN_MS := 40
+const KEY_PAUSE_MAX_MS := 160
+const KEY_PAUSE_LONG_MIN_MS := 200
+const KEY_PAUSE_LONG_MAX_MS := 420
+const KEY_PAUSE_LONG_EVERY := 9
+
+
+## Sends a Key action's text one keystroke at a time (see
+## LoopAction.split_keys: a combo stays one keystroke) with a random pause
+## between them, the way typing goes. A stop ends it between keystrokes.
+func _type_paced(action: LoopActionT) -> void:
+	var gen := _generation
+	var strokes := LoopActionT.split_keys(action.keys)
+	for i in strokes.size():
+		if not is_running or gen != _generation:
+			return
+		backend.send_keys(strokes[i])
+		if backend.last_skipped:
+			_report_skipped(action)
+			return
+		if i < strokes.size() - 1:
+			var pause := randi_range(KEY_PAUSE_MIN_MS, KEY_PAUSE_MAX_MS)
+			if randi_range(1, KEY_PAUSE_LONG_EVERY) == 1:
+				pause = randi_range(KEY_PAUSE_LONG_MIN_MS, KEY_PAUSE_LONG_MAX_MS)
+			await _sleep_ms(pause)
 
 
 ## A move with a duration is sent to the helper in pieces of about this

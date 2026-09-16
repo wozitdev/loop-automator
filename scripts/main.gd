@@ -813,7 +813,13 @@ func _add_button_field(a: LoopActionT) -> void:
 
 
 func _add_keys_field(a: LoopActionT) -> void:
-	var row := _row("Keys")
+	# The label is a checkbox, "~Keys" when checked: the keys are then typed
+	# one at a time with random pauses, like a hand (a combo stays together).
+	var row := _row_toggle("Keys", a.keys_paced,
+		"What to type, in SendKeys format.\nChecked: typed one key at a time with random pauses between them, like a person would; combos such as ^c stay one press.",
+		func(v: bool):
+			a.keys_paced = v
+			_after_edit())
 	var le := LineEdit.new()
 	le.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	le.text = a.keys
