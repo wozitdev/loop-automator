@@ -230,7 +230,12 @@ func _build_toolbar() -> Control:
 	loop_prev_btn = _tool_button("◀", func(): _switch_loop(-1))
 	hb.add_child(loop_prev_btn)
 	loop_picker = OptionButton.new()
-	loop_picker.custom_minimum_size = Vector2(170, 0)
+	# One width whatever the loop is called: room for "1. @@@@@@@@ *", a
+	# longer name is cut with "…" (the list that drops down shows it whole).
+	loop_picker.fit_to_longest_item = false
+	loop_picker.clip_text = true
+	loop_picker.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+	loop_picker.custom_minimum_size = Vector2(_option_button_width(loop_picker, "1. @@@@@@@@ *"), 0)
 	loop_picker.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
 	loop_picker.item_selected.connect(_on_loop_picker_selected)
 	hb.add_child(loop_picker)
@@ -1858,6 +1863,16 @@ func _icon_button(icon: Texture2D, tip: String, cb: Callable) -> Button:
 	b.focus_mode = Control.FOCUS_NONE
 	b.pressed.connect(cb)
 	return b
+
+
+## The width `btn` needs to show `sample` in full: the text, the drop-down
+## arrow and the button's own margins.
+func _option_button_width(btn: OptionButton, sample: String) -> float:
+	var font := btn.get_theme_font("font")
+	var text_w := font.get_string_size(sample, HORIZONTAL_ALIGNMENT_LEFT, -1, btn.get_theme_font_size("font_size")).x
+	var arrow_w := btn.get_theme_icon("arrow").get_width() + btn.get_theme_constant("arrow_margin")
+	var margins := btn.get_theme_stylebox("normal").get_minimum_size().x
+	return ceilf(text_w + arrow_w + margins + 2.0 * btn.get_theme_constant("h_separation"))
 
 
 func _row(label: String) -> HBoxContainer:
