@@ -1399,7 +1399,8 @@ func _refresh_loop_stack_ui() -> void:
 		if name.is_empty():
 			name = str(id)
 		var dirty_mark := " *" if ProjectData.loop_is_pending(id) else ""
-		loop_picker.add_item("%d. %s%s" % [id, _shorten_text(name, 28), dirty_mark], id)
+		# Numbered by place in the list (the store id behind it only ever grows).
+		loop_picker.add_item("%d. %s%s" % [loop_picker.item_count + 1, _shorten_text(name, 28), dirty_mark], id)
 		if id == previous_id:
 			active_idx = loop_picker.item_count - 1
 	if active_idx >= 0:
@@ -1414,8 +1415,13 @@ func _refresh_loop_stack_ui() -> void:
 		save_btn.text = "Save%s" % pending_mark
 	var loop_name := _shorten_text(ProjectData.active_loop_display_name(), 32)
 	var pending_text := " (unsaved)" if ProjectData.active_loop_is_pending() else ""
-	var idx := maxi(0, ProjectData.active_loop_stack_index()) + 1
-	status_label.text = "Loop %d/%d · %s%s" % [idx, maxi(1, total), loop_name, pending_text]
+	status_label.text = "Loop %d/%d · %s%s" % [_active_loop_number(), maxi(1, total), loop_name, pending_text]
+
+
+## The open loop's number as the picker and the status line show it: its
+## place in the list, 1 up (not its store id, which only ever grows).
+func _active_loop_number() -> int:
+	return maxi(0, ProjectData.active_loop_stack_index()) + 1
 
 
 func _on_play_pressed() -> void:
@@ -1550,7 +1556,7 @@ func _animate_stop_feedback(include_safety: bool) -> void:
 func _on_new() -> void:
 	_commit_pending_edits()
 	var id := ProjectData.create_loop(true)
-	status_label.text = "Opened new loop %d, \"%s\"." % [id, ProjectData.active_loop_display_name()]
+	status_label.text = "Opened new loop %d, \"%s\"." % [_active_loop_number(), ProjectData.active_loop_display_name()]
 
 
 func _on_save() -> void:
@@ -1566,7 +1572,7 @@ func _on_duplicate_loop() -> void:
 	var id := ProjectData.duplicate_loop()
 	if id < 0:
 		return
-	status_label.text = "Duplicated \"%s\" as loop %d, \"%s\"." % [from, id, ProjectData.active_loop_display_name()]
+	status_label.text = "Duplicated \"%s\" as loop %d, \"%s\"." % [from, _active_loop_number(), ProjectData.active_loop_display_name()]
 
 
 func _confirm_delete_loop() -> void:
@@ -1574,10 +1580,11 @@ func _confirm_delete_loop() -> void:
 	if id < 0 or ProjectData.project == null:
 		return
 	var layers := ProjectData.project.layers.size()
-	_confirm("Delete loop \"%s\" and its %d layer(s)? Its file is removed too." % [ProjectData.active_loop_display_name(), layers],
+	var name := ProjectData.active_loop_display_name()
+	_confirm("Delete loop \"%s\" and its %d layer(s)? Its file is removed too." % [name, layers],
 		func():
 			if ProjectData.delete_loop(id):
-				status_label.text = "Deleted loop %d." % id)
+				status_label.text = "Deleted loop \"%s\"." % name)
 
 
 func _on_export() -> void:
@@ -1646,7 +1653,7 @@ func _ask_import(path: String) -> void:
 		if id < 0:
 			status_label.text = "Import failed: %s is not a readable .loop file." % path.get_file()
 		else:
-			status_label.text = "Imported \"%s\" as loop %d." % [ProjectData.active_loop_display_name(), id]
+			status_label.text = "Imported \"%s\" as loop %d." % [ProjectData.active_loop_display_name(), _active_loop_number()]
 	_confirm(text, do_import, "Import")
 
 
