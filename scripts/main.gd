@@ -460,7 +460,7 @@ func _build_action_panel() -> Control:
 	var pm := add_btn.get_popup()
 	for t in [LoopActionT.Type.MOVE, LoopActionT.Type.CLICK, LoopActionT.Type.DRAG,
 			LoopActionT.Type.KEY, LoopActionT.Type.WAIT, LoopActionT.Type.PIXEL_DETECT,
-			LoopActionT.Type.CAPTURE]:
+			LoopActionT.Type.CAPTURE, LoopActionT.Type.STOP]:
 		pm.add_item(LoopActionT.type_name(t), t)
 	pm.id_pressed.connect(func(id): ProjectData.add_action(id))
 	btns.add_child(add_btn)
@@ -726,6 +726,8 @@ func _rebuild_editor() -> void:
 			_add_on_fail_field(a)
 		LoopActionT.Type.CAPTURE:
 			_add_capture_mode_field(a)
+		LoopActionT.Type.STOP:
+			_add_stop_field(a)
 
 	_add_comment_field(a)
 	# Built during a Live run (the engine can switch an action off): locked
@@ -954,15 +956,52 @@ func _add_on_fail_field(a: LoopActionT) -> void:
 		func(v: bool):
 			a.safe_continue = v
 			_after_edit())
+	# Stopping the loop is the Stop action's job now, not a Pixel Detect's.
 	var opt := OptionButton.new()
 	opt.add_item("Skip rest of layer", LoopActionT.OnFail.SKIP_LAYER)
-	opt.add_item("Stop loop", LoopActionT.OnFail.STOP_LOOP)
-	opt.select(opt.get_item_index(a.on_fail))
+	opt.add_item("Wait till found", LoopActionT.OnFail.WAIT_FOUND)
+	opt.select(maxi(0, opt.get_item_index(a.on_fail)))
 	opt.item_selected.connect(func(i):
 		a.on_fail = opt.get_item_id(i)
-		_after_edit())
+		_after_edit()
+		# Show or hide the re-check interval for "Wait till found".
+		_rebuild_editor.call_deferred())
 	row.add_child(opt)
 	editor_box.add_child(row)
+	if a.on_fail == LoopActionT.OnFail.WAIT_FOUND:
+		# "Wait till found" re-checks the same spot on this interval until the
+		# colour appears (F8 / Esc / a Stop action still ends the loop).
+		_add_range_field("Check every (ms)", a.wait_ms, a.wait_ms_max, 0, 600000, func(lo: int, hi: int):
+			a.wait_ms = lo
+			a.wait_ms_max = hi)
+		# ~Timeout: give up after this long and skip the rest of the layer.
+		var trow := HBoxContainer.new()
+		trow.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		var tcb := CheckBox.new()
+		tcb.text = "~Timeout (ms)"
+		tcb.focus_mode = Control.FOCUS_NONE
+		tcb.button_pressed = a.wait_timeout
+		tcb.custom_minimum_size = Vector2(120, 0)
+		tcb.tooltip_text = "Checked: stop waiting after this long and skip the rest of the layer."
+		var tsp := SpinBox.new()
+		tsp.min_value = 0
+		tsp.max_value = 3600000
+		tsp.step = 1
+		tsp.value = a.wait_timeout_ms
+		tsp.editable = a.wait_timeout
+		tsp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		tsp.get_line_edit().text_changed.connect(func(_t: String): tsp.set_meta(&"typed", true))
+		tsp.value_changed.connect(func(v: float):
+			tsp.set_meta(&"typed", false)
+			a.wait_timeout_ms = int(v)
+			_after_edit())
+		tcb.toggled.connect(func(v: bool):
+			a.wait_timeout = v
+			tsp.editable = v
+			_after_edit())
+		trow.add_child(tcb)
+		trow.add_child(tsp)
+		editor_box.add_child(trow)
 
 
 func _add_capture_mode_field(a: LoopActionT) -> void:
@@ -978,6 +1017,48 @@ func _add_capture_mode_field(a: LoopActionT) -> void:
 	editor_box.add_child(row)
 	var hint := Label.new()
 	hint.text = "Save remembers where the mouse is; Load moves it back there. A Load with nothing saved yet does nothing and disables itself."
+	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	hint.modulate = Color(1, 1, 1, 0.7)
+	editor_box.add_child(hint)
+
+
+## The Stop action: what it ends (the loop, or just this layer's pass) and,
+## inline, which pass it fires on — pass 1 the first time it is reached, N
+## on the Nth pass.
+func _add_stop_field(a: LoopActionT) -> void:
+	var row := HBoxContainer.new()
+	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	var stop_lbl := Label.new()
+	stop_lbl.text = "Stop"
+	row.add_child(stop_lbl)
+	var opt := OptionButton.new()
+	opt.add_item("The loop", LoopActionT.StopScope.LOOP)
+	opt.add_item("This layer", LoopActionT.StopScope.LAYER)
+	opt.select(opt.get_item_index(a.stop_scope))
+	opt.item_selected.connect(func(i):
+		a.stop_scope = opt.get_item_id(i)
+		_after_edit())
+	row.add_child(opt)
+	var after := Label.new()
+	after.text = "on pass"
+	row.add_child(after)
+	var sp := SpinBox.new()
+	sp.min_value = 1
+	sp.max_value = 1000000
+	sp.step = 1
+	sp.value = a.stop_after
+	sp.custom_minimum_size = Vector2(72, 0)
+	sp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	sp.tooltip_text = "1 = stop the first time this action is reached.\nN = stop on the Nth pass that reaches it (a run limiter)."
+	sp.get_line_edit().text_changed.connect(func(_t: String): sp.set_meta(&"typed", true))
+	sp.value_changed.connect(func(v: float):
+		sp.set_meta(&"typed", false)
+		a.stop_after = int(v)
+		_after_edit())
+	row.add_child(sp)
+	editor_box.add_child(row)
+	var hint := Label.new()
+	hint.text = "Stops the whole loop, or ends just this layer for the pass, when reached. Pass N makes it a run limiter."
 	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	hint.modulate = Color(1, 1, 1, 0.7)
 	editor_box.add_child(hint)
@@ -1532,18 +1613,23 @@ func _run_label() -> String:
 
 func _refresh_edit_lock() -> void:
 	var locked := _is_interaction_locked()
+	# The window dims while a Live loop runs, ~Self or not. A Pixel Detect
+	# reading Loop Automator's own window (~Self on) then reads the dimmed
+	# colours — the user accounts for that shift; the dim cue is kept.
+	var tint := Color(1, 1, 1, 0.65) if locked else Color(1, 1, 1, 1)
 	if _ui_root != null:
 		_set_controls_locked(_ui_root, locked)
-		_ui_root.modulate = Color(1, 1, 1, 0.65) if locked else Color(1, 1, 1, 1)
+		_ui_root.modulate = tint
 	if play_btn != null:
 		# Keep this as the only clickable control in lock mode.
 		play_btn.disabled = _stop_cooldown_active
 		if locked:
 			play_btn.disabled = false
 	if _main_split != null:
-		_main_split.modulate = Color(1, 1, 1, 0.65) if locked else Color(1, 1, 1, 1)
+		_main_split.modulate = tint
 	if _edit_lock_blocker != null:
 		_edit_lock_blocker.visible = locked
+		_edit_lock_blocker.color = Color(0.0, 0.0, 0.0, 0.20)
 		_edit_lock_blocker.move_to_front()
 	if backend_option != null:
 		backend_option.disabled = locked

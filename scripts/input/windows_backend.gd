@@ -466,10 +466,11 @@ if ($cmd -ne 'serve') { Run-Cmd $a; exit 0 }
 # command above (input commands get their 'guard <pid>' prefix as usual; the
 # 'key' text is one base64 argument; \"ok\" is answered when the command
 # prints nothing), the server has read commands of its own:
-#   find x y w h r g b tol step  -> \"x,y\" of the first pixel within tol of
-#     (r,g,b), sampling every step-th pixel (centre first), or
-#     \"none,r,g,b\" with the centre pixel's colour. The scan runs here, in
-#     compiled C#, so no image ever crosses the pipe.
+#   find x y w h r g b tol step guard  -> \"x,y\" of the first pixel within
+#     tol of (r,g,b), sampling every step-th pixel (centre first), or
+#     \"none,r,g,b\" with the centre pixel's colour. A match on a window of
+#     `guard` (Loop Automator itself, ~Self off) is skipped; 0 matches
+#     anything. The scan runs here, in compiled C#, so no image crosses the pipe.
 #   pixel x y                    -> \"r,g,b\"
 #   cursor                       -> \"x,y\"
 # A failing command answers \"error ...\". The first line printed is \"ready\".
@@ -480,8 +481,23 @@ Add-Type -ReferencedAssemblies System.Drawing @\"
 using System; using System.Drawing; using System.Drawing.Imaging; using System.Runtime.InteropServices;
 public class Scan {
   static byte[] buf = new byte[0];
+  [StructLayout(LayoutKind.Sequential)] struct PT { public int x; public int y; }
+  [DllImport(\"user32.dll\")] static extern IntPtr WindowFromPoint(PT p);
+  [DllImport(\"user32.dll\")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
   static bool Near(byte[] p, int i, int r, int g, int b, int tol) {
     return Math.Abs(p[i+2] - r) <= tol && Math.Abs(p[i+1] - g) <= tol && Math.Abs(p[i] - b) <= tol;
+  }
+  // True when the window at (x, y) belongs to the guarded process (~Self
+  // off). The overlay is click-through, so WindowFromPoint looks past it to
+  // whatever is underneath — a match on Loop Automator's own builder window
+  // is skipped, a match on the target app is not.
+  static bool Guarded(int x, int y, int guard) {
+    if (guard == 0) return false;
+    PT p; p.x = x; p.y = y;
+    IntPtr h = WindowFromPoint(p);
+    if (h == IntPtr.Zero) return false;
+    uint pid; GetWindowThreadProcessId(h, out pid);
+    return pid == (uint)guard;
   }
   // Grabs the screen rect into `buf` (32bpp BGRA) and returns its stride.
   static int Grab(int x, int y, int w, int h) {
@@ -496,14 +512,14 @@ public class Scan {
       return d.Stride;
     }
   }
-  public static string Find(int x, int y, int w, int h, int r, int g, int b, int tol, int step) {
+  public static string Find(int x, int y, int w, int h, int r, int g, int b, int tol, int step, int guard) {
     int stride = Grab(x, y, w, h);
     int cx = w / 2, cy = h / 2, c = cy * stride + cx * 4;
-    if (Near(buf, c, r, g, b, tol)) return (x + cx) + \",\" + (y + cy);
+    if (Near(buf, c, r, g, b, tol) && !Guarded(x + cx, y + cy, guard)) return (x + cx) + \",\" + (y + cy);
     for (int yy = 0; yy < h; yy += step) {
       int row = yy * stride;
       for (int xx = 0; xx < w; xx += step)
-        if (Near(buf, row + xx * 4, r, g, b, tol)) return (x + xx) + \",\" + (y + yy);
+        if (Near(buf, row + xx * 4, r, g, b, tol) && !Guarded(x + xx, y + yy, guard)) return (x + xx) + \",\" + (y + yy);
     }
     return \"none,\" + buf[c+2] + \",\" + buf[c+1] + \",\" + buf[c];
   }
@@ -521,7 +537,7 @@ while ($true) {
   $p = $line.Split(' ')
   try {
     switch ($p[0]) {
-      'find' { $out.WriteLine([Scan]::Find([int]$p[1],[int]$p[2],[int]$p[3],[int]$p[4],[int]$p[5],[int]$p[6],[int]$p[7],[int]$p[8],[int]$p[9])) }
+      'find' { $out.WriteLine([Scan]::Find([int]$p[1],[int]$p[2],[int]$p[3],[int]$p[4],[int]$p[5],[int]$p[6],[int]$p[7],[int]$p[8],[int]$p[9],[int]$p[10])) }
       'pixel' { $out.WriteLine([Scan]::Pixel([int]$p[1],[int]$p[2])) }
       'cursor' { $c = [System.Windows.Forms.Cursor]::Position; $out.WriteLine(('{0},{1}' -f $c.X,$c.Y)) }
       default {
@@ -881,9 +897,12 @@ func get_pixel(pos: Vector2i) -> Color:
 func find_color(rect: Rect2i, color: Color, tolerance: int, step: int) -> Dictionary:
 	if _helper_real_path.is_empty():
 		return {}
-	var line := _server_read("find %d %d %d %d %d %d %d %d %d" % [
+	# The last argument is the guard pid: with ~Self off a match on a Loop
+	# Automator window is skipped (see the helper's Scan.Guarded), so a detect
+	# never triggers on the app running it; 0 (~Self on) reads everything.
+	var line := _server_read("find %d %d %d %d %d %d %d %d %d %d" % [
 		rect.position.x, rect.position.y, maxi(1, rect.size.x), maxi(1, rect.size.y),
-		color.r8, color.g8, color.b8, tolerance, maxi(1, step)])
+		color.r8, color.g8, color.b8, tolerance, maxi(1, step), avoid_pid])
 	if line.begins_with("none,"):
 		var centre := _parse_rgb(line.substr(5))
 		if centre.a > 0.0:

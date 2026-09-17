@@ -58,6 +58,10 @@ var _generation: int = 0
 var _saved_cursor: Vector2i = Vector2i.ZERO
 var _has_saved_cursor: bool = false
 
+# How many times each STOP action has been reached this run (keyed by the
+# action), so "stop after N passes" can count. Cleared when playback starts.
+var _stop_counts: Dictionary = {}
+
 # Lazily-created real backend used purely for reading screen pixels (so colour
 # sampling works even while the active playback backend is Preview).
 var _screen_sampler: InputBackendT
@@ -142,6 +146,12 @@ func set_feedback(enabled: bool) -> void:
 	_apply_feedback()
 
 
+## How many times a STOP action has been reached so far this run (0 before
+## its first reach; the overlay shows it against its "on pass N" threshold).
+func stop_pass_count(action) -> int:
+	return int(_stop_counts.get(action, 0))
+
+
 func _apply_feedback() -> void:
 	if backend != null:
 		backend.avoid_pid = 0 if feedback else OS.get_process_id()
@@ -163,6 +173,7 @@ func start() -> void:
 	is_running = true
 	_generation += 1
 	_has_saved_cursor = false
+	_stop_counts.clear()
 	if backend.is_real():
 		# Only a real loop can take the focus away; a preview never needs it.
 		_stop_hotkey.start()
@@ -302,37 +313,59 @@ func _execute_action(action: LoopActionT, layer_index: int, action_index: int) -
 			_set_tracker(tracker_pos, tracker_visible, "WAIT")
 			await _sleep_ms(wait)
 		LoopActionT.Type.PIXEL_DETECT:
-			var rect := action.roll_detect_rect(_mouse_pos())
-			# Pin the rect and let the overlay present a frame with its hole
-			# there before the screen is read: the overlay cuts the rect out
-			# only while it is pinned, so whatever it draws inside (another
-			# step's marker, the grid) is on screen until then. Two frames:
-			# the first is drawn with the hole, the second gives the desktop
-			# compositor time to show it (one frame leaked 1 read in 100).
-			detect_rect = rect
-			detect_rect_pinned = true
-			_set_tracker(rect.get_center(), true, "DETECT")
 			var gen := _generation
-			await get_tree().process_frame
-			await get_tree().process_frame
+			var hit := await _detect_once(action, gen)
+			# "Wait till found": re-check the same spot until the colour
+			# appears (or the loop is stopped). A Safe walk-through does not
+			# wait — safe_continue carries it on regardless.
+			var wait_mode := action.on_fail == LoopActionT.OnFail.WAIT_FOUND \
+					and not (action.safe_continue and not backend.is_real())
+			var wait_started := Time.get_ticks_msec()
+			while wait_mode and hit.x < 0 and is_running and gen == _generation:
+				# Timed out: give up and skip the rest of the layer. (The
+				# fallback is fixed for now; it could follow a chosen
+				# If-not-found option once there are more of them.)
+				if action.wait_timeout and Time.get_ticks_msec() - wait_started >= action.wait_timeout_ms:
+					_last_event = "Pixel detect: not found (timed out)."
+					emit_signal("status", _last_event)
+					return LoopActionT.OnFail.SKIP_LAYER
+				_last_event = "Pixel detect: waiting for the colour…"
+				emit_signal("status", _last_event)
+				_set_tracker(tracker_pos, tracker_visible, "WAIT DETECT")
+				await _sleep_ms(action.roll_wait_ms())
+				if not is_running or gen != _generation:
+					break
+				hit = await _detect_once(action, gen)
 			if not is_running or gen != _generation:
-				detect_rect_pinned = false
 				return LoopActionT.OnFail.CONTINUE
-			var hit := _find_color(action, rect)
-			detect_rect_pinned = false
 			var found := hit.x >= 0
 			if found:
 				_set_tracker(hit, true, "DETECT")
 				_last_event = "Pixel detect: found at (%d, %d)." % [hit.x, hit.y]
+				emit_signal("status", _last_event)
 			else:
-				_last_event = "Pixel detect: not found."
-			# ~If not found: a Safe run walks on regardless.
-			var walk_on := not found and action.safe_continue and not backend.is_real()
-			if walk_on:
-				_last_event = "Pixel detect: not found (Safe: carrying on)."
-			emit_signal("status", _last_event)
-			if not found and not walk_on:
-				return action.on_fail
+				# ~If not found: a Safe run walks on regardless.
+				var walk_on := action.safe_continue and not backend.is_real()
+				_last_event = "Pixel detect: not found (Safe: carrying on)." if walk_on else "Pixel detect: not found."
+				emit_signal("status", _last_event)
+				if not walk_on:
+					return action.on_fail
+		LoopActionT.Type.STOP:
+			_set_tracker(tracker_pos, tracker_visible, "STOP")
+			var count := int(_stop_counts.get(action, 0)) + 1
+			_stop_counts[action] = count
+			var threshold := maxi(1, action.stop_after)
+			if count < threshold:
+				emit_signal("status", "Stop action: pass %d of %d." % [count, threshold])
+			elif action.stop_scope == LoopActionT.StopScope.LAYER:
+				_last_event = "Stop action"
+				return LoopActionT.OnFail.SKIP_LAYER
+			else:
+				var reason := "Stopped by a Stop action."
+				if threshold > 1:
+					reason = "Stopped by a Stop action (after %d passes)." % threshold
+				stop(reason)
+				return LoopActionT.OnFail.CONTINUE
 		LoopActionT.Type.CAPTURE:
 			if action.capture_mode == LoopActionT.CaptureMode.SAVE:
 				if _save_cursor():
@@ -556,6 +589,25 @@ func _mouse_pos() -> Vector2i:
 	return backend.get_cursor_pos()
 
 
+## One Pixel Detect read: rolls the rect, pins it so the overlay cuts it out
+## (two frames — the first drawn with the hole, the second for the desktop
+## compositor to show it; one frame leaked 1 read in 100), reads, unpins.
+## Returns the hit, or (-1, -1) when not found or the run ended mid-read.
+func _detect_once(action: LoopActionT, gen: int) -> Vector2i:
+	var rect := action.roll_detect_rect(_mouse_pos())
+	detect_rect = rect
+	detect_rect_pinned = true
+	_set_tracker(rect.get_center(), true, "DETECT")
+	await get_tree().process_frame
+	await get_tree().process_frame
+	if not is_running or gen != _generation:
+		detect_rect_pinned = false
+		return Vector2i(-1, -1)
+	var hit := _find_color(action, rect)
+	detect_rect_pinned = false
+	return hit
+
+
 ## Looks for `action.color` (± a tolerance rolled from the action's range, per
 ## channel) anywhere in `rect` (the rect rolled for this run). Returns the
 ## screen position of the first match, or (-1, -1). The backend checks the
@@ -568,6 +620,10 @@ func _find_color(action: LoopActionT, rect: Rect2i) -> Vector2i:
 	var reader := backend if backend.is_real() else get_screen_sampler()
 	if reader == null:
 		return rect.get_center()
+	# ~Self gates reading Loop Automator's own window, the same as it gates
+	# clicks and keys: off (default) a detect ignores pixels on the app's
+	# window; on, it may match them. The overlay is never read either way.
+	reader.avoid_pid = 0 if feedback else OS.get_process_id()
 	var step := maxi(1, int(ceil(sqrt(float(rect.size.x * rect.size.y) / float(DETECT_MAX_SAMPLES)))))
 	var tolerance := action.roll_tolerance()
 	var result := reader.find_color(rect, action.color, tolerance, step)
