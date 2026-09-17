@@ -42,7 +42,7 @@ Prefer running from source? Open the folder in Godot 4.7 and press **F5** — se
 |------------|---------|
 | **Project / Loop** | The full automation. Runs forever, top to bottom, then repeats. |
 | **Layer**  | A named group of actions. *All enabled layers run every iteration.* Layers exist purely to organise a loop into flip-through "screens" with their own colour + overlay view. |
-| **Action** | One step: Move, Click, Drag, Key, Wait, Pixel Detect, Capture Mouse, or Stop. |
+| **Action** | One step: Move, Click, Drag, Key, Wait, Pixel Detect, Image Detect, Capture Mouse, or Stop. |
 
 So a loop with `Layer 1` and `Layer 2` runs **Layer 1's actions, then Layer 2's
 actions, then repeats** — exactly as described: layer 2 runs in the same loop as
@@ -88,6 +88,16 @@ layer 1, just broken out so you can view each layer's visuals separately.
   whole loop can be walked through. With **~Self** on, a detect may match on
   Loop Automator's own window; off (default) it ignores it. The overlay is
   never read.
+- **Image Detect** — look for a small screenshot anywhere in a screen rect: every
+  pixel of it within ± tolerance of the screen, at any offset the image fits.
+  **Just capture** grabs the area you drag over as the image and leaves the
+  rect alone; **Capture & place** also makes that area the rect, so the action
+  checks that the image is still right there. An image can be up to 512×512
+  and is stored inside the loop file; it must match pixel for pixel (bar the
+  tolerance), so a change of scale, theme or font breaks the match. Rect,
+  **Follow Cursor**, **If not found**, **Wait till found** and **~Self** work
+  as for Pixel Detect. The scan runs in the helper, so a whole screen is
+  checked in a few tens of milliseconds.
 - **Stop** — stop the loop, or **This layer** to just end the current layer's
   pass, when reached. Set **after N passes** to stop only once it has been
   reached that many times (0 = the first time) — a run limiter.
@@ -223,14 +233,14 @@ Godot cannot synthesize OS-wide input on its own, so input is sent through a
 pluggable `InputBackend`:
 
 - **Safe** — *default*. Touches nothing on your OS; it only feeds the
-  overlay/status so you can design and dry-run a loop safely. Pixel Detect
-  still reads the real screen (a read touches nothing), so a Safe run takes
+  overlay/status so you can design and dry-run a loop safely. Pixel and
+  Image Detect still read the real screen (a read touches nothing), so a Safe run takes
   the same turns a Live one would.
 - **Live** — *experimental*. Drives the real cursor/keyboard and reads
   screen pixels via a small generated PowerShell helper (`input_helper.ps1`,
   see [Generated helpers](#generated-helpers))
   using `SetCursorPos`, `mouse_event`, `SendKeys`, and `CopyFromScreen`.
-  All of it — input actions and screen reads (Pixel Detect, colour sampling,
+  All of it — input actions and screen reads (Pixel / Image Detect, colour sampling,
   cursor position) — goes to one long-running helper process, so an action or
   a check costs a few milliseconds and a follow-cursor Pixel Detect keeps up
   with the mouse (~50 checks/s). The helper starts when you pick Live mode

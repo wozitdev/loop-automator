@@ -471,6 +471,13 @@ if ($cmd -ne 'serve') { Run-Cmd $a; exit 0 }
 #     \"none,r,g,b\" with the centre pixel's colour. A match on a window of
 #     `guard` (Loop Automator itself, ~Self off) is skipped; 0 matches
 #     anything. The scan runs here, in compiled C#, so no image crosses the pipe.
+#   tpl id png                   -> \"ok\": keeps the base64 PNG as template
+#     `id` for image commands (a handful are kept; older ones are dropped).
+#   image x y w h id tol guard   -> \"x,y\" of the top-left of the first spot
+#     in the rect where every template pixel is within tol of the screen
+#     (every offset is tried, the template's centre pixel first, so a miss
+#     costs about one comparison per offset), \"none\", or \"notpl\" when
+#     `id` is not loaded (send a tpl and try again). `guard` as for find.
 #   pixel x y                    -> \"r,g,b\"
 #   cursor                       -> \"x,y\"
 # A failing command answers \"error ...\". The first line printed is \"ready\".
@@ -479,8 +486,13 @@ Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -ReferencedAssemblies System.Drawing @\"
 using System; using System.Drawing; using System.Drawing.Imaging; using System.Runtime.InteropServices;
+using System.Collections.Generic; using System.IO;
 public class Scan {
   static byte[] buf = new byte[0];
+  // Templates for 'image', as 32bpp BGRA rows (stride w * 4), by id.
+  class Tpl { public int w; public int h; public byte[] px; }
+  static Dictionary<string, Tpl> tpls = new Dictionary<string, Tpl>();
+  const int MaxTpls = 16;
   [StructLayout(LayoutKind.Sequential)] struct PT { public int x; public int y; }
   [DllImport(\"user32.dll\")] static extern IntPtr WindowFromPoint(PT p);
   [DllImport(\"user32.dll\")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
@@ -527,6 +539,47 @@ public class Scan {
     Grab(x, y, 1, 1);
     return buf[2] + \",\" + buf[1] + \",\" + buf[0];
   }
+  public static string Load(string id, string b64) {
+    Tpl t = new Tpl();
+    using (MemoryStream ms = new MemoryStream(Convert.FromBase64String(b64)))
+    using (Bitmap src = new Bitmap(ms))
+    using (Bitmap bmp = src.Clone(new Rectangle(0, 0, src.Width, src.Height), PixelFormat.Format32bppArgb)) {
+      t.w = bmp.Width; t.h = bmp.Height; t.px = new byte[t.w * t.h * 4];
+      BitmapData d = bmp.LockBits(new Rectangle(0, 0, t.w, t.h), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+      for (int yy = 0; yy < t.h; yy++)
+        Marshal.Copy(new IntPtr(d.Scan0.ToInt64() + yy * d.Stride), t.px, yy * t.w * 4, t.w * 4);
+      bmp.UnlockBits(d);
+    }
+    if (tpls.Count >= MaxTpls) tpls.Clear();
+    tpls[id] = t;
+    return \"ok\";
+  }
+  static bool Same(byte[] p, int i, byte[] q, int j, int tol) {
+    return Math.Abs(p[i] - q[j]) <= tol && Math.Abs(p[i+1] - q[j+1]) <= tol && Math.Abs(p[i+2] - q[j+2]) <= tol;
+  }
+  static bool At(int stride, int ox, int oy, Tpl t, int tol) {
+    for (int ty = 0; ty < t.h; ty++) {
+      int row = (oy + ty) * stride + ox * 4, trow = ty * t.w * 4;
+      for (int tx = 0; tx < t.w; tx++)
+        if (!Same(buf, row + tx * 4, t.px, trow + tx * 4, tol)) return false;
+    }
+    return true;
+  }
+  public static string Image(int x, int y, int w, int h, string id, int tol, int guard) {
+    Tpl t;
+    if (!tpls.TryGetValue(id, out t)) return \"notpl\";
+    if (t.w > w || t.h > h) return \"none\";
+    int stride = Grab(x, y, w, h);
+    int tcx = t.w / 2, tcy = t.h / 2, tc = (tcy * t.w + tcx) * 4;
+    for (int oy = 0; oy + t.h <= h; oy++) {
+      int row = (oy + tcy) * stride;
+      for (int ox = 0; ox + t.w <= w; ox++) {
+        if (!Same(buf, row + (ox + tcx) * 4, t.px, tc, tol)) continue;
+        if (At(stride, ox, oy, t, tol) && !Guarded(x + ox + tcx, y + oy + tcy, guard)) return (x + ox) + \",\" + (y + oy);
+      }
+    }
+    return \"none\";
+  }
 }
 \"@
 $out = [Console]::Out
@@ -539,6 +592,8 @@ while ($true) {
     switch ($p[0]) {
       'find' { $out.WriteLine([Scan]::Find([int]$p[1],[int]$p[2],[int]$p[3],[int]$p[4],[int]$p[5],[int]$p[6],[int]$p[7],[int]$p[8],[int]$p[9],[int]$p[10])) }
       'pixel' { $out.WriteLine([Scan]::Pixel([int]$p[1],[int]$p[2])) }
+      'tpl' { $out.WriteLine([Scan]::Load($p[1], $p[2])) }
+      'image' { $out.WriteLine([Scan]::Image([int]$p[1],[int]$p[2],[int]$p[3],[int]$p[4],$p[5],[int]$p[6],[int]$p[7])) }
       'cursor' { $c = [System.Windows.Forms.Cursor]::Position; $out.WriteLine(('{0},{1}' -f $c.X,$c.Y)) }
       default {
         $res = @(Run-Cmd $p)
@@ -624,6 +679,9 @@ static func _loggable(cmd: String) -> String:
 	for i in parts.size():
 		if parts[i].contains(";"):
 			parts[i] = "<%d points>" % (parts[i].count(";") + 1)
+	# A template upload is a whole PNG in base64.
+	if parts.size() == 3 and parts[0] == "tpl":
+		parts[2] = "<%d chars>" % parts[2].length()
 	return " ".join(parts)
 
 
@@ -912,6 +970,29 @@ func find_color(rect: Rect2i, color: Color, tolerance: int, step: int) -> Dictio
 		if hit != Vector2i(-1, -1):
 			return {"hit": hit, "centre": color}
 	return super.find_color(rect, color, tolerance, step)
+
+
+## The read server scans in-process (see the helper's Scan.Image) and answers
+## "x,y" or "none". The template is sent once per server and kept there
+## under an id made from its bytes, so a re-check sends only the command;
+## "notpl" (a fresh server, or an old template dropped) means send it again.
+## Without a server the rect is fetched as an image and scanned here.
+func find_image(rect: Rect2i, png: PackedByteArray, tolerance: int) -> Dictionary:
+	if _helper_real_path.is_empty() or png.is_empty():
+		return {}
+	var id := "%d_%08x" % [png.size(), hash(png)]
+	var cmd := "image %d %d %d %d %s %d %d" % [
+		rect.position.x, rect.position.y, maxi(1, rect.size.x), maxi(1, rect.size.y),
+		id, tolerance, avoid_pid]
+	var line := _server_read(cmd)
+	if line == "notpl" and _server_read("tpl %s %s" % [id, Marshalls.raw_to_base64(png)]) == "ok":
+		line = _server_read(cmd)
+	if line == "none":
+		return {"hit": Vector2i(-1, -1)}
+	var hit := _parse_point(line)
+	if hit != Vector2i(-1, -1):
+		return {"hit": hit}
+	return super.find_image(rect, png, tolerance)
 
 
 func read_rect(rect: Rect2i) -> Image:

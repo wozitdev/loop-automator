@@ -95,6 +95,64 @@ static func _matches(data: PackedByteArray, i: int, r: int, g: int, b: int, tol:
 	return absi(data[i] - r) <= tol and absi(data[i + 1] - g) <= tol and absi(data[i + 2] - b) <= tol
 
 
+## Looks for the template `png` (a PNG image, ± `tolerance` per channel on
+## every pixel) anywhere in the screen rect, trying every offset it fits at.
+## Returns {"hit": Vector2i} — the screen position of the template's top-left
+## corner, or (-1, -1) when nothing matched — or an empty Dictionary if the
+## screen could not be read. Backends that can do the scan themselves
+## override this; the default reads the rect and scans it here, which is slow
+## on a big rect (seconds in script for a whole screen).
+func find_image(rect: Rect2i, png: PackedByteArray, tolerance: int) -> Dictionary:
+	var tpl := Image.new()
+	if tpl.load_png_from_buffer(png) != OK or tpl.is_empty():
+		return {}
+	var img := read_rect(rect)
+	if img == null:
+		return {}
+	var result := {"hit": Vector2i(-1, -1)}
+	var tw := tpl.get_width()
+	var th := tpl.get_height()
+	var w := img.get_width()
+	var h := img.get_height()
+	if tw > w or th > h:
+		return result
+	if img.get_format() != Image.FORMAT_RGBA8:
+		img.convert(Image.FORMAT_RGBA8)
+	if tpl.get_format() != Image.FORMAT_RGBA8:
+		tpl.convert(Image.FORMAT_RGBA8)
+	var data := img.get_data()
+	var tdata := tpl.get_data()
+	# The template's centre pixel is tried first at every offset, so most
+	# offsets are ruled out on one comparison.
+	var tc := (th / 2 * tw + tw / 2) * 4
+	var tcx := tw / 2
+	var tcy := th / 2
+	for oy in h - th + 1:
+		for ox in w - tw + 1:
+			if not _same(data, ((oy + tcy) * w + ox + tcx) * 4, tdata, tc, tolerance):
+				continue
+			if _template_at(data, w, ox, oy, tdata, tw, th, tolerance):
+				result["hit"] = rect.position + Vector2i(ox, oy)
+				return result
+	return result
+
+
+## True when every template pixel matches the screen pixel under it with the
+## template's top-left at (ox, oy).
+static func _template_at(data: PackedByteArray, w: int, ox: int, oy: int, tdata: PackedByteArray, tw: int, th: int, tol: int) -> bool:
+	for ty in th:
+		var row := ((oy + ty) * w + ox) * 4
+		var trow := ty * tw * 4
+		for tx in tw:
+			if not _same(data, row + tx * 4, tdata, trow + tx * 4, tol):
+				return false
+	return true
+
+
+static func _same(a: PackedByteArray, i: int, b: PackedByteArray, j: int, tol: int) -> bool:
+	return absi(a[i] - b[j]) <= tol and absi(a[i + 1] - b[j + 1]) <= tol and absi(a[i + 2] - b[j + 2]) <= tol
+
+
 ## Returns where the mouse cursor is right now (screen coordinates), or
 ## (-1, -1) if the backend cannot tell.
 func get_cursor_pos() -> Vector2i:
