@@ -818,17 +818,7 @@ func _add_rect_fields(a: LoopActionT) -> void:
 	_add_range_field("Height", a.h, a.h_max, 1, 20000, func(lo: int, hi: int):
 		a.h = lo
 		a.h_max = hi)
-	var row := HBoxContainer.new()
-	var follow := CheckBox.new()
-	follow.text = "Follow Cursor"
-	follow.tooltip_text = "Centre the rect on the mouse and move it with the mouse, instead of using X / Y."
-	follow.button_pressed = a.follow_cursor
-	follow.toggled.connect(func(v):
-		a.follow_cursor = v
-		set_xy_editable.call(not v)
-		_after_edit())
-	row.add_child(follow)
-	row.add_child(_grab_button(UiIconsT.target(), "Pick rect on screen", func():
+	editor_box.add_child(_grab_button(UiIconsT.target(), "Pick detection rect on screen", func():
 		_begin_rect_pick(func(r: Rect2i):
 			# A dragged rect is exact: fixed position and size.
 			a.x = r.position.x
@@ -839,7 +829,16 @@ func _add_rect_fields(a: LoopActionT) -> void:
 			a.w_max = a.w
 			a.h = maxi(1, r.size.y)
 			a.h_max = a.h)))
-	editor_box.add_child(row)
+	var follow := CheckBox.new()
+	follow.text = "Follow Cursor"
+	follow.tooltip_text = "Centre the rect on the mouse and move it with the mouse, instead of using X / Y."
+	follow.focus_mode = Control.FOCUS_NONE
+	follow.button_pressed = a.follow_cursor
+	follow.toggled.connect(func(v):
+		a.follow_cursor = v
+		set_xy_editable.call(not v)
+		_after_edit())
+	editor_box.add_child(follow)
 
 
 func _add_button_field(a: LoopActionT) -> void:
@@ -943,7 +942,7 @@ func _add_color_field(a: LoopActionT) -> void:
 			_sample_color_into(a, g), true))
 	just.tooltip_text = "Sample a colour on screen without moving the rect."
 	buttons.add_child(just)
-	var pick := _grab_button(UiIconsT.target(), "Pick & sample", func():
+	var pick := _grab_button(UiIconsT.target(), "Sample & place", func():
 		_begin_point_pick(func(g: Vector2i):
 			# Centre the (smallest) rect on the picked point, so the pixel
 			# sampled here is inside every rect playback can scan (and is the
@@ -961,10 +960,10 @@ func _add_color_field(a: LoopActionT) -> void:
 
 ## IMAGE_DETECT's template: a thumbnail of it (or "No image yet") with its
 ## size and a button that shows it full size, a warning when it cannot fit
-## the rect, and the two capture buttons, which mirror Pixel Detect's
-## sampling: "Just capture" grabs the dragged area as the image and leaves
-## the rect alone; "Capture & place" also makes that area the rect, so the
-## action checks that the image is still right there.
+## the rect, and the two sample buttons, which mirror Pixel Detect's:
+## "Just sample" grabs the dragged area as the image and leaves the rect
+## alone; "Sample & place" also makes that area the rect, so the action
+## checks that the image is still right there.
 func _add_image_field(a: LoopActionT) -> void:
 	var row := _row("Image")
 	var tex := a.image_texture()
@@ -1005,13 +1004,13 @@ func _add_image_field(a: LoopActionT) -> void:
 	_image_fit_action = a
 	_refresh_image_fit_warning(a)
 	var buttons := HBoxContainer.new()
-	var just := _grab_button(UiIconsT.dropper(), "Just capture", func():
+	var just := _grab_button(UiIconsT.dropper(), "Just sample", func():
 		_begin_rect_pick(func(r: Rect2i): _capture_image_into(a, r, false)))
-	just.tooltip_text = "Drag over what to look for; it is captured as the image. The rect stays where it is."
+	just.tooltip_text = "Drag over what to look for; it is sampled as the image. The rect stays where it is."
 	buttons.add_child(just)
-	var place := _grab_button(UiIconsT.target(), "Capture & place", func():
+	var place := _grab_button(UiIconsT.target(), "Sample & place", func():
 		_begin_rect_pick(func(r: Rect2i): _capture_image_into(a, r, true)))
-	place.tooltip_text = "Drag over what to look for; it is captured as the image and the rect is set to that spot."
+	place.tooltip_text = "Drag over what to look for; it is sampled as the image and the rect is set to that spot."
 	buttons.add_child(place)
 	editor_box.add_child(buttons)
 
@@ -1083,34 +1082,18 @@ func _add_on_fail_field(a: LoopActionT) -> void:
 		_add_range_field("Check every (ms)", a.wait_ms, a.wait_ms_max, 0, 600000, func(lo: int, hi: int):
 			a.wait_ms = lo
 			a.wait_ms_max = hi)
-		# ~Timeout: give up after this long and skip the rest of the layer.
-		var trow := HBoxContainer.new()
-		trow.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		var tcb := CheckBox.new()
-		tcb.text = "~Timeout (ms)"
-		tcb.focus_mode = Control.FOCUS_NONE
-		tcb.button_pressed = a.wait_timeout
-		tcb.custom_minimum_size = Vector2(120, 0)
-		tcb.tooltip_text = "Checked: stop waiting after this long and skip the rest of the layer."
-		var tsp := SpinBox.new()
-		tsp.min_value = 0
-		tsp.max_value = 3600000
-		tsp.step = 1
-		tsp.value = a.wait_timeout_ms
-		tsp.editable = a.wait_timeout
-		tsp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		tsp.get_line_edit().text_changed.connect(func(_t: String): tsp.set_meta(&"typed", true))
-		tsp.value_changed.connect(func(v: float):
-			tsp.set_meta(&"typed", false)
-			a.wait_timeout_ms = int(v)
-			_after_edit())
-		tcb.toggled.connect(func(v: bool):
-			a.wait_timeout = v
-			tsp.editable = v
-			_after_edit())
-		trow.add_child(tcb)
-		trow.add_child(tsp)
-		editor_box.add_child(trow)
+		# ~Timeout: give up after this long (a range, like every number) and
+		# skip the rest of the layer. The range is greyed out while unchecked.
+		var trow := _row_toggle("Timeout (ms)", a.wait_timeout,
+			"Checked: stop waiting after this long and skip the rest of the layer.",
+			func(v: bool):
+				a.wait_timeout = v
+				_after_edit())
+		var tpair := _add_range_field_in(trow, a.wait_timeout_ms, a.wait_timeout_ms_max, 0, 3600000, func(lo: int, hi: int):
+			a.wait_timeout_ms = lo
+			a.wait_timeout_ms_max = hi)
+		tpair.set_editable(a.wait_timeout)
+		(trow.get_child(0) as CheckBox).toggled.connect(func(v: bool): tpair.set_editable(v))
 
 
 func _add_capture_mode_field(a: LoopActionT) -> void:
@@ -1604,7 +1587,7 @@ func _capture_image_into(a: LoopActionT, r: Rect2i, place: bool) -> void:
 		a.h_max = a.h
 		a.follow_cursor = false
 	var size := a.image_size()
-	status_label.text = "Captured a %d×%d image at (%d, %d)." % [size.x, size.y, r.position.x, r.position.y]
+	status_label.text = "Sampled a %d×%d image at (%d, %d)." % [size.x, size.y, r.position.x, r.position.y]
 	_after_edit()
 	_rebuild_editor()
 
@@ -2196,6 +2179,8 @@ func _tool_button(text: String, cb: Callable) -> Button:
 func _grab_button(icon: Texture2D, text: String, cb: Callable) -> Button:
 	var b := Button.new()
 	b.icon = icon
+	# The editor's pick / sample buttons fill the row (two on a row share it).
+	b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	# Text right next to the icon, not centred away from it.
 	b.alignment = HORIZONTAL_ALIGNMENT_LEFT
 	b.text = text

@@ -85,10 +85,12 @@ var stop_scope: int = StopScope.LOOP
 ## STOP: fire on this pass that reaches it (1 = the first). PIXEL_DETECT
 ## reuses wait_ms as its "wait till found" re-check gap.
 var stop_after: int = 1
-## PIXEL_DETECT "wait till found": give up after `wait_timeout_ms` and skip
-## the rest of the layer, instead of waiting forever.
+## Detects' "wait till found": give up after `wait_timeout_ms` (a range,
+## rolled once per wait) and skip the rest of the layer, instead of waiting
+## forever.
 var wait_timeout: bool = false
 var wait_timeout_ms: int = 5000
+var wait_timeout_ms_max: int = 5000
 
 # Geometry / parameters (only the relevant ones are used per type). Every
 # numeric setting is a range: `x` .. `x_max` and so on. Each time the action
@@ -183,6 +185,10 @@ func roll_tolerance() -> int:
 
 func roll_mismatch() -> int:
 	return clampi(roll(mismatch, mismatch_max), 0, MISMATCH_MAX)
+
+
+func roll_wait_timeout_ms() -> int:
+	return maxi(0, roll(wait_timeout_ms, wait_timeout_ms_max))
 
 
 ## Where point A (MOVE / CLICK / DRAG start) can land.
@@ -411,6 +417,7 @@ func to_dict() -> Dictionary:
 		"stop_after": stop_after,
 		"wait_timeout": wait_timeout,
 		"wait_timeout_ms": wait_timeout_ms,
+		"wait_timeout_ms_max": wait_timeout_ms_max,
 		"ignore_colour": ignore_colour,
 		"mismatch": mismatch,
 		"mismatch_max": mismatch_max,
@@ -459,6 +466,7 @@ static func from_dict(d: Dictionary) -> Self:
 	a.stop_after = maxi(1, int(d.get("stop_after", 1)))
 	a.wait_timeout = bool(d.get("wait_timeout", false))
 	a.wait_timeout_ms = maxi(0, int(d.get("wait_timeout_ms", 5000)))
+	a.wait_timeout_ms_max = maxi(0, int(d.get("wait_timeout_ms_max", a.wait_timeout_ms)))
 	a.ignore_colour = bool(d.get("ignore_colour", false))
 	a.mismatch = int(d.get("mismatch", 0))
 	a.mismatch_max = int(d.get("mismatch_max", a.mismatch))
