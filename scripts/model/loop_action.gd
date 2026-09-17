@@ -23,13 +23,15 @@ const BUTTON_LEFT := 0
 const BUTTON_RIGHT := 1
 const BUTTON_MIDDLE := 2
 
-## How PIXEL_DETECT influences the rest of the layer when the colour is NOT found.
+## How PIXEL_DETECT influences the rest of the layer when the colour is NOT
+## found. CONTINUE and STOP_LOOP are no longer offered as settings (a file
+## that has either is read as SKIP_LAYER): keep running is the found case,
+## and stopping the loop is the Stop action's job. CONTINUE is still what
+## playback returns for a found colour and for a Safe walk-through.
 enum OnFail {
-	CONTINUE,     ## Keep running (what playback returns for a found colour; no
-	              ## longer offered as a setting — a file that has it is read
-	              ## as SKIP_LAYER)
+	CONTINUE,     ## Keep running
 	SKIP_LAYER,   ## Skip the remaining actions in this layer this iteration
-	STOP_LOOP,    ## Stop playback entirely
+	STOP_LOOP,    ## (retired) Stop playback entirely
 }
 
 ## What a CAPTURE action does with the saved mouse position.
@@ -325,7 +327,9 @@ static func from_dict(d: Dictionary) -> Self:
 	a.tolerance = int(d.get("tolerance", 16))
 	a.tolerance_max = int(d.get("tolerance_max", a.tolerance))
 	a.on_fail = int(d.get("on_fail", OnFail.SKIP_LAYER))
-	if a.on_fail == OnFail.CONTINUE:
+	# CONTINUE and the retired STOP_LOOP are no longer selectable: read either
+	# as SKIP_LAYER (see OnFail).
+	if a.on_fail != OnFail.SKIP_LAYER:
 		a.on_fail = OnFail.SKIP_LAYER
 	a.safe_continue = bool(d.get("safe_continue", true))
 	a.captures = bool(d.get("captures", false))

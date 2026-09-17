@@ -954,10 +954,11 @@ func _add_on_fail_field(a: LoopActionT) -> void:
 		func(v: bool):
 			a.safe_continue = v
 			_after_edit())
+	# Stopping the loop is the Stop action's job now, not a Pixel Detect's.
+	# (More choices are coming here.)
 	var opt := OptionButton.new()
 	opt.add_item("Skip rest of layer", LoopActionT.OnFail.SKIP_LAYER)
-	opt.add_item("Stop loop", LoopActionT.OnFail.STOP_LOOP)
-	opt.select(opt.get_item_index(a.on_fail))
+	opt.select(maxi(0, opt.get_item_index(a.on_fail)))
 	opt.item_selected.connect(func(i):
 		a.on_fail = opt.get_item_id(i)
 		_after_edit())
