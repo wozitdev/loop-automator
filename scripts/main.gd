@@ -460,7 +460,7 @@ func _build_action_panel() -> Control:
 	var pm := add_btn.get_popup()
 	for t in [LoopActionT.Type.MOVE, LoopActionT.Type.CLICK, LoopActionT.Type.DRAG,
 			LoopActionT.Type.KEY, LoopActionT.Type.WAIT, LoopActionT.Type.PIXEL_DETECT,
-			LoopActionT.Type.CAPTURE, LoopActionT.Type.STOP]:
+			LoopActionT.Type.IMAGE_DETECT, LoopActionT.Type.CAPTURE, LoopActionT.Type.STOP]:
 		pm.add_item(LoopActionT.type_name(t), t)
 	pm.id_pressed.connect(func(id): ProjectData.add_action(id))
 	btns.add_child(add_btn)
@@ -724,6 +724,13 @@ func _rebuild_editor() -> void:
 				a.tolerance = lo
 				a.tolerance_max = hi)
 			_add_on_fail_field(a)
+		LoopActionT.Type.IMAGE_DETECT:
+			_add_rect_fields(a)
+			_add_image_field(a)
+			_add_range_field("Tolerance (0-255)", a.tolerance, a.tolerance_max, 0, 255, func(lo: int, hi: int):
+				a.tolerance = lo
+				a.tolerance_max = hi)
+			_add_on_fail_field(a)
 		LoopActionT.Type.CAPTURE:
 			_add_capture_mode_field(a)
 		LoopActionT.Type.STOP:
@@ -946,13 +953,56 @@ func _add_color_field(a: LoopActionT) -> void:
 	editor_box.add_child(buttons)
 
 
-## What a colour that is not found does: skip the rest of the layer or stop
-## the loop. The label is the "~If not found" checkbox: checked (the
+## IMAGE_DETECT's template: a thumbnail of it (or "No image yet") with its
+## size, and the two capture buttons, which mirror Pixel Detect's sampling:
+## "Just capture" grabs the dragged area as the image and leaves the rect
+## alone; "Capture & place" also makes that area the rect, so the action
+## checks that the image is still right there.
+func _add_image_field(a: LoopActionT) -> void:
+	var row := _row("Image")
+	var tex := a.image_texture()
+	if tex != null:
+		var thumb := TextureRect.new()
+		thumb.texture = tex
+		thumb.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		thumb.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		thumb.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+		# Shown no bigger than it is, and at most a few rows tall.
+		var size := a.image_size()
+		var fit := minf(1.0, minf(160.0 / size.x, 64.0 / size.y))
+		thumb.custom_minimum_size = Vector2(size) * fit
+		thumb.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+		row.add_child(thumb)
+		var dims := Label.new()
+		dims.text = "%d×%d" % [size.x, size.y]
+		dims.modulate = Color(1, 1, 1, 0.7)
+		row.add_child(dims)
+	else:
+		var none := Label.new()
+		none.text = "No image yet"
+		none.modulate = Color(1, 1, 1, 0.7)
+		row.add_child(none)
+	editor_box.add_child(row)
+	var buttons := HBoxContainer.new()
+	var just := _grab_button(UiIconsT.dropper(), "Just capture", func():
+		_begin_rect_pick(func(r: Rect2i): _capture_image_into(a, r, false)))
+	just.tooltip_text = "Drag over what to look for; it is captured as the image. The rect stays where it is."
+	buttons.add_child(just)
+	var place := _grab_button(UiIconsT.target(), "Capture & place", func():
+		_begin_rect_pick(func(r: Rect2i): _capture_image_into(a, r, true)))
+	place.tooltip_text = "Drag over what to look for; it is captured as the image and the rect is set to that spot."
+	buttons.add_child(place)
+	editor_box.add_child(buttons)
+
+
+## What a colour or image that is not found does: skip the rest of the layer
+## or wait for it. The label is the "~If not found" checkbox: checked (the
 ## default), a Safe run carries on regardless, so the whole loop can be
 ## walked through; Live keeps to the choice.
 func _add_on_fail_field(a: LoopActionT) -> void:
+	var target := "image" if a.type == LoopActionT.Type.IMAGE_DETECT else "colour"
 	var row := _row_toggle("If not found", a.safe_continue,
-		"What happens when the colour is not there.\nChecked: in Safe mode nothing is skipped or stopped, so you can walk through the whole loop; Live keeps to the choice.",
+		"What happens when the %s is not there.\nChecked: in Safe mode nothing is skipped or stopped, so you can walk through the whole loop; Live keeps to the choice." % target,
 		func(v: bool):
 			a.safe_continue = v
 			_after_edit())
@@ -1427,6 +1477,47 @@ func _sample_color_into(a: LoopActionT, g: Vector2i) -> void:
 		_rebuild_editor()
 	else:
 		status_label.text = "Couldn't read a pixel at (%d, %d)." % [g.x, g.y]
+
+
+## Capture the screen inside `r` as `a`'s image (Image Detect), the overlay
+## hidden first as for a colour sample. With `place` the rect becomes `r`
+## too. Called from a rect-pick callback, like _sample_color_into.
+func _capture_image_into(a: LoopActionT, r: Rect2i, place: bool) -> void:
+	var sampler := Playback.get_screen_sampler()
+	if sampler == null:
+		status_label.text = "Capturing an image needs Live mode (no real screen reader on this OS)."
+		return
+	var side := LoopActionT.IMAGE_MAX_SIDE
+	if r.size.x > side or r.size.y > side:
+		status_label.text = "That is %d×%d; an image can be at most %d×%d. Drag over just the thing to look for." % [r.size.x, r.size.y, side, side]
+		return
+	_sample_pending = true
+	var restore_overlay := overlay_btn.button_pressed
+	overlay.hide_overlay()
+	await get_tree().process_frame
+	await get_tree().create_timer(0.06).timeout
+	var img := sampler.read_rect(r)
+	if restore_overlay:
+		overlay.show_overlay()
+	_sample_pending = false
+	_restore_builder_after_pick()
+	if img == null or not a.set_image_png(img.save_png_to_buffer()):
+		status_label.text = "Couldn't read the screen at [%d, %d, %d×%d]." % [r.position.x, r.position.y, r.size.x, r.size.y]
+		return
+	if place:
+		a.x = r.position.x
+		a.x_max = a.x
+		a.y = r.position.y
+		a.y_max = a.y
+		a.w = maxi(1, r.size.x)
+		a.w_max = a.w
+		a.h = maxi(1, r.size.y)
+		a.h_max = a.h
+		a.follow_cursor = false
+	var size := a.image_size()
+	status_label.text = "Captured a %d×%d image at (%d, %d)." % [size.x, size.y, r.position.x, r.position.y]
+	_after_edit()
+	_rebuild_editor()
 
 
 # ------------------------------------------------- live colour preview

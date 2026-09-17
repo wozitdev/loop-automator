@@ -37,13 +37,13 @@ var tracker_label: String = ""
 ## runs it. With it on the loop may interact with Loop Automator like any
 ## other program.
 var feedback: bool = false
-## The rect a Pixel Detect is about to read (valid while
+## The rect a Pixel / Image Detect is about to read (valid while
 ## `detect_rect_pinned`). A follow-cursor rect moves with the mouse; the
 ## overlay keeps its see-through hole on *this* rect while the read happens,
 ## so the guides it draws around the rect never end up in the screen read.
 var detect_rect: Rect2i = Rect2i()
 var detect_rect_pinned: bool = false
-## What the action that just ran reported (a Pixel Detect's result), kept on
+## What the action that just ran reported (a detect's result), kept on
 ## the status line through the delay that follows it, so the delay does not
 ## hide why the loop is where it is.
 var _last_event: String = ""
@@ -271,7 +271,7 @@ func _wait_loop_delay(project: LoopProjectT, gen: int, what: String) -> void:
 
 
 ## Runs one action. Returns LoopAction.OnFail.CONTINUE normally, or a
-## different OnFail value to influence the loop (used by PIXEL_DETECT).
+## different OnFail value to influence the loop (used by the detects).
 ## `layer_index` / `action_index` locate the action in the project (a Capture
 ## Load with nothing saved disables itself).
 func _execute_action(action: LoopActionT, layer_index: int, action_index: int) -> int:
@@ -312,12 +312,15 @@ func _execute_action(action: LoopActionT, layer_index: int, action_index: int) -
 			emit_signal("status", "Wait: %d ms" % wait)
 			_set_tracker(tracker_pos, tracker_visible, "WAIT")
 			await _sleep_ms(wait)
-		LoopActionT.Type.PIXEL_DETECT:
+		LoopActionT.Type.PIXEL_DETECT, LoopActionT.Type.IMAGE_DETECT:
 			var gen := _generation
+			var is_image := action.type == LoopActionT.Type.IMAGE_DETECT
+			var what := "Image detect" if is_image else "Pixel detect"
+			var target := "image" if is_image else "colour"
 			var hit := await _detect_once(action, gen)
-			# "Wait till found": re-check the same spot until the colour
-			# appears (or the loop is stopped). A Safe walk-through does not
-			# wait — safe_continue carries it on regardless.
+			# "Wait till found": re-check the same spot until the colour or
+			# image appears (or the loop is stopped). A Safe walk-through
+			# does not wait — safe_continue carries it on regardless.
 			var wait_mode := action.on_fail == LoopActionT.OnFail.WAIT_FOUND \
 					and not (action.safe_continue and not backend.is_real())
 			var wait_started := Time.get_ticks_msec()
@@ -326,10 +329,10 @@ func _execute_action(action: LoopActionT, layer_index: int, action_index: int) -
 				# fallback is fixed for now; it could follow a chosen
 				# If-not-found option once there are more of them.)
 				if action.wait_timeout and Time.get_ticks_msec() - wait_started >= action.wait_timeout_ms:
-					_last_event = "Pixel detect: not found (timed out)."
+					_last_event = "%s: not found (timed out)." % what
 					emit_signal("status", _last_event)
 					return LoopActionT.OnFail.SKIP_LAYER
-				_last_event = "Pixel detect: waiting for the colour…"
+				_last_event = "%s: waiting for the %s…" % [what, target]
 				emit_signal("status", _last_event)
 				_set_tracker(tracker_pos, tracker_visible, "WAIT DETECT")
 				await _sleep_ms(action.roll_wait_ms())
@@ -340,13 +343,14 @@ func _execute_action(action: LoopActionT, layer_index: int, action_index: int) -
 				return LoopActionT.OnFail.CONTINUE
 			var found := hit.x >= 0
 			if found:
-				_set_tracker(hit, true, "DETECT")
-				_last_event = "Pixel detect: found at (%d, %d)." % [hit.x, hit.y]
+				# The tracker marks an image at its middle (hit is its corner).
+				_set_tracker(hit + action.image_size() / 2 if is_image else hit, true, "DETECT")
+				_last_event = "%s: found at (%d, %d)." % [what, hit.x, hit.y]
 				emit_signal("status", _last_event)
 			else:
 				# ~If not found: a Safe run walks on regardless.
 				var walk_on := action.safe_continue and not backend.is_real()
-				_last_event = "Pixel detect: not found (Safe: carrying on)." if walk_on else "Pixel detect: not found."
+				_last_event = "%s: not found (Safe: carrying on)." % what if walk_on else "%s: not found." % what
 				emit_signal("status", _last_event)
 				if not walk_on:
 					return action.on_fail
@@ -576,11 +580,13 @@ func _load_cursor(label: String) -> void:
 
 ## Most pixels a Pixel Detect scans per check. Bigger rects are sampled on a
 ## grid instead (every 2nd, 3rd… pixel), which still catches anything larger
-## than the step but keeps a whole-screen check well under a second.
+## than the step but keeps a whole-screen check well under a second. (An
+## Image Detect tries every offset: the compiled scan rules most out on one
+## pixel, so a whole screen is still a few ms.)
 const DETECT_MAX_SAMPLES := 250000
 
 
-## Where the mouse is right now, for a follow-cursor Pixel Detect. The real
+## Where the mouse is right now, for a follow-cursor detect. The real
 ## backend reads the OS cursor directly (no helper process); the preview
 ## backend answers with its virtual cursor.
 func _mouse_pos() -> Vector2i:
@@ -589,7 +595,7 @@ func _mouse_pos() -> Vector2i:
 	return backend.get_cursor_pos()
 
 
-## One Pixel Detect read: rolls the rect, pins it so the overlay cuts it out
+## One detect read (Pixel or Image): rolls the rect, pins it so the overlay cuts it out
 ## (two frames — the first drawn with the hole, the second for the desktop
 ## compositor to show it; one frame leaked 1 read in 100), reads, unpins.
 ## Returns the hit, or (-1, -1) when not found or the run ended mid-read.
@@ -603,7 +609,7 @@ func _detect_once(action: LoopActionT, gen: int) -> Vector2i:
 	if not is_running or gen != _generation:
 		detect_rect_pinned = false
 		return Vector2i(-1, -1)
-	var hit := _find_color(action, rect)
+	var hit := _find_image(action, rect) if action.type == LoopActionT.Type.IMAGE_DETECT else _find_color(action, rect)
 	detect_rect_pinned = false
 	return hit
 
@@ -636,6 +642,37 @@ func _find_color(action: LoopActionT, rect: Rect2i) -> Vector2i:
 		print("Pixel detect in [%d, %d, %d×%d]: centre read #%s, expected #%s +-%d, no match in rect (step %d) -> not found" % [
 			rect.position.x, rect.position.y, rect.size.x, rect.size.y,
 			(result["centre"] as Color).to_html(false), action.color.to_html(false), tolerance, step])
+	return hit
+
+
+## Looks for `action`'s template image (every pixel ± a tolerance rolled from
+## the action's range) anywhere in `rect`, at every offset it fits. Returns
+## the screen position of its top-left corner at the first match, or
+## (-1, -1). Reads through the same reader and ~Self guard as _find_color;
+## with no screen reader at all the image is taken as found (Safe on an OS
+## without one), so the loop still flows.
+func _find_image(action: LoopActionT, rect: Rect2i) -> Vector2i:
+	var reader := backend if backend.is_real() else get_screen_sampler()
+	if reader == null:
+		return rect.position
+	var size := action.image_size()
+	if size.x == 0:
+		print("Image detect in [%d, %d, %d×%d]: no image captured -> not found" % [rect.position.x, rect.position.y, rect.size.x, rect.size.y])
+		return Vector2i(-1, -1)
+	if size.x > rect.size.x or size.y > rect.size.y:
+		print("Image detect in [%d, %d, %d×%d]: the %d×%d image does not fit the rect -> not found" % [
+			rect.position.x, rect.position.y, rect.size.x, rect.size.y, size.x, size.y])
+		return Vector2i(-1, -1)
+	reader.avoid_pid = 0 if feedback else OS.get_process_id()
+	var tolerance := action.roll_tolerance()
+	var result := reader.find_image(rect, action.image_png, tolerance)
+	if result.is_empty():
+		print("Image detect in [%d, %d, %d×%d]: screen read failed (see warning above) -> not found" % [rect.position.x, rect.position.y, rect.size.x, rect.size.y])
+		return Vector2i(-1, -1)
+	var hit: Vector2i = result["hit"]
+	if hit == Vector2i(-1, -1):
+		print("Image detect in [%d, %d, %d×%d]: %d×%d image +-%d not in rect -> not found" % [
+			rect.position.x, rect.position.y, rect.size.x, rect.size.y, size.x, size.y, tolerance])
 	return hit
 
 

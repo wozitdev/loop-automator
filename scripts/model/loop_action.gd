@@ -17,7 +17,12 @@ enum Type {
 	PIXEL_DETECT,  ## Look for an expected colour anywhere in a screen rect
 	CAPTURE,       ## Save the mouse position, or move back to the saved one
 	STOP,          ## Stop the loop (or end this layer), now or after N passes
+	IMAGE_DETECT,  ## Look for a small screenshot anywhere in a screen rect
 }
+
+## Biggest template an IMAGE_DETECT keeps, on a side: enough for a button or
+## a dialog, and a cap on what a stray whole-screen drag puts in the file.
+const IMAGE_MAX_SIDE := 512
 
 ## Mouse button identifiers used across backends.
 const BUTTON_LEFT := 0
@@ -59,7 +64,7 @@ var captures: bool = false
 ## show a ghost cursor that keeps following the user instead.
 var ghost_cursor: bool = false
 var capture_mode: int = CaptureMode.SAVE
-## PIXEL_DETECT: centre the rect on the mouse (and keep it there as the mouse
+## PIXEL_DETECT / IMAGE_DETECT: centre the rect on the mouse (and keep it there as the mouse
 ## moves) instead of using the stored x / y.
 var follow_cursor: bool = false
 ## MOVE / DRAG: wander a little on the way (see MousePath), the way a hand
@@ -105,10 +110,16 @@ var color: Color = Color(1, 1, 1, 1)
 var tolerance: int = 16
 var tolerance_max: int = 16
 var on_fail: int = OnFail.SKIP_LAYER
-## PIXEL_DETECT: in Safe mode a colour that is not found changes nothing
-## (no skip, no stop), so a whole loop can be walked through; Live keeps
-## to `on_fail`.
+## PIXEL_DETECT / IMAGE_DETECT: in Safe mode a colour or image that is not
+## found changes nothing (no skip, no stop), so a whole loop can be walked
+## through; Live keeps to `on_fail`.
 var safe_continue: bool = true
+## IMAGE_DETECT: the template to look for, as PNG bytes (the form it is
+## stored and sent to the screen reader in); empty until one is captured.
+## Set it through set_image_png so the decoded copies below stay in step.
+var image_png := PackedByteArray()
+var _image: Image = null
+var _image_texture: ImageTexture = null
 
 
 ## A random integer in [lo, hi] (either order); lo == hi is just that value.
@@ -164,6 +175,43 @@ func point_b_extent() -> Rect2i:
 	return point_extent(x2, x2_max, y2, y2_max)
 
 
+## Sets (or clears, with empty bytes) an IMAGE_DETECT's template. Returns
+## false, changing nothing, if the bytes are not a PNG or it is bigger than
+## IMAGE_MAX_SIDE on a side.
+func set_image_png(png: PackedByteArray) -> bool:
+	var img: Image = null
+	if not png.is_empty():
+		# The PNG signature first, so a corrupt file is refused quietly.
+		if png.size() < 8 or png.slice(0, 8) != PackedByteArray([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]):
+			return false
+		img = Image.new()
+		if img.load_png_from_buffer(png) != OK or img.is_empty() \
+				or img.get_width() > IMAGE_MAX_SIDE or img.get_height() > IMAGE_MAX_SIDE:
+			return false
+	image_png = png
+	_image = img
+	_image_texture = null
+	return true
+
+
+## The decoded template (IMAGE_DETECT), or null without one.
+func image() -> Image:
+	return _image
+
+
+## The template's size in pixels, or (0, 0) without one.
+func image_size() -> Vector2i:
+	return _image.get_size() if _image != null else Vector2i.ZERO
+
+
+## The template as a texture for the editor and overlay (built once per
+## template), or null without one.
+func image_texture() -> ImageTexture:
+	if _image_texture == null and _image != null:
+		_image_texture = ImageTexture.create_from_image(_image)
+	return _image_texture
+
+
 static func type_name(t: int) -> String:
 	match t:
 		Type.MOVE: return "Move"
@@ -174,6 +222,7 @@ static func type_name(t: int) -> String:
 		Type.PIXEL_DETECT: return "Pixel Detect"
 		Type.CAPTURE: return "Capture Mouse"
 		Type.STOP: return "Stop"
+		Type.IMAGE_DETECT: return "Image Detect"
 	return "Action"
 
 
@@ -185,7 +234,14 @@ static func supports_captures(t: int) -> bool:
 ## True for the action types that sit at a screen position (drawn on the
 ## overlay as a point or rect and joined by the ordered path).
 static func has_position(t: int) -> bool:
-	return t == Type.MOVE or t == Type.CLICK or t == Type.DRAG or t == Type.PIXEL_DETECT
+	return t == Type.MOVE or t == Type.CLICK or t == Type.DRAG or is_detect(t)
+
+
+## True for the two detects: a screen rect scanned for a colour (PIXEL_DETECT)
+## or a template image (IMAGE_DETECT). They share the rect, Follow Cursor,
+## If-not-found and ~Self handling.
+static func is_detect(t: int) -> bool:
+	return t == Type.PIXEL_DETECT or t == Type.IMAGE_DETECT
 
 
 static func button_name(b: int) -> String:
@@ -226,6 +282,10 @@ static func new_of_type(t: int) -> Self:
 		Type.STOP:
 			a.stop_scope = StopScope.LOOP
 			a.stop_after = 1
+		Type.IMAGE_DETECT:
+			a.tolerance = 16
+			a.tolerance_max = 16
+			a.on_fail = OnFail.SKIP_LAYER
 	return a
 
 
@@ -258,11 +318,17 @@ func describe() -> String:
 			if stop_after > 1:
 				return "Stop %s on pass %d" % [what, stop_after]
 			return "Stop %s" % what
+		Type.IMAGE_DETECT:
+			var size := image_size()
+			var what := "%d×%d image" % [size.x, size.y] if size.x > 0 else "image (none)"
+			if follow_cursor:
+				return "Find %s in %s×%s @ cursor" % [what, range_text(w, w_max), range_text(h, h_max)]
+			return "Find %s in [%s, %s, %s×%s]" % [what, xs, ys, range_text(w, w_max), range_text(h, h_max)]
 	return "Action"
 
 
-## The screen rect a PIXEL_DETECT scans this time: a random position and size
-## from the ranges. With `follow_cursor` it is centred on `cursor` (where the
+## The screen rect a detect (PIXEL_DETECT / IMAGE_DETECT) scans this time: a
+## random position and size from the ranges. With `follow_cursor` it is centred on `cursor` (where the
 ## mouse is right now) instead of the stored x / y.
 func roll_detect_rect(cursor: Vector2i) -> Rect2i:
 	var size := roll_size()
@@ -284,12 +350,12 @@ func detect_extent(cursor: Vector2i) -> Rect2i:
 
 ## Primary anchor point used for overlay path drawing (or -1,-1 if none; see
 ## has_position): the middle of where point A can land, or the top-left of a
-## PIXEL_DETECT's extent. `cursor` places a follow-cursor PIXEL_DETECT.
+## detect's extent. `cursor` places a follow-cursor detect.
 func overlay_point(cursor: Vector2i = Vector2i.ZERO) -> Vector2:
 	match type:
 		Type.MOVE, Type.CLICK, Type.DRAG:
 			return Vector2(point_a_extent().get_center())
-		Type.PIXEL_DETECT:
+		Type.PIXEL_DETECT, Type.IMAGE_DETECT:
 			# The top-left corner: the inside of the rect is kept clear on the
 			# overlay (the screen read scans it), so anchor paths and badges
 			# outside it.
@@ -298,7 +364,7 @@ func overlay_point(cursor: Vector2i = Vector2i.ZERO) -> Vector2:
 
 
 func to_dict() -> Dictionary:
-	return {
+	var d := {
 		"type": type,
 		"enabled": enabled,
 		"comment": comment,
@@ -326,6 +392,10 @@ func to_dict() -> Dictionary:
 		"wait_timeout": wait_timeout,
 		"wait_timeout_ms": wait_timeout_ms,
 	}
+	# The template goes in only when there is one: it is the one bulky field.
+	if not image_png.is_empty():
+		d["image"] = Marshalls.raw_to_base64(image_png)
+	return d
 
 
 static func from_dict(d: Dictionary) -> Self:
@@ -374,6 +444,8 @@ static func from_dict(d: Dictionary) -> Self:
 	a.follow_cursor = bool(d.get("follow_cursor", false))
 	a.wiggle = bool(d.get("wiggle", false))
 	a.keys_paced = bool(d.get("keys_paced", false))
+	# A template that does not decode (or is too big) is dropped, not kept.
+	a.set_image_png(Marshalls.base64_to_raw(String(d.get("image", ""))))
 	return a
 
 

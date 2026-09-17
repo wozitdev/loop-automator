@@ -33,7 +33,7 @@ func _ready() -> void:
 	position = Vector2.ZERO
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_font = ThemeDB.fallback_font
-	# The Pixel Detect rect playback is about to read is left transparent, so
+	# The detect rect playback is about to read is left transparent, so
 	# it reads the desktop there rather than our guides (see
 	# capture_hole.gdshader and _update_capture_holes).
 	material = ShaderMaterial.new()
@@ -194,12 +194,12 @@ func _draw_layer(li: int, layer: LoopLayerT, offset: Vector2) -> void:
 		var positioned := LoopActionT.has_position(action.type)
 		var p := action.overlay_point(_mouse)
 		# Where the chips of the position-less actions that follow hang from.
-		# A Pixel Detect's inside is left clear so the target stays visible:
+		# A detect's inside is left clear so the target stays visible:
 		# chips hang from its bottom-left corner, below the rect, not from its
 		# top-left.
 		var tag_anchor := p
 		var detect_rect := Rect2i()
-		if action.type == LoopActionT.Type.PIXEL_DETECT:
+		if LoopActionT.is_detect(action.type):
 			detect_rect = _detect_rect(action, li, ai)
 			p = Vector2(detect_rect.position)
 			tag_anchor = p + Vector2(0, detect_rect.size.y)
@@ -214,7 +214,7 @@ func _draw_layer(li: int, layer: LoopLayerT, offset: Vector2) -> void:
 		# Per-type visual guide. A point whose X / Y is a range is drawn at the
 		# middle of the area it can land in, with that area boxed.
 		match action.type:
-			LoopActionT.Type.PIXEL_DETECT:
+			LoopActionT.Type.PIXEL_DETECT, LoopActionT.Type.IMAGE_DETECT:
 				_draw_detect_guide(action, _detect_rect(action, li, ai), offset, col, is_selected)
 			LoopActionT.Type.MOVE:
 				_draw_range_box(action.point_a_extent(), offset, col)
@@ -230,11 +230,11 @@ func _draw_layer(li: int, layer: LoopLayerT, offset: Vector2) -> void:
 
 		if positioned:
 			# Positioned action: ordered step badge + execution highlight. A
-			# Pixel Detect's badge sits above its top-left corner; with no room
+			# detect's badge sits above its top-left corner; with no room
 			# above it goes below the rect, not inside it.
 			step += 1
 			var badge := local + Vector2(13, -13)
-			if action.type == LoopActionT.Type.PIXEL_DETECT and badge.y - 9.0 < RULER + 2.0:
+			if LoopActionT.is_detect(action.type) and badge.y - 9.0 < RULER + 2.0:
 				badge.y = local.y + detect_rect.size.y + 13.0
 			_draw_badge(badge, str(step), col)
 			if is_current:
@@ -302,11 +302,12 @@ func _draw_range_box(extent: Rect2i, offset: Vector2, col: Color) -> void:
 	draw_dashed_line(bl, tl, line, 1.0, 4.0)
 
 
-## PIXEL_DETECT: frame the rect with an outline and corner ticks, with the
-## expected colour swatch and a size/tolerance label above it. Everything sits
-## *outside* the rect, so the target inside stays visible (and, while playback
-## reads it, the inside is cut out altogether: see _update_capture_holes).
-## With ranges the framed rect is the extent every possible rect lies in.
+## PIXEL_DETECT / IMAGE_DETECT: frame the rect with an outline and corner
+## ticks, with the expected colour swatch (or a thumbnail of the image) and a
+## size/tolerance label above it. Everything sits *outside* the rect, so the
+## target inside stays visible (and, while playback reads it, the inside is
+## cut out altogether: see _update_capture_holes). With ranges the framed
+## rect is the extent every possible rect lies in.
 func _draw_detect_guide(action: LoopActionT, screen_rect: Rect2i, offset: Vector2, col: Color, selected: bool) -> void:
 	var rect := Rect2(Vector2(screen_rect.position) - offset, Vector2(screen_rect.size))
 	var frame := rect.grow(1.5)
@@ -315,7 +316,8 @@ func _draw_detect_guide(action: LoopActionT, screen_rect: Rect2i, offset: Vector
 	# Expected colour swatch + label on a strip above the rect, to the right of
 	# the step badge that sits at the top-left corner. With no room above (the
 	# rect at the top of the screen) the strip goes below the rect instead.
-	var text := "detect  %s×%s  ±%s" % [
+	var is_image := action.type == LoopActionT.Type.IMAGE_DETECT
+	var text := "%s  %s×%s  ±%s" % ["image" if is_image else "detect",
 		LoopActionT.range_text(action.w, action.w_max), LoopActionT.range_text(action.h, action.h_max),
 		LoopActionT.range_text(action.tolerance, action.tolerance_max)]
 	if action.follow_cursor:
@@ -327,8 +329,18 @@ func _draw_detect_guide(action: LoopActionT, screen_rect: Rect2i, offset: Vector
 	# Clear of the step badge, which is pushed right of the ruler at the edge.
 	top.x = maxf(top.x, RULER + 26.0)
 	top = _claim(Rect2(top, Vector2(strip_w, 16))).position
-	draw_rect(Rect2(top, Vector2(16, 16)), action.color, true)
-	draw_rect(Rect2(top, Vector2(16, 16)), Color.BLACK, false, 1.0)
+	var swatch := Rect2(top, Vector2(16, 16))
+	var thumb := action.image_texture() if is_image else null
+	if thumb != null:
+		# The image, shrunk to fit the swatch (its shape kept) on a dark pad.
+		draw_rect(swatch, Color(0, 0, 0, 0.6), true)
+		var fit := 16.0 / maxf(thumb.get_width(), thumb.get_height())
+		var size := Vector2(thumb.get_size()) * minf(fit, 1.0)
+		draw_texture_rect(thumb, Rect2(top + (Vector2(16, 16) - size) / 2.0, size), false)
+	else:
+		# No image yet: an empty box, in the layer colour.
+		draw_rect(swatch, action.color if not is_image else Color(col, 0.35), true)
+	draw_rect(swatch, Color.BLACK, false, 1.0)
 	_label(top + Vector2(20, 12), text, col)
 	if selected:
 		draw_rect(rect.grow(6.0), Color(1, 1, 1, 0.95), false, 1.5)
@@ -551,8 +563,8 @@ func _draw_execution_tracker(offset: Vector2) -> void:
 
 
 # ------------------------------------------------------------ capture holes
-## A PIXEL_DETECT action is checked anywhere inside its rect (see
-## PlaybackEngine._find_color). While playback has a rect pinned for a read
+## A detect action is checked anywhere inside its rect (see
+## PlaybackEngine._find_color / _find_image). While playback has a rect pinned for a read
 ## (the one frame before it reads the screen) that rect is cut out of the
 ## overlay by the shader, so nothing drawn here — other guides, the grid,
 ## the tracker — can tint the read. The rest of the time nothing is cut:
@@ -569,12 +581,12 @@ func _update_capture_holes(project: LoopProjectT, offset: Vector2) -> void:
 	_follows_mouse = false
 	for layer in project.layers:
 		for a in layer.actions:
-			if a.type == LoopActionT.Type.PIXEL_DETECT and a.enabled and a.follow_cursor:
+			if LoopActionT.is_detect(a.type) and a.enabled and a.follow_cursor:
 				_follows_mouse = true
 				return
 
 
-## The screen rect a Pixel Detect is drawn at. While
+## The screen rect a detect is drawn at. While
 ## playback is reading the action at (li, ai) it is the rect pinned for that
 ## read (see PlaybackEngine.detect_rect); otherwise it is the extent of every
 ## rect the ranges allow, following the mouse or at the stored position.
