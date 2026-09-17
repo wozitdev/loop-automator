@@ -1345,21 +1345,21 @@ func _add_tolerance_field(a: LoopActionT, tip: String) -> void:
 
 
 ## An Image Detect's two allowances. "Mismatch (%)": how much of the image
-## may fail to match. Then the per-pixel tolerance, whose label is the
-## "~Tolerance" checkbox: checked, pixels are compared by light and dark
-## only, so a tinted copy of the image (hovered, pressed, another theme) is
-## still found.
+## may fail to match; its label is the "~Mismatch" checkbox: checked, pixels
+## are compared by light and dark only, so a tinted copy of the image
+## (hovered, pressed, another theme) is still found. Then the per-pixel
+## tolerance.
 func _add_image_tolerance_fields(a: LoopActionT) -> void:
-	var mrow := _row("Mismatch (%)")
-	mrow.tooltip_text = "How much of the image may be off, as a share of its pixels (0 = every pixel must match)."
-	_add_range_field_in(mrow, a.mismatch, a.mismatch_max, 0, LoopActionT.MISMATCH_MAX, func(lo: int, hi: int):
-		a.mismatch = lo
-		a.mismatch_max = hi)
-	var trow := _row_toggle("Tolerance (0-255)", a.ignore_colour,
-		"How far each pixel's colour channels may differ from the image (0 = an exact match).\nChecked: compared by light and dark only, so the image is still found when it is tinted differently (hovered, pressed, another theme).",
+	var mrow := _row_toggle("Mismatch (%)", a.ignore_colour,
+		"How much of the image may be off, as a share of its pixels (0 = every pixel must match).\nChecked: pixels are compared by light and dark only, so the image is still found when it is tinted differently (hovered, pressed, another theme).",
 		func(v: bool):
 			a.ignore_colour = v
 			_after_edit())
+	_add_range_field_in(mrow, a.mismatch, a.mismatch_max, 0, LoopActionT.MISMATCH_MAX, func(lo: int, hi: int):
+		a.mismatch = lo
+		a.mismatch_max = hi)
+	var trow := _row("Tolerance (0-255)")
+	trow.tooltip_text = "How far each pixel's colour channels may differ from the image (0 = an exact match)."
 	_add_range_field_in(trow, a.tolerance, a.tolerance_max, 0, 255, func(lo: int, hi: int):
 		a.tolerance = lo
 		a.tolerance_max = hi)

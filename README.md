@@ -100,7 +100,7 @@ layer 1, just broken out so you can view each layer's visuals separately.
   than the rect can never be found; the editor says so under it. **Mismatch
   (%)** is how much of the image may be off (a share of its pixels, up to
   50 %; 0 = every pixel must match — the more is allowed, the longer a big
-  rect takes to scan). Check **~Tolerance** to compare by light and dark
+  rect takes to scan). Check **~Mismatch** to compare by light and dark
   only, so the image is still found when it is tinted differently (hovered,
   pressed, another theme). Rect,
   **Follow Cursor**, **If not found**, **Wait till found** and **~Self** work
