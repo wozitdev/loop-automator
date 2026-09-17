@@ -1613,12 +1613,10 @@ func _run_label() -> String:
 
 func _refresh_edit_lock() -> void:
 	var locked := _is_interaction_locked()
-	# The lock always blocks input, but only dims the window when ~Self is
-	# off. With ~Self on a loop may read Loop Automator's own pixels (a
-	# Pixel Detect on its window), so the window must show its true colours,
-	# not a 65%-dimmed version that would never match.
-	var dim := locked and not Playback.feedback
-	var tint := Color(1, 1, 1, 0.65) if dim else Color(1, 1, 1, 1)
+	# The window dims while a Live loop runs, ~Self or not. A Pixel Detect
+	# reading Loop Automator's own window (~Self on) then reads the dimmed
+	# colours — the user accounts for that shift; the dim cue is kept.
+	var tint := Color(1, 1, 1, 0.65) if locked else Color(1, 1, 1, 1)
 	if _ui_root != null:
 		_set_controls_locked(_ui_root, locked)
 		_ui_root.modulate = tint
@@ -1631,8 +1629,7 @@ func _refresh_edit_lock() -> void:
 		_main_split.modulate = tint
 	if _edit_lock_blocker != null:
 		_edit_lock_blocker.visible = locked
-		# Blocks clicks either way; only tints when dimming.
-		_edit_lock_blocker.color = Color(0.0, 0.0, 0.0, 0.20 if dim else 0.0)
+		_edit_lock_blocker.color = Color(0.0, 0.0, 0.0, 0.20)
 		_edit_lock_blocker.move_to_front()
 	if backend_option != null:
 		backend_option.disabled = locked
