@@ -71,9 +71,13 @@ var wiggle: bool = false
 var keys_paced: bool = false
 ## STOP: what it ends (the loop, or just this layer's pass).
 var stop_scope: int = StopScope.LOOP
-## STOP: fire on the Nth pass that reaches it (0 = the first, i.e. right
-## away). PIXEL_DETECT reuses wait_ms as its "wait till found" re-check gap.
-var stop_after: int = 0
+## STOP: fire on this pass that reaches it (1 = the first). PIXEL_DETECT
+## reuses wait_ms as its "wait till found" re-check gap.
+var stop_after: int = 1
+## PIXEL_DETECT "wait till found": give up after `wait_timeout_ms` and skip
+## the rest of the layer, instead of waiting forever.
+var wait_timeout: bool = false
+var wait_timeout_ms: int = 5000
 
 # Geometry / parameters (only the relevant ones are used per type). Every
 # numeric setting is a range: `x` .. `x_max` and so on. Each time the action
@@ -221,7 +225,7 @@ static func new_of_type(t: int) -> Self:
 			a.capture_mode = CaptureMode.SAVE
 		Type.STOP:
 			a.stop_scope = StopScope.LOOP
-			a.stop_after = 0
+			a.stop_after = 1
 	return a
 
 
@@ -251,8 +255,8 @@ func describe() -> String:
 			return "Capture: %s mouse position" % ("Save" if capture_mode == CaptureMode.SAVE else "Load")
 		Type.STOP:
 			var what := "loop" if stop_scope == StopScope.LOOP else "layer"
-			if stop_after > 0:
-				return "Stop %s after %d passes" % [what, stop_after]
+			if stop_after > 1:
+				return "Stop %s on pass %d" % [what, stop_after]
 			return "Stop %s" % what
 	return "Action"
 
@@ -319,6 +323,8 @@ func to_dict() -> Dictionary:
 		"keys_paced": keys_paced,
 		"stop_scope": stop_scope,
 		"stop_after": stop_after,
+		"wait_timeout": wait_timeout,
+		"wait_timeout_ms": wait_timeout_ms,
 	}
 
 
@@ -356,7 +362,10 @@ static func from_dict(d: Dictionary) -> Self:
 	if a.on_fail != OnFail.SKIP_LAYER and a.on_fail != OnFail.WAIT_FOUND:
 		a.on_fail = OnFail.SKIP_LAYER
 	a.stop_scope = int(d.get("stop_scope", StopScope.LOOP))
-	a.stop_after = maxi(0, int(d.get("stop_after", 0)))
+	# 1-based: the old 0 ("first pass") reads the same as 1 now.
+	a.stop_after = maxi(1, int(d.get("stop_after", 1)))
+	a.wait_timeout = bool(d.get("wait_timeout", false))
+	a.wait_timeout_ms = maxi(0, int(d.get("wait_timeout_ms", 5000)))
 	a.safe_continue = bool(d.get("safe_continue", true))
 	a.captures = bool(d.get("captures", false))
 	# "lag_compensation" is the pre-release name of the same option.

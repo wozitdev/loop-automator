@@ -259,8 +259,12 @@ func _draw_layer(li: int, layer: LoopLayerT, offset: Vector2) -> void:
 				text = "CAPTURE  " + ("SAVE" if action.capture_mode == LoopActionT.CaptureMode.SAVE else "LOAD")
 			elif action.type == LoopActionT.Type.STOP:
 				text = ("STOP LOOP" if action.stop_scope == LoopActionT.StopScope.LOOP else "STOP LAYER")
-				if action.stop_after > 0:
-					text += "  @%d" % action.stop_after
+				# While running, show which pass it is on out of its limit;
+				# otherwise just the limit (nothing for a plain pass-1 stop).
+				if Playback.is_running:
+					text += "  pass %d/%d" % [Playback.stop_pass_count(action), maxi(1, action.stop_after)]
+				elif action.stop_after > 1:
+					text += "  pass %d" % action.stop_after
 			# The chip may be moved to stay on screen; the link follows it.
 			var chip := _draw_tag(tag_pos, col, text, is_selected)
 			var link := col

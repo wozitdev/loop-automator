@@ -146,6 +146,12 @@ func set_feedback(enabled: bool) -> void:
 	_apply_feedback()
 
 
+## How many times a STOP action has been reached so far this run (0 before
+## its first reach; the overlay shows it against its "on pass N" threshold).
+func stop_pass_count(action) -> int:
+	return int(_stop_counts.get(action, 0))
+
+
 func _apply_feedback() -> void:
 	if backend != null:
 		backend.avoid_pid = 0 if feedback else OS.get_process_id()
@@ -314,7 +320,15 @@ func _execute_action(action: LoopActionT, layer_index: int, action_index: int) -
 			# wait — safe_continue carries it on regardless.
 			var wait_mode := action.on_fail == LoopActionT.OnFail.WAIT_FOUND \
 					and not (action.safe_continue and not backend.is_real())
+			var wait_started := Time.get_ticks_msec()
 			while wait_mode and hit.x < 0 and is_running and gen == _generation:
+				# Timed out: give up and skip the rest of the layer. (The
+				# fallback is fixed for now; it could follow a chosen
+				# If-not-found option once there are more of them.)
+				if action.wait_timeout and Time.get_ticks_msec() - wait_started >= action.wait_timeout_ms:
+					_last_event = "Pixel detect: not found (timed out)."
+					emit_signal("status", _last_event)
+					return LoopActionT.OnFail.SKIP_LAYER
 				_last_event = "Pixel detect: waiting for the colour…"
 				emit_signal("status", _last_event)
 				_set_tracker(tracker_pos, tracker_visible, "WAIT DETECT")

@@ -974,6 +974,34 @@ func _add_on_fail_field(a: LoopActionT) -> void:
 		_add_range_field("Check every (ms)", a.wait_ms, a.wait_ms_max, 0, 600000, func(lo: int, hi: int):
 			a.wait_ms = lo
 			a.wait_ms_max = hi)
+		# ~Timeout: give up after this long and skip the rest of the layer.
+		var trow := HBoxContainer.new()
+		trow.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		var tcb := CheckBox.new()
+		tcb.text = "~Timeout (ms)"
+		tcb.focus_mode = Control.FOCUS_NONE
+		tcb.button_pressed = a.wait_timeout
+		tcb.custom_minimum_size = Vector2(120, 0)
+		tcb.tooltip_text = "Checked: stop waiting after this long and skip the rest of the layer."
+		var tsp := SpinBox.new()
+		tsp.min_value = 0
+		tsp.max_value = 3600000
+		tsp.step = 1
+		tsp.value = a.wait_timeout_ms
+		tsp.editable = a.wait_timeout
+		tsp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		tsp.get_line_edit().text_changed.connect(func(_t: String): tsp.set_meta(&"typed", true))
+		tsp.value_changed.connect(func(v: float):
+			tsp.set_meta(&"typed", false)
+			a.wait_timeout_ms = int(v)
+			_after_edit())
+		tcb.toggled.connect(func(v: bool):
+			a.wait_timeout = v
+			tsp.editable = v
+			_after_edit())
+		trow.add_child(tcb)
+		trow.add_child(tsp)
+		editor_box.add_child(trow)
 
 
 func _add_capture_mode_field(a: LoopActionT) -> void:
@@ -995,8 +1023,8 @@ func _add_capture_mode_field(a: LoopActionT) -> void:
 
 
 ## The Stop action: what it ends (the loop, or just this layer's pass) and,
-## inline, on which pass it fires — 0 the moment it is reached, N on the Nth
-## pass that reaches it.
+## inline, which pass it fires on — pass 1 the first time it is reached, N
+## on the Nth pass.
 func _add_stop_field(a: LoopActionT) -> void:
 	var row := HBoxContainer.new()
 	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -1012,27 +1040,25 @@ func _add_stop_field(a: LoopActionT) -> void:
 		_after_edit())
 	row.add_child(opt)
 	var after := Label.new()
-	after.text = "after"
+	after.text = "on pass"
 	row.add_child(after)
 	var sp := SpinBox.new()
-	sp.min_value = 0
+	sp.min_value = 1
 	sp.max_value = 1000000
 	sp.step = 1
 	sp.value = a.stop_after
 	sp.custom_minimum_size = Vector2(72, 0)
-	sp.tooltip_text = "0 = stop as soon as this action is reached.\nN = stop on the Nth pass that reaches it (a run limiter)."
+	sp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	sp.tooltip_text = "1 = stop the first time this action is reached.\nN = stop on the Nth pass that reaches it (a run limiter)."
 	sp.get_line_edit().text_changed.connect(func(_t: String): sp.set_meta(&"typed", true))
 	sp.value_changed.connect(func(v: float):
 		sp.set_meta(&"typed", false)
 		a.stop_after = int(v)
 		_after_edit())
 	row.add_child(sp)
-	var passes := Label.new()
-	passes.text = "passes"
-	row.add_child(passes)
 	editor_box.add_child(row)
 	var hint := Label.new()
-	hint.text = "Stops the whole loop, or ends just this layer for the pass. 0 passes = the first time it is reached."
+	hint.text = "Stops the whole loop, or ends just this layer for the pass, when reached. Pass N makes it a run limiter."
 	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	hint.modulate = Color(1, 1, 1, 0.7)
 	editor_box.add_child(hint)
