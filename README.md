@@ -97,9 +97,12 @@ layer 1, just broken out so you can view each layer's visuals separately.
   stored inside the loop file; it must match pixel for pixel — tolerance 0 is
   an exact match, higher lets each pixel's channels differ by up to that much
   — so a change of scale, theme or font breaks the match. An image bigger
-  than the rect can never be found; the editor says so under it. Tick
-  **Ignore Colour** to match by light and dark only, so the image is still
-  found when it is tinted differently (hovered, pressed, another theme). Rect,
+  than the rect can never be found; the editor says so under it. **Mismatch
+  (%)** is how much of the image may be off (a share of its pixels, up to
+  50 %; 0 = every pixel must match — the more is allowed, the longer a big
+  rect takes to scan). Check **~Tolerance** to compare by light and dark
+  only, so the image is still found when it is tinted differently (hovered,
+  pressed, another theme). Rect,
   **Follow Cursor**, **If not found**, **Wait till found** and **~Self** work
   as for Pixel Detect. The scan runs in the helper, so a whole screen is
   checked in a few tens of milliseconds.

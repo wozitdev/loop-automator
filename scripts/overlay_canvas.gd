@@ -324,6 +324,8 @@ func _draw_detect_guide(action: LoopActionT, screen_rect: Rect2i, offset: Vector
 		text += "  · cursor"
 	if is_image and action.ignore_colour:
 		text += "  · no colour"
+	if is_image and maxi(action.mismatch, action.mismatch_max) > 0:
+		text += "  · %s%% off" % LoopActionT.range_text(action.mismatch, action.mismatch_max)
 	var strip_w := 20.0 + (_font.get_string_size(text, HORIZONTAL_ALIGNMENT_LEFT, -1, 13).x if _font != null else 120.0)
 	var top := rect.position + Vector2(28, -22)
 	if top.y < RULER + 2.0:

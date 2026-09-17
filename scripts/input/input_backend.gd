@@ -96,14 +96,15 @@ static func _matches(data: PackedByteArray, i: int, r: int, g: int, b: int, tol:
 
 
 ## Looks for the template `png` (a PNG image, ± `tolerance` per channel on
-## every pixel, or on each pixel's brightness alone with `grey`) anywhere in
-## the screen rect, trying every offset it fits at.
+## every pixel, or on each pixel's brightness alone with `grey`; up to
+## `mismatch` % of its pixels may be off) anywhere in the screen rect, trying
+## every offset it fits at.
 ## Returns {"hit": Vector2i} — the screen position of the template's top-left
 ## corner, or (-1, -1) when nothing matched — or an empty Dictionary if the
 ## screen could not be read. Backends that can do the scan themselves
 ## override this; the default reads the rect and scans it here, which is slow
 ## on a big rect (seconds in script for a whole screen).
-func find_image(rect: Rect2i, png: PackedByteArray, tolerance: int, grey: bool = false) -> Dictionary:
+func find_image(rect: Rect2i, png: PackedByteArray, tolerance: int, grey: bool = false, mismatch: int = 0) -> Dictionary:
 	var tpl := Image.new()
 	if tpl.load_png_from_buffer(png) != OK or tpl.is_empty():
 		return {}
@@ -124,29 +125,34 @@ func find_image(rect: Rect2i, png: PackedByteArray, tolerance: int, grey: bool =
 	var data := img.get_data()
 	var tdata := tpl.get_data()
 	# The template's centre pixel is tried first at every offset, so most
-	# offsets are ruled out on one comparison.
+	# offsets are ruled out on one comparison (unless mismatches are allowed:
+	# the centre may then be one of them).
+	var allowed := clampi(mismatch, 0, 100) * tw * th / 100
 	var tc := (th / 2 * tw + tw / 2) * 4
 	var tcx := tw / 2
 	var tcy := th / 2
 	for oy in h - th + 1:
 		for ox in w - tw + 1:
-			if not _same(data, ((oy + tcy) * w + ox + tcx) * 4, tdata, tc, tolerance, grey):
+			if allowed == 0 and not _same(data, ((oy + tcy) * w + ox + tcx) * 4, tdata, tc, tolerance, grey):
 				continue
-			if _template_at(data, w, ox, oy, tdata, tw, th, tolerance, grey):
+			if _template_at(data, w, ox, oy, tdata, tw, th, tolerance, grey, allowed):
 				result["hit"] = rect.position + Vector2i(ox, oy)
 				return result
 	return result
 
 
-## True when every template pixel matches the screen pixel under it with the
-## template's top-left at (ox, oy).
-static func _template_at(data: PackedByteArray, w: int, ox: int, oy: int, tdata: PackedByteArray, tw: int, th: int, tol: int, grey: bool) -> bool:
+## True when the template, its top-left at (ox, oy), matches the screen
+## under it with at most `allowed` pixels off.
+static func _template_at(data: PackedByteArray, w: int, ox: int, oy: int, tdata: PackedByteArray, tw: int, th: int, tol: int, grey: bool, allowed: int) -> bool:
+	var off := 0
 	for ty in th:
 		var row := ((oy + ty) * w + ox) * 4
 		var trow := ty * tw * 4
 		for tx in tw:
 			if not _same(data, row + tx * 4, tdata, trow + tx * 4, tol, grey):
-				return false
+				off += 1
+				if off > allowed:
+					return false
 	return true
 
 

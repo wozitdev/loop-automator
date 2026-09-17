@@ -733,7 +733,7 @@ func _rebuild_editor() -> void:
 		LoopActionT.Type.IMAGE_DETECT:
 			_add_rect_fields(a)
 			_add_image_field(a)
-			_add_tolerance_field(a, "How far each pixel's colour channels may differ from the image (0 = an exact match).")
+			_add_image_tolerance_fields(a)
 			_add_on_fail_field(a)
 		LoopActionT.Type.CAPTURE:
 			_add_capture_mode_field(a)
@@ -1014,17 +1014,6 @@ func _add_image_field(a: LoopActionT) -> void:
 	place.tooltip_text = "Drag over what to look for; it is captured as the image and the rect is set to that spot."
 	buttons.add_child(place)
 	editor_box.add_child(buttons)
-	# Ignore Colour: match by light and dark only, so a tinted copy of the
-	# image (hovered, pressed, another theme) is still found.
-	var grey := CheckBox.new()
-	grey.text = "Ignore Colour"
-	grey.tooltip_text = "Match by light and dark only, so the image is still found when it is tinted differently (hovered, pressed, another theme)."
-	grey.focus_mode = Control.FOCUS_NONE
-	grey.button_pressed = a.ignore_colour
-	grey.toggled.connect(func(v: bool):
-		a.ignore_colour = v
-		_after_edit())
-	editor_box.add_child(grey)
 
 
 ## Shows or hides the "bigger than the rect" label for `a` (an image wider
@@ -1351,6 +1340,27 @@ func _add_tolerance_field(a: LoopActionT, tip: String) -> void:
 	var row := _row("Tolerance (0-255)")
 	row.tooltip_text = tip
 	_add_range_field_in(row, a.tolerance, a.tolerance_max, 0, 255, func(lo: int, hi: int):
+		a.tolerance = lo
+		a.tolerance_max = hi)
+
+
+## An Image Detect's two allowances. "Mismatch (%)": how much of the image
+## may fail to match. Then the per-pixel tolerance, whose label is the
+## "~Tolerance" checkbox: checked, pixels are compared by light and dark
+## only, so a tinted copy of the image (hovered, pressed, another theme) is
+## still found.
+func _add_image_tolerance_fields(a: LoopActionT) -> void:
+	var mrow := _row("Mismatch (%)")
+	mrow.tooltip_text = "How much of the image may be off, as a share of its pixels (0 = every pixel must match)."
+	_add_range_field_in(mrow, a.mismatch, a.mismatch_max, 0, LoopActionT.MISMATCH_MAX, func(lo: int, hi: int):
+		a.mismatch = lo
+		a.mismatch_max = hi)
+	var trow := _row_toggle("Tolerance (0-255)", a.ignore_colour,
+		"How far each pixel's colour channels may differ from the image (0 = an exact match).\nChecked: compared by light and dark only, so the image is still found when it is tinted differently (hovered, pressed, another theme).",
+		func(v: bool):
+			a.ignore_colour = v
+			_after_edit())
+	_add_range_field_in(trow, a.tolerance, a.tolerance_max, 0, 255, func(lo: int, hi: int):
 		a.tolerance = lo
 		a.tolerance_max = hi)
 
