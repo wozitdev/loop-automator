@@ -1014,6 +1014,17 @@ func _add_image_field(a: LoopActionT) -> void:
 	place.tooltip_text = "Drag over what to look for; it is captured as the image and the rect is set to that spot."
 	buttons.add_child(place)
 	editor_box.add_child(buttons)
+	# Ignore Colour: match by light and dark only, so a tinted copy of the
+	# image (hovered, pressed, another theme) is still found.
+	var grey := CheckBox.new()
+	grey.text = "Ignore Colour"
+	grey.tooltip_text = "Match by light and dark only, so the image is still found when it is tinted differently (hovered, pressed, another theme)."
+	grey.focus_mode = Control.FOCUS_NONE
+	grey.button_pressed = a.ignore_colour
+	grey.toggled.connect(func(v: bool):
+		a.ignore_colour = v
+		_after_edit())
+	editor_box.add_child(grey)
 
 
 ## Shows or hides the "bigger than the rect" label for `a` (an image wider

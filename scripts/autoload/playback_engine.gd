@@ -646,7 +646,8 @@ func _find_color(action: LoopActionT, rect: Rect2i) -> Vector2i:
 
 
 ## Looks for `action`'s template image (every pixel ± a tolerance rolled from
-## the action's range) anywhere in `rect`, at every offset it fits. Returns
+## the action's range, on brightness alone with `ignore_colour`) anywhere in
+## `rect`, at every offset it fits. Returns
 ## the screen position of its top-left corner at the first match, or
 ## (-1, -1). Reads through the same reader and ~Self guard as _find_color;
 ## with no screen reader at all the image is taken as found (Safe on an OS
@@ -665,7 +666,7 @@ func _find_image(action: LoopActionT, rect: Rect2i) -> Vector2i:
 		return Vector2i(-1, -1)
 	reader.avoid_pid = 0 if feedback else OS.get_process_id()
 	var tolerance := action.roll_tolerance()
-	var result := reader.find_image(rect, action.image_png, tolerance)
+	var result := reader.find_image(rect, action.image_png, tolerance, action.ignore_colour)
 	if result.is_empty():
 		print("Image detect in [%d, %d, %d×%d]: screen read failed (see warning above) -> not found" % [rect.position.x, rect.position.y, rect.size.x, rect.size.y])
 		return Vector2i(-1, -1)

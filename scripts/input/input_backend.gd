@@ -96,13 +96,14 @@ static func _matches(data: PackedByteArray, i: int, r: int, g: int, b: int, tol:
 
 
 ## Looks for the template `png` (a PNG image, ± `tolerance` per channel on
-## every pixel) anywhere in the screen rect, trying every offset it fits at.
+## every pixel, or on each pixel's brightness alone with `grey`) anywhere in
+## the screen rect, trying every offset it fits at.
 ## Returns {"hit": Vector2i} — the screen position of the template's top-left
 ## corner, or (-1, -1) when nothing matched — or an empty Dictionary if the
 ## screen could not be read. Backends that can do the scan themselves
 ## override this; the default reads the rect and scans it here, which is slow
 ## on a big rect (seconds in script for a whole screen).
-func find_image(rect: Rect2i, png: PackedByteArray, tolerance: int) -> Dictionary:
+func find_image(rect: Rect2i, png: PackedByteArray, tolerance: int, grey: bool = false) -> Dictionary:
 	var tpl := Image.new()
 	if tpl.load_png_from_buffer(png) != OK or tpl.is_empty():
 		return {}
@@ -129,9 +130,9 @@ func find_image(rect: Rect2i, png: PackedByteArray, tolerance: int) -> Dictionar
 	var tcy := th / 2
 	for oy in h - th + 1:
 		for ox in w - tw + 1:
-			if not _same(data, ((oy + tcy) * w + ox + tcx) * 4, tdata, tc, tolerance):
+			if not _same(data, ((oy + tcy) * w + ox + tcx) * 4, tdata, tc, tolerance, grey):
 				continue
-			if _template_at(data, w, ox, oy, tdata, tw, th, tolerance):
+			if _template_at(data, w, ox, oy, tdata, tw, th, tolerance, grey):
 				result["hit"] = rect.position + Vector2i(ox, oy)
 				return result
 	return result
@@ -139,17 +140,25 @@ func find_image(rect: Rect2i, png: PackedByteArray, tolerance: int) -> Dictionar
 
 ## True when every template pixel matches the screen pixel under it with the
 ## template's top-left at (ox, oy).
-static func _template_at(data: PackedByteArray, w: int, ox: int, oy: int, tdata: PackedByteArray, tw: int, th: int, tol: int) -> bool:
+static func _template_at(data: PackedByteArray, w: int, ox: int, oy: int, tdata: PackedByteArray, tw: int, th: int, tol: int, grey: bool) -> bool:
 	for ty in th:
 		var row := ((oy + ty) * w + ox) * 4
 		var trow := ty * tw * 4
 		for tx in tw:
-			if not _same(data, row + tx * 4, tdata, trow + tx * 4, tol):
+			if not _same(data, row + tx * 4, tdata, trow + tx * 4, tol, grey):
 				return false
 	return true
 
 
-static func _same(a: PackedByteArray, i: int, b: PackedByteArray, j: int, tol: int) -> bool:
+## Pixel `i` of `a` (RGBA bytes) within `tol` of pixel `j` of `b`: on every
+## channel, or with `grey` on brightness alone (the usual 30 / 59 / 11 %
+## weights, so a tint that changes the colour but not how light it is
+## still matches).
+static func _same(a: PackedByteArray, i: int, b: PackedByteArray, j: int, tol: int, grey: bool) -> bool:
+	if grey:
+		var la := (a[i] * 299 + a[i + 1] * 587 + a[i + 2] * 114) / 1000
+		var lb := (b[j] * 299 + b[j + 1] * 587 + b[j + 2] * 114) / 1000
+		return absi(la - lb) <= tol
 	return absi(a[i] - b[j]) <= tol and absi(a[i + 1] - b[j + 1]) <= tol and absi(a[i + 2] - b[j + 2]) <= tol
 
 

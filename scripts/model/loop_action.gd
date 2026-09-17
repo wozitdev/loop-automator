@@ -118,6 +118,9 @@ var safe_continue: bool = true
 ## stored and sent to the screen reader in); empty until one is captured.
 ## Set it through set_image_png so the decoded copies below stay in step.
 var image_png := PackedByteArray()
+## IMAGE_DETECT: compare each pixel by how light it is, not its colour, so a
+## differently tinted copy (hovered, pressed, another theme) still matches.
+var ignore_colour: bool = false
 var _image: Image = null
 var _image_texture: ImageTexture = null
 
@@ -391,6 +394,7 @@ func to_dict() -> Dictionary:
 		"stop_after": stop_after,
 		"wait_timeout": wait_timeout,
 		"wait_timeout_ms": wait_timeout_ms,
+		"ignore_colour": ignore_colour,
 	}
 	# The template goes in only when there is one: it is the one bulky field.
 	if not image_png.is_empty():
@@ -436,6 +440,7 @@ static func from_dict(d: Dictionary) -> Self:
 	a.stop_after = maxi(1, int(d.get("stop_after", 1)))
 	a.wait_timeout = bool(d.get("wait_timeout", false))
 	a.wait_timeout_ms = maxi(0, int(d.get("wait_timeout_ms", 5000)))
+	a.ignore_colour = bool(d.get("ignore_colour", false))
 	a.safe_continue = bool(d.get("safe_continue", true))
 	a.captures = bool(d.get("captures", false))
 	# "lag_compensation" is the pre-release name of the same option.
