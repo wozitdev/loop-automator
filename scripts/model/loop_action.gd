@@ -28,7 +28,7 @@ const IMAGE_MAX_SIDE := 2048
 ## a drag that took in a sliver of whatever surrounds the target still
 ## matches when that changes. Templates too small to have an inside keep
 ## all their pixels.
-const IMAGE_EDGE := 2
+const IMAGE_EDGE := 3
 
 ## Mouse button identifiers used across backends.
 const BUTTON_LEFT := 0

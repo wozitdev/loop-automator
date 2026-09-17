@@ -94,7 +94,7 @@ layer 1, just broken out so you can view each layer's visuals separately.
   rect alone; **Capture & place** also makes that area the rect, so the action
   checks that the image is still right there. Click the thumbnail (or the
   eye) to see the image full size. The image is stored inside the loop file
-  and must match pixel for pixel, bar its outermost two pixels, which are
+  and must match pixel for pixel, bar its outermost three pixels, which are
   never compared (so a drag that took in a sliver of the surroundings still
   matches when those change) — tolerance 0 is
   an exact match, higher lets each pixel's channels differ by up to that much
