@@ -479,10 +479,11 @@ if ($cmd -ne 'serve') { Run-Cmd $a; exit 0 }
 #   tpl id b64                   -> \"ok\": the last piece; the pieces so far
 #     plus this one are the base64 PNG kept as template `id` for image
 #     commands (a handful are kept; older ones are dropped).
-#   image x y w h id tol guard grey miss -> \"x,y\" of the top-left of the
-#     first spot in the rect where the template's pixels are within tol of
-#     the screen (grey 1: on brightness alone, ignoring colour; up to miss %
-#     of them may be off; every offset is tried, the template's centre pixel
+#   image x y w h id tol guard grey miss edge -> \"x,y\" of the top-left of
+#     the first spot in the rect where the template's pixels are within tol
+#     of the screen (grey 1: on brightness alone, ignoring colour; up to
+#     miss % of them may be off; its outermost edge pixels are not compared
+#     when it is big enough to have an inside; every offset is tried, the template's centre pixel
 #     first, so a miss costs about one comparison per offset), \"none\", or
 #     \"notpl\" when `id` is not loaded (send a tpl and try again). `guard` as for find.
 #   pixel x y                    -> \"r,g,b\"
@@ -582,30 +583,33 @@ public class Scan {
     }
     return Math.Abs(p[i] - q[j]) <= tol && Math.Abs(p[i+1] - q[j+1]) <= tol && Math.Abs(p[i+2] - q[j+2]) <= tol;
   }
-  // The template at (ox, oy) matches with at most `allowed` pixels off.
-  static bool At(int stride, int ox, int oy, Tpl t, int tol, bool grey, int allowed) {
+  // The template at (ox, oy) matches with at most `allowed` pixels off, its
+  // outermost `e` pixels left out.
+  static bool At(int stride, int ox, int oy, Tpl t, int tol, bool grey, int allowed, int e) {
     int off = 0;
-    for (int ty = 0; ty < t.h; ty++) {
+    for (int ty = e; ty < t.h - e; ty++) {
       int row = (oy + ty) * stride + ox * 4, trow = ty * t.w * 4;
-      for (int tx = 0; tx < t.w; tx++)
+      for (int tx = e; tx < t.w - e; tx++)
         if (!Same(buf, row + tx * 4, t.px, trow + tx * 4, tol, grey) && ++off > allowed) return false;
     }
     return true;
   }
-  public static string Image(int x, int y, int w, int h, string id, int tol, int guard, bool grey, int miss) {
+  public static string Image(int x, int y, int w, int h, string id, int tol, int guard, bool grey, int miss, int edge) {
     Tpl t;
     if (!tpls.TryGetValue(id, out t)) return \"notpl\";
     if (t.w > w || t.h > h) return \"none\";
     int stride = Grab(x, y, w, h);
     // miss % of the template's pixels may be off; with none allowed the
     // centre pixel alone rules most offsets out.
-    int allowed = Math.Max(0, Math.Min(100, miss)) * t.w * t.h / 100;
+    // The outermost edge pixels are skipped when there is an inside.
+    int e = (edge > 0 && t.w > 2 * edge && t.h > 2 * edge) ? edge : 0;
+    int allowed = Math.Max(0, Math.Min(100, miss)) * (t.w - 2 * e) * (t.h - 2 * e) / 100;
     int tcx = t.w / 2, tcy = t.h / 2, tc = (tcy * t.w + tcx) * 4;
     for (int oy = 0; oy + t.h <= h; oy++) {
       int row = (oy + tcy) * stride;
       for (int ox = 0; ox + t.w <= w; ox++) {
         if (allowed == 0 && !Same(buf, row + (ox + tcx) * 4, t.px, tc, tol, grey)) continue;
-        if (At(stride, ox, oy, t, tol, grey, allowed) && !Guarded(x + ox + tcx, y + oy + tcy, guard)) return (x + ox) + \",\" + (y + oy);
+        if (At(stride, ox, oy, t, tol, grey, allowed, e) && !Guarded(x + ox + tcx, y + oy + tcy, guard)) return (x + ox) + \",\" + (y + oy);
       }
     }
     return \"none\";
@@ -624,7 +628,7 @@ while ($true) {
       'pixel' { $out.WriteLine([Scan]::Pixel([int]$p[1],[int]$p[2])) }
       'tplpart' { $out.WriteLine([Scan]::Part($p[1], $p[2])) }
       'tpl' { $out.WriteLine([Scan]::Load($p[1], $p[2])) }
-      'image' { $out.WriteLine([Scan]::Image([int]$p[1],[int]$p[2],[int]$p[3],[int]$p[4],$p[5],[int]$p[6],[int]$p[7],($p[8] -eq '1'),[int]$p[9])) }
+      'image' { $out.WriteLine([Scan]::Image([int]$p[1],[int]$p[2],[int]$p[3],[int]$p[4],$p[5],[int]$p[6],[int]$p[7],($p[8] -eq '1'),[int]$p[9],[int]$p[10])) }
       'cursor' { $c = [System.Windows.Forms.Cursor]::Position; $out.WriteLine(('{0},{1}' -f $c.X,$c.Y)) }
       default {
         $res = @(Run-Cmd $p)
@@ -1011,16 +1015,16 @@ func find_color(rect: Rect2i, color: Color, tolerance: int, step: int) -> Dictio
 ## (see Scan.Image), so it gets a longer wait than other reads. Only with no
 ## server at all is the rect fetched as an image and scanned here — never
 ## after a served scan that failed or timed out (script would take minutes).
-func find_image(rect: Rect2i, png: PackedByteArray, tolerance: int, grey: bool = false, mismatch: int = 0) -> Dictionary:
+func find_image(rect: Rect2i, png: PackedByteArray, tolerance: int, grey: bool = false, mismatch: int = 0, edge: int = 0) -> Dictionary:
 	if _helper_real_path.is_empty() or png.is_empty():
 		return {}
 	var id := "%d_%08x" % [png.size(), hash(png)]
-	var cmd := "image %d %d %d %d %s %d %d %d %d" % [
+	var cmd := "image %d %d %d %d %s %d %d %d %d %d" % [
 		rect.position.x, rect.position.y, maxi(1, rect.size.x), maxi(1, rect.size.y),
-		id, tolerance, avoid_pid, 1 if grey else 0, mismatch]
+		id, tolerance, avoid_pid, 1 if grey else 0, mismatch, edge]
 	var call := _server_call(cmd, IMAGE_SCAN_TIMEOUT_MS)
 	if not call["served"]:
-		return super.find_image(rect, png, tolerance, grey, mismatch)
+		return super.find_image(rect, png, tolerance, grey, mismatch, edge)
 	var line: String = call["line"]
 	if line == "notpl" and _upload_template(id, png):
 		line = String(_server_call(cmd, IMAGE_SCAN_TIMEOUT_MS)["line"])

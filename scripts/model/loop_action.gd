@@ -20,9 +20,15 @@ enum Type {
 	IMAGE_DETECT,  ## Look for a small screenshot anywhere in a screen rect
 }
 
-## Biggest template an IMAGE_DETECT keeps, on a side: enough for a button or
-## a dialog, and a cap on what a stray whole-screen drag puts in the file.
-const IMAGE_MAX_SIDE := 512
+## Biggest template an IMAGE_DETECT keeps, on a side: any screen region, and
+## only a cap on what goes in the file (a screen-sized PNG is a few hundred
+## KB).
+const IMAGE_MAX_SIDE := 2048
+## The outermost pixels of a template are not compared (see the scans), so
+## a drag that took in a sliver of whatever surrounds the target still
+## matches when that changes. Templates too small to have an inside keep
+## all their pixels.
+const IMAGE_EDGE := 2
 
 ## Mouse button identifiers used across backends.
 const BUTTON_LEFT := 0

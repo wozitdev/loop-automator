@@ -668,7 +668,7 @@ func _find_image(action: LoopActionT, rect: Rect2i) -> Vector2i:
 	reader.avoid_pid = 0 if feedback else OS.get_process_id()
 	var tolerance := action.roll_tolerance()
 	var mismatch := action.roll_mismatch()
-	var result := reader.find_image(rect, action.image_png, tolerance, action.ignore_colour, mismatch)
+	var result := reader.find_image(rect, action.image_png, tolerance, action.ignore_colour, mismatch, LoopActionT.IMAGE_EDGE)
 	if result.is_empty():
 		print("Image detect in [%d, %d, %d×%d]: screen read failed (see warning above) -> not found" % [rect.position.x, rect.position.y, rect.size.x, rect.size.y])
 		return Vector2i(-1, -1)

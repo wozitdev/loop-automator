@@ -93,8 +93,10 @@ layer 1, just broken out so you can view each layer's visuals separately.
   **Just capture** grabs the area you drag over as the image and leaves the
   rect alone; **Capture & place** also makes that area the rect, so the action
   checks that the image is still right there. Click the thumbnail (or the
-  eye) to see the image full size. An image can be up to 512×512 and is
-  stored inside the loop file; it must match pixel for pixel — tolerance 0 is
+  eye) to see the image full size. The image is stored inside the loop file
+  and must match pixel for pixel, bar its outermost two pixels, which are
+  never compared (so a drag that took in a sliver of the surroundings still
+  matches when those change) — tolerance 0 is
   an exact match, higher lets each pixel's channels differ by up to that much
   — so a change of scale, theme or font breaks the match. An image bigger
   than the rect can never be found; the editor says so under it. **Mismatch
