@@ -42,7 +42,7 @@ Prefer running from source? Open the folder in Godot 4.7 and press **F5** — se
 |------------|---------|
 | **Project / Loop** | The full automation. Runs forever, top to bottom, then repeats. |
 | **Layer**  | A named group of actions. *All enabled layers run every iteration.* Layers exist purely to organise a loop into flip-through "screens" with their own colour + overlay view. |
-| **Action** | One step: Move, Click, Drag, Key, Wait, Pixel Detect, or Capture. |
+| **Action** | One step: Move, Click, Drag, Key, Wait, Pixel Detect, Capture Mouse, or Stop. |
 
 So a loop with `Layer 1` and `Layer 2` runs **Layer 1's actions, then Layer 2's
 actions, then repeats** — exactly as described: layer 2 runs in the same loop as
@@ -84,7 +84,7 @@ layer 1, just broken out so you can view each layer's visuals separately.
   the action runs. If *not* found the loop **skips the rest of the layer** or
   **stops**; with **~If not found** checked (the default) a Safe run carries
   on regardless, so the whole loop can be walked through.
-- **Capture** — **Save** remembers where the mouse is right now; **Load** moves
+- **Capture Mouse** — **Save** remembers where the mouse is right now; **Load** moves
   it back to the last saved position. There is one saved position per run (it is
   cleared when you press Play). A Load that runs before anything was saved does
   nothing and switches itself off.

@@ -153,7 +153,7 @@ static func type_name(t: int) -> String:
 		Type.KEY: return "Key"
 		Type.WAIT: return "Wait"
 		Type.PIXEL_DETECT: return "Pixel Detect"
-		Type.CAPTURE: return "Capture"
+		Type.CAPTURE: return "Capture Mouse"
 	return "Action"
 
 
