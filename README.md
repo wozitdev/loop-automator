@@ -81,9 +81,16 @@ layer 1, just broken out so you can view each layer's visuals separately.
   picking, a swatch next to the cursor previews the colour under it. Tick
   **Follow Cursor** and the rect is centred on the mouse instead of X / Y — it
   moves with the mouse on the overlay and is scanned wherever the mouse is when
-  the action runs. If *not* found the loop **skips the rest of the layer** or
-  **stops**; with **~If not found** checked (the default) a Safe run carries
-  on regardless, so the whole loop can be walked through.
+  the action runs. When the colour is *not* found the loop **skips the rest
+  of the layer**, or set **If not found** to **Wait till found** and it
+  re-checks the same spot on an interval until the colour appears. With **~If
+  not found** checked (the default) a Safe run carries on regardless, so the
+  whole loop can be walked through. With **~Self** on, a detect may match on
+  Loop Automator's own window; off (default) it ignores it. The overlay is
+  never read.
+- **Stop** — stop the loop, or **This layer** to just end the current layer's
+  pass, when reached. Set **after N passes** to stop only once it has been
+  reached that many times (0 = the first time) — a run limiter.
 - **Capture Mouse** — **Save** remembers where the mouse is right now; **Load** moves
   it back to the last saved position. There is one saved position per run (it is
   cleared when you press Play). A Load that runs before anything was saved does

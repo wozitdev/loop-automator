@@ -16,6 +16,7 @@ enum Type {
 	WAIT,          ## Pause for wait_ms milliseconds
 	PIXEL_DETECT,  ## Look for an expected colour anywhere in a screen rect
 	CAPTURE,       ## Save the mouse position, or move back to the saved one
+	STOP,          ## Stop the loop (or end this layer), now or after N passes
 }
 
 ## Mouse button identifiers used across backends.
@@ -32,6 +33,13 @@ enum OnFail {
 	CONTINUE,     ## Keep running
 	SKIP_LAYER,   ## Skip the remaining actions in this layer this iteration
 	STOP_LOOP,    ## (retired) Stop playback entirely
+	WAIT_FOUND,   ## Re-check the same spot until the colour appears, then go on
+}
+
+## A STOP action ends either the whole loop or just this layer's pass.
+enum StopScope {
+	LOOP,   ## Stop playback
+	LAYER,  ## Skip the rest of this layer this pass
 }
 
 ## What a CAPTURE action does with the saved mouse position.
@@ -61,6 +69,11 @@ var wiggle: bool = false
 ## way typing goes, instead of all at once (see KeyStrokes for what "one
 ## at a time" keeps together).
 var keys_paced: bool = false
+## STOP: what it ends (the loop, or just this layer's pass).
+var stop_scope: int = StopScope.LOOP
+## STOP: fire on the Nth pass that reaches it (0 = the first, i.e. right
+## away). PIXEL_DETECT reuses wait_ms as its "wait till found" re-check gap.
+var stop_after: int = 0
 
 # Geometry / parameters (only the relevant ones are used per type). Every
 # numeric setting is a range: `x` .. `x_max` and so on. Each time the action
@@ -156,6 +169,7 @@ static func type_name(t: int) -> String:
 		Type.WAIT: return "Wait"
 		Type.PIXEL_DETECT: return "Pixel Detect"
 		Type.CAPTURE: return "Capture Mouse"
+		Type.STOP: return "Stop"
 	return "Action"
 
 
@@ -205,6 +219,9 @@ static func new_of_type(t: int) -> Self:
 			a.on_fail = OnFail.SKIP_LAYER
 		Type.CAPTURE:
 			a.capture_mode = CaptureMode.SAVE
+		Type.STOP:
+			a.stop_scope = StopScope.LOOP
+			a.stop_after = 0
 	return a
 
 
@@ -232,6 +249,11 @@ func describe() -> String:
 			return "Detect %s in [%s, %s, %s×%s]" % [color.to_html(false), xs, ys, ws, hs]
 		Type.CAPTURE:
 			return "Capture: %s mouse position" % ("Save" if capture_mode == CaptureMode.SAVE else "Load")
+		Type.STOP:
+			var what := "loop" if stop_scope == StopScope.LOOP else "layer"
+			if stop_after > 0:
+				return "Stop %s after %d passes" % [what, stop_after]
+			return "Stop %s" % what
 	return "Action"
 
 
@@ -295,6 +317,8 @@ func to_dict() -> Dictionary:
 		"follow_cursor": follow_cursor,
 		"wiggle": wiggle,
 		"keys_paced": keys_paced,
+		"stop_scope": stop_scope,
+		"stop_after": stop_after,
 	}
 
 
@@ -328,9 +352,11 @@ static func from_dict(d: Dictionary) -> Self:
 	a.tolerance_max = int(d.get("tolerance_max", a.tolerance))
 	a.on_fail = int(d.get("on_fail", OnFail.SKIP_LAYER))
 	# CONTINUE and the retired STOP_LOOP are no longer selectable: read either
-	# as SKIP_LAYER (see OnFail).
-	if a.on_fail != OnFail.SKIP_LAYER:
+	# as SKIP_LAYER (see OnFail). SKIP_LAYER and WAIT_FOUND are kept.
+	if a.on_fail != OnFail.SKIP_LAYER and a.on_fail != OnFail.WAIT_FOUND:
 		a.on_fail = OnFail.SKIP_LAYER
+	a.stop_scope = int(d.get("stop_scope", StopScope.LOOP))
+	a.stop_after = maxi(0, int(d.get("stop_after", 0)))
 	a.safe_continue = bool(d.get("safe_continue", true))
 	a.captures = bool(d.get("captures", false))
 	# "lag_compensation" is the pre-release name of the same option.

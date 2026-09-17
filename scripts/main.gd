@@ -460,7 +460,7 @@ func _build_action_panel() -> Control:
 	var pm := add_btn.get_popup()
 	for t in [LoopActionT.Type.MOVE, LoopActionT.Type.CLICK, LoopActionT.Type.DRAG,
 			LoopActionT.Type.KEY, LoopActionT.Type.WAIT, LoopActionT.Type.PIXEL_DETECT,
-			LoopActionT.Type.CAPTURE]:
+			LoopActionT.Type.CAPTURE, LoopActionT.Type.STOP]:
 		pm.add_item(LoopActionT.type_name(t), t)
 	pm.id_pressed.connect(func(id): ProjectData.add_action(id))
 	btns.add_child(add_btn)
@@ -726,6 +726,8 @@ func _rebuild_editor() -> void:
 			_add_on_fail_field(a)
 		LoopActionT.Type.CAPTURE:
 			_add_capture_mode_field(a)
+		LoopActionT.Type.STOP:
+			_add_stop_field(a)
 
 	_add_comment_field(a)
 	# Built during a Live run (the engine can switch an action off): locked
@@ -955,15 +957,23 @@ func _add_on_fail_field(a: LoopActionT) -> void:
 			a.safe_continue = v
 			_after_edit())
 	# Stopping the loop is the Stop action's job now, not a Pixel Detect's.
-	# (More choices are coming here.)
 	var opt := OptionButton.new()
 	opt.add_item("Skip rest of layer", LoopActionT.OnFail.SKIP_LAYER)
+	opt.add_item("Wait till found", LoopActionT.OnFail.WAIT_FOUND)
 	opt.select(maxi(0, opt.get_item_index(a.on_fail)))
 	opt.item_selected.connect(func(i):
 		a.on_fail = opt.get_item_id(i)
-		_after_edit())
+		_after_edit()
+		# Show or hide the re-check interval for "Wait till found".
+		_rebuild_editor.call_deferred())
 	row.add_child(opt)
 	editor_box.add_child(row)
+	if a.on_fail == LoopActionT.OnFail.WAIT_FOUND:
+		# "Wait till found" re-checks the same spot on this interval until the
+		# colour appears (F8 / Esc / a Stop action still ends the loop).
+		_add_range_field("Check every (ms)", a.wait_ms, a.wait_ms_max, 0, 600000, func(lo: int, hi: int):
+			a.wait_ms = lo
+			a.wait_ms_max = hi)
 
 
 func _add_capture_mode_field(a: LoopActionT) -> void:
@@ -979,6 +989,50 @@ func _add_capture_mode_field(a: LoopActionT) -> void:
 	editor_box.add_child(row)
 	var hint := Label.new()
 	hint.text = "Save remembers where the mouse is; Load moves it back there. A Load with nothing saved yet does nothing and disables itself."
+	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	hint.modulate = Color(1, 1, 1, 0.7)
+	editor_box.add_child(hint)
+
+
+## The Stop action: what it ends (the loop, or just this layer's pass) and,
+## inline, on which pass it fires — 0 the moment it is reached, N on the Nth
+## pass that reaches it.
+func _add_stop_field(a: LoopActionT) -> void:
+	var row := HBoxContainer.new()
+	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	var stop_lbl := Label.new()
+	stop_lbl.text = "Stop"
+	row.add_child(stop_lbl)
+	var opt := OptionButton.new()
+	opt.add_item("The loop", LoopActionT.StopScope.LOOP)
+	opt.add_item("This layer", LoopActionT.StopScope.LAYER)
+	opt.select(opt.get_item_index(a.stop_scope))
+	opt.item_selected.connect(func(i):
+		a.stop_scope = opt.get_item_id(i)
+		_after_edit())
+	row.add_child(opt)
+	var after := Label.new()
+	after.text = "after"
+	row.add_child(after)
+	var sp := SpinBox.new()
+	sp.min_value = 0
+	sp.max_value = 1000000
+	sp.step = 1
+	sp.value = a.stop_after
+	sp.custom_minimum_size = Vector2(72, 0)
+	sp.tooltip_text = "0 = stop as soon as this action is reached.\nN = stop on the Nth pass that reaches it (a run limiter)."
+	sp.get_line_edit().text_changed.connect(func(_t: String): sp.set_meta(&"typed", true))
+	sp.value_changed.connect(func(v: float):
+		sp.set_meta(&"typed", false)
+		a.stop_after = int(v)
+		_after_edit())
+	row.add_child(sp)
+	var passes := Label.new()
+	passes.text = "passes"
+	row.add_child(passes)
+	editor_box.add_child(row)
+	var hint := Label.new()
+	hint.text = "Stops the whole loop, or ends just this layer for the pass. 0 passes = the first time it is reached."
 	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	hint.modulate = Color(1, 1, 1, 0.7)
 	editor_box.add_child(hint)
