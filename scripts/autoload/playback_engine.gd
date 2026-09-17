@@ -568,6 +568,10 @@ func _find_color(action: LoopActionT, rect: Rect2i) -> Vector2i:
 	var reader := backend if backend.is_real() else get_screen_sampler()
 	if reader == null:
 		return rect.get_center()
+	# ~Self gates reading Loop Automator's own window, the same as it gates
+	# clicks and keys: off (default) a detect ignores pixels on the app's
+	# window; on, it may match them. The overlay is never read either way.
+	reader.avoid_pid = 0 if feedback else OS.get_process_id()
 	var step := maxi(1, int(ceil(sqrt(float(rect.size.x * rect.size.y) / float(DETECT_MAX_SAMPLES)))))
 	var tolerance := action.roll_tolerance()
 	var result := reader.find_color(rect, action.color, tolerance, step)
