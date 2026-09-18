@@ -45,6 +45,13 @@ func send_keys(_text: String) -> void:
 func hold_keys(_mods: String, _keys: PackedStringArray, _lead: int, _hold: int, _gap: int, _trail: int) -> void:
 	pass
 
+
+## Presses (`pressed`) or lets go of the modifiers in `mods` and the keys in
+## `keys` (the same forms as hold_keys) and returns at once: what a Key
+## action's Down / Up / Hold does. Letting go runs in the reverse order.
+func press_keys(_mods: String, _keys: PackedStringArray, _pressed: bool) -> void:
+	pass
+
 ## Returns the colour of a single screen pixel, or a transparent colour
 ## if the backend cannot read the screen.
 func get_pixel(_pos: Vector2i) -> Color:

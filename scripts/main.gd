@@ -713,7 +713,10 @@ func _rebuild_editor() -> void:
 		LoopActionT.Type.CLICK:
 			_add_point_fields(a, false)
 			_add_button_field(a)
-			_add_captures_field(a)
+			_add_hold_field(a)
+			# Captures goes with a plain click (see Playback._execute_action).
+			if a.press_mode == LoopActionT.PressMode.TAP:
+				_add_captures_field(a)
 		LoopActionT.Type.DRAG:
 			_add_point_fields(a, true)
 			_add_button_field(a)
@@ -852,7 +855,36 @@ func _add_button_field(a: LoopActionT) -> void:
 		a.button = opt.get_item_id(i)
 		_after_edit())
 	row.add_child(opt)
+	if a.type == LoopActionT.Type.CLICK:
+		row.add_child(_press_mode_option(a, "Click"))
 	editor_box.add_child(row)
+
+
+## The press dropdown of a Click or Key: `tap` is what the plain press is
+## called there ("Click" / "Tap"), then Hold, Down and Up. Changing it
+## rebuilds the editor, since Hold has a row of its own.
+func _press_mode_option(a: LoopActionT, tap: String) -> OptionButton:
+	var opt := OptionButton.new()
+	opt.add_item(tap, LoopActionT.PressMode.TAP)
+	opt.add_item("Hold", LoopActionT.PressMode.HOLD)
+	opt.add_item("Down", LoopActionT.PressMode.DOWN)
+	opt.add_item("Up", LoopActionT.PressMode.UP)
+	opt.tooltip_text = "Hold: keep it pressed for a while, then let go.\nDown: press and leave it pressed for the actions after it.\nUp: let go of it. Stopping the loop lets go of everything."
+	opt.select(opt.get_item_index(a.press_mode))
+	opt.item_selected.connect(func(i):
+		a.press_mode = opt.get_item_id(i)
+		_after_edit()
+		_rebuild_editor.call_deferred())
+	return opt
+
+
+## A Hold's time, when the press is set to Hold.
+func _add_hold_field(a: LoopActionT) -> void:
+	if a.press_mode != LoopActionT.PressMode.HOLD:
+		return
+	_add_range_field("Hold (ms)", a.hold_ms, a.hold_ms_max, 0, 600000, func(lo: int, hi: int):
+		a.hold_ms = lo
+		a.hold_ms_max = hi)
 
 
 func _add_keys_field(a: LoopActionT) -> void:

@@ -59,6 +59,17 @@ enum CaptureMode {
 	LOAD,  ## Move the mouse back to the remembered position
 }
 
+## CLICK / KEY: how the press goes. TAP is the plain click or keystroke;
+## HOLD keeps it down for `hold_ms` and lets go; DOWN presses and leaves it
+## held for later actions (hold W and click, Shift and drag); UP lets go
+## of it. A stop lets go of everything still held.
+enum PressMode {
+	TAP,
+	HOLD,
+	DOWN,
+	UP,
+}
+
 var type: int = Type.MOVE
 var enabled: bool = true
 var comment: String = ""
@@ -80,6 +91,11 @@ var wiggle: bool = false
 ## way typing goes, instead of all at once (see KeyStrokes for what "one
 ## at a time" keeps together).
 var keys_paced: bool = false
+## CLICK / KEY: tap, hold, down or up (see PressMode); HOLD keeps the press
+## down for `hold_ms` (a range, like every number).
+var press_mode: int = PressMode.TAP
+var hold_ms: int = 500
+var hold_ms_max: int = 500
 ## STOP: what it ends (the loop, or just this layer's pass).
 var stop_scope: int = StopScope.LOOP
 ## STOP: fire on this pass that reaches it (1 = the first). PIXEL_DETECT
@@ -192,6 +208,10 @@ func roll_mismatch() -> int:
 	return clampi(roll(mismatch, mismatch_max), 0, MISMATCH_MAX)
 
 
+func roll_hold_ms() -> int:
+	return roll(hold_ms, hold_ms_max)
+
+
 func roll_wait_timeout_ms() -> int:
 	return maxi(0, roll(wait_timeout_ms, wait_timeout_ms_max))
 
@@ -275,6 +295,21 @@ static func is_detect(t: int) -> bool:
 	return t == Type.PIXEL_DETECT or t == Type.IMAGE_DETECT
 
 
+## True for the actions that have a press mode (see PressMode).
+static func has_press_mode(t: int) -> bool:
+	return t == Type.CLICK or t == Type.KEY
+
+
+## The press, in words, for the list and the overlay: "" for a plain tap,
+## else "hold 500 ms" / "down" / "up".
+func press_text() -> String:
+	match press_mode:
+		PressMode.HOLD: return "hold %s ms" % range_text(hold_ms, hold_ms_max)
+		PressMode.DOWN: return "down"
+		PressMode.UP: return "up"
+	return ""
+
+
 static func button_name(b: int) -> String:
 	match b:
 		BUTTON_RIGHT: return "Right"
@@ -329,11 +364,13 @@ func describe() -> String:
 		Type.MOVE:
 			return "Move → (%s, %s)%s" % [xs, ys, suffix]
 		Type.CLICK:
-			return "%s click @ (%s, %s)%s" % [button_name(button), xs, ys, suffix]
+			var press := press_text()
+			return "%s %s @ (%s, %s)%s" % [button_name(button), press if not press.is_empty() else "click", xs, ys, suffix]
 		Type.DRAG:
 			return "%s drag (%s, %s) → (%s, %s)%s" % [button_name(button), xs, ys, range_text(x2, x2_max), range_text(y2, y2_max), suffix]
 		Type.KEY:
-			return "Key: \"%s\"" % keys
+			var press := press_text()
+			return "Key%s: \"%s\"" % [" " + press if not press.is_empty() else "", keys]
 		Type.WAIT:
 			return "Wait %s ms" % range_text(wait_ms, wait_ms_max)
 		Type.PIXEL_DETECT:
@@ -427,6 +464,9 @@ func to_dict() -> Dictionary:
 		"follow_cursor": follow_cursor,
 		"wiggle": wiggle,
 		"keys_paced": keys_paced,
+		"press_mode": press_mode,
+		"hold_ms": hold_ms,
+		"hold_ms_max": hold_ms_max,
 		"stop_scope": stop_scope,
 		"stop_after": stop_after,
 		"wait_timeout": wait_timeout,
@@ -476,6 +516,11 @@ static func from_dict(d: Dictionary) -> Self:
 	if a.on_fail != OnFail.SKIP_LAYER and a.on_fail != OnFail.WAIT_FOUND:
 		a.on_fail = OnFail.SKIP_LAYER
 	a.if_found = bool(d.get("if_found", false))
+	a.press_mode = int(d.get("press_mode", PressMode.TAP))
+	if a.press_mode < PressMode.TAP or a.press_mode > PressMode.UP:
+		a.press_mode = PressMode.TAP
+	a.hold_ms = maxi(0, int(d.get("hold_ms", 500)))
+	a.hold_ms_max = maxi(0, int(d.get("hold_ms_max", a.hold_ms)))
 	a.stop_scope = int(d.get("stop_scope", StopScope.LOOP))
 	# 1-based: the old 0 ("first pass") reads the same as 1 now.
 	a.stop_after = maxi(1, int(d.get("stop_after", 1)))

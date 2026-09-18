@@ -62,6 +62,13 @@ var _has_saved_cursor: bool = false
 # action), so "stop after N passes" can count. Cleared when playback starts.
 var _stop_counts: Dictionary = {}
 
+# What a Down (or a Hold under way) has left pressed: mouse buttons by
+# number (where they went down), and key presses as {"mods", "keys"} in the
+# order they went down. A stop lets go of all of it, so nothing stays stuck
+# down after F8.
+var _held_buttons: Dictionary = {}
+var _held_keys: Array[Dictionary] = []
+
 # Lazily-created real backend used purely for reading screen pixels (so colour
 # sampling works even while the active playback backend is Preview).
 var _screen_sampler: InputBackendT
@@ -174,6 +181,8 @@ func start() -> void:
 	_generation += 1
 	_has_saved_cursor = false
 	_stop_counts.clear()
+	_held_buttons.clear()
+	_held_keys.clear()
 	if backend.is_real():
 		# Only a real loop can take the focus away; a preview never needs it.
 		_stop_hotkey.start()
@@ -196,6 +205,7 @@ func stop(reason: String = "Stopped.") -> void:
 	is_running = false
 	last_stop_reason = reason
 	_generation += 1
+	_release_held()
 	_stop_hotkey.stop()
 	set_process(false)
 	current_layer_index = -1
@@ -275,7 +285,10 @@ func _wait_loop_delay(project: LoopProjectT, gen: int, what: String) -> void:
 ## `layer_index` / `action_index` locate the action in the project (a Capture
 ## Load with nothing saved disables itself).
 func _execute_action(action: LoopActionT, layer_index: int, action_index: int) -> int:
-	if action.captures and LoopActionT.supports_captures(action.type):
+	# Captures goes with a plain click (a held button put back where the
+	# cursor was would be a drag).
+	if action.captures and LoopActionT.supports_captures(action.type) \
+			and (action.type != LoopActionT.Type.CLICK or action.press_mode == LoopActionT.PressMode.TAP):
 		await _execute_captured(action)
 		return LoopActionT.OnFail.CONTINUE
 	# Every numeric setting is a range; each run draws fresh values from it.
@@ -285,9 +298,12 @@ func _execute_action(action: LoopActionT, layer_index: int, action_index: int) -
 			await _travel(_mouse_pos(), p, action.roll_duration_ms(), action.wiggle, "MOVE")
 		LoopActionT.Type.CLICK:
 			var p := action.roll_point()
-			_set_tracker(p, true, "CLICK")
-			backend.click(action.button, p)
-			_report_skipped(action)
+			if action.press_mode == LoopActionT.PressMode.TAP:
+				_set_tracker(p, true, "CLICK")
+				backend.click(action.button, p)
+				_report_skipped(action)
+			else:
+				await _press_button(action, p)
 		LoopActionT.Type.DRAG:
 			var p := action.roll_point()
 			var p2 := action.roll_point2()
@@ -400,6 +416,50 @@ func _execute_action(action: LoopActionT, layer_index: int, action_index: int) -
 func _report_skipped(action: LoopActionT) -> void:
 	if backend.last_skipped:
 		emit_signal("status", "%s skipped: it would land on Loop Automator (turn on ~Self to allow that)." % LoopActionT.type_name(action.type))
+
+
+## A Click set to Hold, Down or Up at `p`: the button goes down and is
+## remembered as held (so a stop lets go of it), a Hold sleeps its time and
+## lets go, an Up lets go. The button's name is what the status line says.
+func _press_button(action: LoopActionT, p: Vector2i) -> void:
+	var name := LoopActionT.button_name(action.button)
+	if action.press_mode == LoopActionT.PressMode.UP:
+		_set_tracker(p, true, "UP")
+		backend.mouse_button(action.button, false, p)
+		_held_buttons.erase(action.button)
+		_report_skipped(action)
+		return
+	var hold := action.press_mode == LoopActionT.PressMode.HOLD
+	_set_tracker(p, true, "HOLD" if hold else "DOWN")
+	backend.mouse_button(action.button, true, p)
+	if backend.last_skipped:
+		_report_skipped(action)
+		return
+	_held_buttons[action.button] = p
+	if not hold:
+		emit_signal("status", "%s button down." % name)
+		return
+	var ms := action.roll_hold_ms()
+	emit_signal("status", "%s button held %d ms." % [name, ms])
+	var gen := _generation
+	await _sleep_ms(ms)
+	# A stop meanwhile has let go already.
+	if gen == _generation and _held_buttons.has(action.button):
+		backend.mouse_button(action.button, false, p)
+		_held_buttons.erase(action.button)
+
+
+## Lets go of every button and key a Down left pressed (keys in the reverse
+## order they went down), so a stop never leaves something stuck.
+func _release_held() -> void:
+	if backend == null:
+		return
+	for b in _held_buttons.keys():
+		backend.mouse_button(b, false, _held_buttons[b])
+	_held_buttons.clear()
+	while not _held_keys.is_empty():
+		var press: Dictionary = _held_keys.pop_back()
+		backend.press_keys(press["mods"], press["keys"], false)
 
 
 ## A mouse action with "Captures": the backend remembers the cursor, performs

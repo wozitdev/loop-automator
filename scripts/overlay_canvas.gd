@@ -222,6 +222,9 @@ func _draw_layer(li: int, layer: LoopLayerT, offset: Vector2) -> void:
 			LoopActionT.Type.CLICK:
 				_draw_range_box(action.point_a_extent(), offset, col)
 				_draw_click_guide(local, col, action.button, is_selected)
+				# A hold / down / up says so beside the point.
+				if action.press_mode != LoopActionT.PressMode.TAP:
+					_draw_tag(local + Vector2(26, 4), col, action.press_text().to_upper(), false)
 			LoopActionT.Type.DRAG:
 				var b_extent := action.point_b_extent()
 				_draw_range_box(action.point_a_extent(), offset, col)
