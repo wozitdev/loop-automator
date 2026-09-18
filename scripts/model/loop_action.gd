@@ -383,7 +383,8 @@ static func new_of_type(t: int) -> Self:
 
 ## Short, human readable line for the action list.
 func describe() -> String:
-	var suffix := " ↩" if captures and supports_captures(type) else ""
+	# Captures goes with a plain click only (see Playback._execute_action).
+	var suffix := " ↩" if captures and supports_captures(type) and (type != Type.CLICK or press_mode == PressMode.TAP) else ""
 	var xs := range_text(x, x_max)
 	var ys := range_text(y, y_max)
 	match type:

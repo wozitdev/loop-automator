@@ -101,6 +101,8 @@ func _ready() -> void:
 
 
 func _exit_tree() -> void:
+	# Closing the app mid-run: nothing stays pressed, F8 is given back.
+	_release_held()
 	_stop_hotkey.stop()
 
 
@@ -359,14 +361,27 @@ func _execute_action(action: LoopActionT, layer_index: int, action_index: int) -
 			_set_tracker(p, true, "SCROLL")
 			emit_signal("status", "Scroll %s ×%d over %d ms." % [LoopActionT.scroll_dir_name(action.scroll_dir), n, ms] if ms > 0 else "Scroll %s ×%d." % [LoopActionT.scroll_dir_name(action.scroll_dir), n])
 			# The helper spreads the notches over the duration, so it runs off
-			# the main thread like a paced key press.
+			# the main thread like a paced key press - in pieces of about
+			# TRAVEL_CHUNK_MS, so a stop takes effect between them (the
+			# helper cannot be interrupted inside a command).
 			var b := backend
-			var thread := Thread.new()
-			thread.start(func(): b.scroll(p, action.scroll_dir, n, ms, action.wiggle))
-			while thread.is_alive():
-				await get_tree().process_frame
-			thread.wait_to_finish()
-			_report_skipped(action)
+			var gap := maxi(12, ms / n)
+			var per_chunk := maxi(1, TRAVEL_CHUNK_MS / gap)
+			var sent := 0
+			var gen := _generation
+			while sent < n and is_running and gen == _generation:
+				var k := mini(per_chunk, n - sent)
+				var thread := Thread.new()
+				thread.start(func(): b.scroll(p, action.scroll_dir, k, k * gap, action.wiggle))
+				while thread.is_alive():
+					await get_tree().process_frame
+				thread.wait_to_finish()
+				if b.last_skipped:
+					_report_skipped(action)
+					break
+				sent += k
+				if sent < n:
+					await _sleep_ms(gap)
 		LoopActionT.Type.KEY:
 			_set_tracker(tracker_pos, tracker_visible, "KEY")
 			if action.press_mode != LoopActionT.PressMode.TAP:
