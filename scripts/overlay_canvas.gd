@@ -256,6 +256,8 @@ func _draw_layer(li: int, layer: LoopLayerT, offset: Vector2) -> void:
 			if action.type == LoopActionT.Type.KEY:
 				var ktxt: String = action.keys if action.keys.length() <= 14 else action.keys.substr(0, 13) + "…"
 				text = "KEY  " + ktxt
+				if action.press_mode != LoopActionT.PressMode.TAP:
+					text = "KEY %s  %s" % [action.press_text().to_upper(), ktxt]
 			elif action.type == LoopActionT.Type.WAIT:
 				text = "WAIT  %s ms" % LoopActionT.range_text(action.wait_ms, action.wait_ms_max)
 			elif action.type == LoopActionT.Type.CAPTURE:

@@ -318,7 +318,9 @@ func _execute_action(action: LoopActionT, layer_index: int, action_index: int) -
 				backend.mouse_button(action.button, false, p2)
 		LoopActionT.Type.KEY:
 			_set_tracker(tracker_pos, tracker_visible, "KEY")
-			if action.keys_paced:
+			if action.press_mode != LoopActionT.PressMode.TAP:
+				await _press_keys(action)
+			elif action.keys_paced:
 				await _type_paced(action)
 			else:
 				backend.send_keys(action.keys)
@@ -447,6 +449,72 @@ func _press_button(action: LoopActionT, p: Vector2i) -> void:
 	if gen == _generation and _held_buttons.has(action.button):
 		backend.mouse_button(action.button, false, p)
 		_held_buttons.erase(action.button)
+
+
+## A Key set to Hold, Down or Up: its text read as presses (see
+## KeyStrokes: "^c" is Ctrl and c, "(wa)" is w and a), each pressed and
+## remembered as held, or let go of. A Hold sleeps its time and lets go
+## of what it pressed. A stroke a press cannot express (an unknown name)
+## is typed once on the way down and ignored on the way up.
+func _press_keys(action: LoopActionT) -> void:
+	var presses: Array = []
+	var typed := PackedStringArray()
+	for stroke in KeyStrokesT.split(action.keys):
+		var press := KeyStrokesT.parse(stroke)
+		if press.is_empty():
+			typed.append(stroke)
+		else:
+			presses.append({"mods": press["mods"], "keys": press["keys"]})
+	if action.press_mode == LoopActionT.PressMode.UP:
+		_set_tracker(tracker_pos, tracker_visible, "KEY UP")
+		presses.reverse()
+		for press in presses:
+			backend.press_keys(press["mods"], press["keys"], false)
+			_forget_held(press)
+		emit_signal("status", "Keys up: \"%s\"." % action.keys)
+		return
+	var hold := action.press_mode == LoopActionT.PressMode.HOLD
+	_set_tracker(tracker_pos, tracker_visible, "KEY HOLD" if hold else "KEY DOWN")
+	for press in presses:
+		backend.press_keys(press["mods"], press["keys"], true)
+		if backend.last_skipped:
+			_report_skipped(action)
+			return
+		_held_keys.append(press)
+	if not typed.is_empty():
+		backend.send_keys("".join(typed))
+		emit_signal("status", "Keys down: \"%s\" (\"%s\" cannot be held, typed instead)." % [action.keys, "".join(typed)])
+	if not hold:
+		if typed.is_empty():
+			emit_signal("status", "Keys down: \"%s\"." % action.keys)
+		return
+	var ms := action.roll_hold_ms()
+	emit_signal("status", "Keys held %d ms: \"%s\"." % [ms, action.keys])
+	var gen := _generation
+	await _sleep_ms(ms)
+	# A stop meanwhile has let go already.
+	if gen != _generation:
+		return
+	presses.reverse()
+	for press in presses:
+		if _held_index(press) >= 0:
+			backend.press_keys(press["mods"], press["keys"], false)
+			_forget_held(press)
+
+
+## Where `press` (a {"mods", "keys"}) sits in the held list, or -1.
+func _held_index(press: Dictionary) -> int:
+	for i in range(_held_keys.size() - 1, -1, -1):
+		if _held_keys[i]["mods"] == press["mods"] and _held_keys[i]["keys"] == press["keys"]:
+			return i
+	return -1
+
+
+## Drops `press` (a {"mods", "keys"} that was let go of) from the held list.
+func _forget_held(press: Dictionary) -> void:
+	var i := _held_index(press)
+	if i >= 0:
+		_held_keys.remove_at(i)
 
 
 ## Lets go of every button and key a Down left pressed (keys in the reverse

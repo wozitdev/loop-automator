@@ -895,6 +895,9 @@ func _add_keys_field(a: LoopActionT) -> void:
 		func(v: bool):
 			a.keys_paced = v
 			_after_edit())
+	# Tap / Hold / Down / Up; the paced typing is a tap's.
+	(row.get_child(0) as CheckBox).disabled = a.press_mode != LoopActionT.PressMode.TAP
+	row.add_child(_press_mode_option(a, "Tap"))
 	var le := LineEdit.new()
 	le.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	le.text = a.keys
@@ -913,6 +916,7 @@ func _add_keys_field(a: LoopActionT) -> void:
 	capture.pressed.connect(func(): _open_key_capture(le, a))
 	row.add_child(capture)
 	editor_box.add_child(row)
+	_add_hold_field(a)
 	var hint := Label.new()
 	hint.text = "Windows SendKeys format: {ENTER} {TAB} {ESC} ^c (Ctrl+C) %{F4} (Alt+F4)"
 	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART

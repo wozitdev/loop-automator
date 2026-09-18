@@ -123,6 +123,31 @@ public class Win32In {
 function Down-Flag([string]$btn) { switch ($btn) { '1' { 0x0008 } '2' { 0x0020 } default { 0x0002 } } }
 function Up-Flag([string]$btn) { switch ($btn) { '1' { 0x0010 } '2' { 0x0040 } default { 0x0004 } } }
 function Read-Cursor { $p = New-Object Win32Pt; [Win32In]::GetCursorPos([ref]$p) | Out-Null; return $p }
+# The modifier letters of a key command (c / s / a) as virtual keys, in the
+# order they go down.
+function Mod-Vks([string]$mods) {
+  $d = @()
+  if ($mods.Contains('c')) { $d += 0x11 }
+  if ($mods.Contains('s')) { $d += 0x10 }
+  if ($mods.Contains('a')) { $d += 0x12 }
+  return $d
+}
+# A key of the kdown / kup commands (\"c<code>\" a character found on the
+# keyboard layout, \"v<vk>\" a virtual key) as @{ vk; shift; ext }: the key to
+# press, whether Shift is needed for the character (unless Shift is a
+# modifier already) and the extended-key flag the navigation keys carry.
+# $null for a character the layout has no plain key for.
+function Resolve-Key([string]$k, [string]$mods) {
+  $vk = 0; $shift = $false
+  if ($k.StartsWith('v')) { $vk = [int]$k.Substring(1) }
+  else {
+    $scan = [Win32In]::VkKeyScanW([char][int]$k.Substring(1))
+    if ($scan -eq -1 -or ((($scan -shr 8) -band 6) -ne 0)) { return $null }
+    $vk = $scan -band 0xFF; $shift = ((($scan -shr 8) -band 1) -eq 1) -and -not $mods.Contains('s')
+  }
+  $ext = 0; if (($vk -ge 0x21 -and $vk -le 0x28) -or $vk -eq 0x2D -or $vk -eq 0x2E) { $ext = 1 }
+  return @{ vk = $vk; shift = $shift; ext = $ext }
+}
 # Captured actions: ($sx,$sy) is where the cursor started, ($lx,$ly) where we
 # last knew it to be, and ($ux,$uy) the user's own movement so far. Jump moves
 # the cursor to the action point and pins it there: every reading folds the
@@ -431,6 +456,42 @@ switch ($cmd) {
       foreach ($m in $down) { [Win32In]::keybd_event([byte]$m, 0, 2, [IntPtr]::Zero) }
     }
   }
+  'kdown' {
+    # kdown <mods|-> <keys>: the modifiers go down, then each key (the forms
+    # of 'hold'), and they stay down - a Key action's Down, or the start of
+    # its Hold; 'kup' is the reverse. A character the layout has no key for
+    # cannot be held: SendKeys types it once instead.
+    if (Guarded ([Win32In]::GetForegroundWindow())) { Write-Output 'skipped'; break }
+    $mods = [string]$a[1]; $keys = ([string]$a[2]).Split(',')
+    foreach ($m in (Mod-Vks $mods)) { [Win32In]::keybd_event([byte]$m, 0, 0, [IntPtr]::Zero) }
+    foreach ($k in $keys) {
+      $r = Resolve-Key $k $mods
+      if ($null -eq $r) {
+        Add-Type -AssemblyName System.Windows.Forms
+        $t = [string][char][int]$k.Substring(1); if ('+^%~(){}[]'.Contains($t)) { $t = '{' + $t + '}' }
+        [System.Windows.Forms.SendKeys]::SendWait($t)
+        continue
+      }
+      if ($r.shift) { [Win32In]::keybd_event(0x10, 0, 0, [IntPtr]::Zero) }
+      [Win32In]::keybd_event([byte]$r.vk, 0, $r.ext, [IntPtr]::Zero)
+    }
+  }
+  'kup' {
+    # kup <mods|-> <keys>: lets go of what kdown pressed, keys first (last
+    # down first), then the modifiers. Never refused (see Guarded): a key
+    # left down would be far worse than a release landing on this app.
+    $mods = [string]$a[1]; $keys = ([string]$a[2]).Split(',')
+    [array]::Reverse($keys)
+    foreach ($k in $keys) {
+      $r = Resolve-Key $k $mods
+      if ($null -eq $r) { continue }
+      [Win32In]::keybd_event([byte]$r.vk, 0, ($r.ext -bor 2), [IntPtr]::Zero)
+      if ($r.shift) { [Win32In]::keybd_event(0x10, 0, 2, [IntPtr]::Zero) }
+    }
+    $down = @(Mod-Vks $mods)
+    [array]::Reverse($down)
+    foreach ($m in $down) { [Win32In]::keybd_event([byte]$m, 0, 2, [IntPtr]::Zero) }
+  }
   'cursor' {
     # Where the real cursor is right now, as "x,y" (Capture actions).
     Add-Type -AssemblyName System.Windows.Forms
@@ -710,6 +771,10 @@ static func _loggable(cmd: String) -> String:
 		if parts[i] == "key":
 			parts[i + 1] = "<%d chars>" % parts[i + 1].length()
 			break
+		# A press by key: the key list (after the modifiers) says what was typed.
+		if (parts[i] == "hold" or parts[i] == "kdown" or parts[i] == "kup") and i + 2 < parts.size():
+			parts[i + 2] = "<%d keys>" % (parts[i + 2].count(",") + 1)
+			break
 	# A travel path is hundreds of points; its length says enough.
 	for i in parts.size():
 		if parts[i].contains(";"):
@@ -932,6 +997,12 @@ func hold_keys(mods: String, keys: PackedStringArray, lead: int, hold: int, gap:
 	var total := lead + trail + keys.size() * (hold + gap)
 	_run_sync(PackedStringArray(["hold", mods if not mods.is_empty() else "-", ",".join(keys),
 		str(lead), str(hold), str(gap), str(trail)]), total + SERVER_READ_TIMEOUT_MS)
+
+
+func press_keys(mods: String, keys: PackedStringArray, pressed: bool) -> void:
+	if keys.is_empty():
+		return
+	_run_sync(PackedStringArray(["kdown" if pressed else "kup", mods if not mods.is_empty() else "-", ",".join(keys)]))
 
 
 func get_cursor_pos() -> Vector2i:
