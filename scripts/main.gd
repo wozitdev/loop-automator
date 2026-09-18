@@ -35,6 +35,7 @@ var stay_on_edit_check: CheckBox
 ## (saved with the loop).
 var delay_each_check: CheckBox
 var feedback_check: CheckBox
+var hotkey_check: CheckBox
 var _ui_root: VBoxContainer
 var _main_split: HSplitContainer
 var _edit_lock_blocker: ColorRect
@@ -331,6 +332,19 @@ func _build_toolbar() -> Control:
 		_save_setting("feedback", v)
 		Playback.set_feedback(v))
 	hb.add_child(feedback_check)
+	# ~F8: the global F8 is held the whole time the app is open, so a loop
+	# can be started from any window, not only stopped. Off, F8 is only
+	# taken over while a Live loop runs.
+	hotkey_check = CheckBox.new()
+	hotkey_check.text = "~F8"
+	hotkey_check.focus_mode = Control.FOCUS_NONE
+	hotkey_check.tooltip_text = "Checked: F8 starts and stops the loop from any window while Loop Automator is open (other programs do not get F8 meanwhile).\nUnchecked: F8 only stops a running Live loop from other windows."
+	hotkey_check.button_pressed = _load_setting("global_hotkey", true)
+	Playback.set_global_hotkey(hotkey_check.button_pressed)
+	hotkey_check.toggled.connect(func(v):
+		_save_setting("global_hotkey", v)
+		Playback.set_global_hotkey(v))
+	hb.add_child(hotkey_check)
 
 	# Let the toolbar scroll horizontally instead of pushing items off-screen
 	# on narrow windows.
@@ -523,6 +537,11 @@ func _connect_signals() -> void:
 			_switch_to_safe_backend_if_needed()
 		await _animate_stop_feedback(was_real))
 	Playback.action_executing.connect(_on_action_executing)
+	# The global F8 while idle (~F8): a start, as the Run button (a pick in
+	# progress keeps the screen; the button's own cooldown after a stop holds).
+	Playback.hotkey_pressed.connect(func():
+		if not _pick_active:
+			_on_play_pressed())
 	_refresh_overlay_label()
 	_refresh_loop_stack_ui()
 
@@ -2202,7 +2221,12 @@ func _input(event: InputEvent) -> void:
 			get_viewport().set_input_as_handled()
 			return
 		KEY_F8:
-			Playback.stop()
+			# The same start / stop as the global F8 (which, when held,
+			# takes the key before this window ever sees it).
+			if Playback.is_running:
+				Playback.stop()
+			else:
+				_on_play_pressed()
 			get_viewport().set_input_as_handled()
 			return
 		KEY_ESCAPE:

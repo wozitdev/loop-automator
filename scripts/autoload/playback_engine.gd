@@ -22,6 +22,9 @@ signal status(message: String)
 signal action_executing(layer_index: int, action_index: int)
 ## Emitted whenever the execution tracker head changes.
 signal tracker_changed(global_pos: Vector2i, visible: bool, label: String)
+## The global F8 was pressed while no loop was running (~F8): the builder
+## starts one, as its Run button would.
+signal hotkey_pressed
 
 enum BackendKind { PREVIEW, WINDOWS }
 
@@ -73,9 +76,13 @@ var _held_keys: Array[Dictionary] = []
 # sampling works even while the active playback backend is Preview).
 var _screen_sampler: InputBackendT
 
-## System-wide F8 while a real loop runs (this window's own F8 / Esc need the
-## focus, which a loop clicking other programs takes away). Polled in _process.
+## System-wide F8: held while a real loop runs (this window's own F8 / Esc
+## need the focus, which a loop clicking other programs takes away), and,
+## with ~F8 on, the whole time the app is open, so a loop can be started
+## from any window too. Polled in _process.
 var _stop_hotkey := StopHotkeyT.new()
+## ~F8: keep the global F8 while idle as well, as a start key.
+var global_hotkey: bool = false
 
 
 func _ready() -> void:
@@ -98,20 +105,45 @@ func _exit_tree() -> void:
 
 
 func _process(_dt: float) -> void:
-	if not is_running:
+	if _stop_hotkey.state == StopHotkeyT.State.OFF:
 		set_process(false)
 		return
 	var before: int = _stop_hotkey.state
 	if _stop_hotkey.poll():
-		stop("Stopped: F8 pressed.")
+		if is_running:
+			stop("Stopped: F8 pressed.")
+		else:
+			emit_signal("hotkey_pressed")
 		return
 	if _stop_hotkey.state == before:
 		return
+	var running := "Running… " if is_running else ""
 	match _stop_hotkey.state:
 		StopHotkeyT.State.ARMED:
-			emit_signal("status", "Running… F8 stops the loop from any window.")
+			if is_running:
+				emit_signal("status", "Running… F8 stops the loop from any window.")
+			else:
+				emit_signal("status", "F8 starts and stops the loop from any window.")
 		StopHotkeyT.State.UNAVAILABLE:
-			emit_signal("status", "Running… (global F8 unavailable: %s — F8 / Esc stop it while this window has the focus)" % _stop_hotkey.reason)
+			emit_signal("status", "%s(global F8 unavailable: %s — F8 / Esc work while this window has the focus)" % [running, _stop_hotkey.reason])
+
+
+## ~F8: the global F8 stays registered while the app is open, a start key
+## as well as a stop key.
+func set_global_hotkey(on: bool) -> void:
+	global_hotkey = on
+	_refresh_hotkey()
+
+
+## Holds the global F8 while it is wanted (a real run, or ~F8) and lets
+## go of it otherwise; a held one is left as it is.
+func _refresh_hotkey() -> void:
+	var wanted := global_hotkey or (is_running and backend != null and backend.is_real())
+	if wanted and _stop_hotkey.state == StopHotkeyT.State.OFF:
+		_stop_hotkey.start()
+	elif not wanted and _stop_hotkey.state != StopHotkeyT.State.OFF:
+		_stop_hotkey.stop()
+	set_process(_stop_hotkey.state != StopHotkeyT.State.OFF)
 
 
 ## Returns a backend that can actually read screen pixels, or null if none is
@@ -183,18 +215,23 @@ func start() -> void:
 	_stop_counts.clear()
 	_held_buttons.clear()
 	_held_keys.clear()
-	if backend.is_real():
-		# Only a real loop can take the focus away; a preview never needs it.
-		_stop_hotkey.start()
-		set_process(true)
-	else:
+	# Only a real loop can take the focus away; a preview never needs the
+	# global F8 (~F8 may hold it anyway). A key another program owned last
+	# time is tried again for this run.
+	if _stop_hotkey.state == StopHotkeyT.State.UNAVAILABLE:
+		_stop_hotkey.stop()
+	_refresh_hotkey()
+	if not backend.is_real():
 		# A Safe run still reads the screen for its Pixel Detects: get the
 		# reader's helper up now rather than at the first detect.
 		var reader := get_screen_sampler()
 		if reader != null and reader.has_method("warm_up"):
 			reader.call("warm_up")
 	emit_signal("playback_started")
-	emit_signal("status", "Running…")
+	if _stop_hotkey.state == StopHotkeyT.State.ARMED:
+		emit_signal("status", "Running… F8 stops the loop from any window.")
+	else:
+		emit_signal("status", "Running…")
 	_run_loop(_generation)
 
 
@@ -206,8 +243,7 @@ func stop(reason: String = "Stopped.") -> void:
 	last_stop_reason = reason
 	_generation += 1
 	_release_held()
-	_stop_hotkey.stop()
-	set_process(false)
+	_refresh_hotkey()
 	current_layer_index = -1
 	current_action_index = -1
 	detect_rect_pinned = false
