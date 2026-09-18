@@ -9,6 +9,7 @@ class_name WindowsBackend
 
 const PowerShellHostT := preload("res://scripts/powershell_host.gd")
 const MousePathT := preload("res://scripts/model/mouse_path.gd")
+const LoopActionT := preload("res://scripts/model/loop_action.gd")
 const HELPER_FILE := "input_helper.ps1"
 
 ## Absolute path of the helper script, "" when it could not be written (no
@@ -77,6 +78,7 @@ public class Win32In {
   [DllImport(\"winmm.dll\")] public static extern uint timeEndPeriod(uint ms);
   [DllImport(\"user32.dll\")] public static extern bool ShowWindow(IntPtr h,int n);
   [DllImport(\"user32.dll\")] public static extern void keybd_event(byte vk,byte scan,uint flags,IntPtr extra);
+  [DllImport(\"user32.dll\")] public static extern uint MapVirtualKeyW(uint code,uint type);
   [DllImport(\"user32.dll\", CharSet=CharSet.Unicode)] public static extern short VkKeyScanW(char ch);
   [DllImport(\"user32.dll\")] public static extern int GetWindowLongW(IntPtr h,int i);
   [DllImport(\"user32.dll\")] public static extern int SetWindowLongW(IntPtr h,int i,int v);
@@ -116,6 +118,21 @@ public class Win32In {
     inp[0].mi.dwFlags = 0x0001 | 0x8000 | 0x4000 | buttonFlag;  // MOVE | ABSOLUTE | VIRTUALDESK
     SendInput(1,inp,Marshal.SizeOf(typeof(Win32Input)));
   }
+  // A button press or release where the cursor is, with no move at all.
+  public static void ButtonOnly(uint buttonFlag) {
+    Win32Input[] inp = new Win32Input[1];
+    inp[0].type = 0;
+    inp[0].mi.dwFlags = buttonFlag;
+    SendInput(1,inp,Marshal.SizeOf(typeof(Win32Input)));
+  }
+  // One wheel notch (delta +-120: up / right positive) where the cursor is.
+  public static void Wheel(int delta,bool horizontal) {
+    Win32Input[] inp = new Win32Input[1];
+    inp[0].type = 0;
+    inp[0].mi.mouseData = unchecked((uint)delta);
+    inp[0].mi.dwFlags = horizontal ? 0x01000u : 0x0800u;  // HWHEEL | WHEEL
+    SendInput(1,inp,Marshal.SizeOf(typeof(Win32Input)));
+  }
 }
 \"@
 }
@@ -123,6 +140,39 @@ public class Win32In {
 function Down-Flag([string]$btn) { switch ($btn) { '1' { 0x0008 } '2' { 0x0020 } default { 0x0002 } } }
 function Up-Flag([string]$btn) { switch ($btn) { '1' { 0x0010 } '2' { 0x0040 } default { 0x0004 } } }
 function Read-Cursor { $p = New-Object Win32Pt; [Win32In]::GetCursorPos([ref]$p) | Out-Null; return $p }
+# One key event, with the scan code the key has on this layout: a program
+# that reads keys by scan code (a game) ignores an event without one.
+function Key-Event([int]$vk, [int]$flags) {
+  $scan = [Win32In]::MapVirtualKeyW([uint32]$vk, 0) -band 0xFF
+  [Win32In]::keybd_event([byte]$vk, [byte]$scan, [uint32]$flags, [IntPtr]::Zero)
+}
+# The modifier letters of a key command (c / s / a) as virtual keys, in the
+# order they go down.
+function Mod-Vks([string]$mods) {
+  $d = @()
+  if ($mods.Contains('c')) { $d += 0x11 }
+  if ($mods.Contains('s')) { $d += 0x10 }
+  if ($mods.Contains('a')) { $d += 0x12 }
+  return $d
+}
+# A key of the kdown / kup commands (\"c<code>\" a character found on the
+# keyboard layout, \"v<vk>\" a virtual key) as @{ vk; shift; ext }: the key to
+# press, whether Shift is needed for the character (unless Shift is a
+# modifier already) and the extended-key flag the navigation keys carry.
+# $null for a character the layout has no plain key for.
+function Resolve-Key([string]$k, [string]$mods) {
+  $vk = 0; $shift = $false
+  if ($k.StartsWith('v')) {
+    $vk = [int]$k.Substring(1)
+    if ($vk -lt 1 -or $vk -gt 254) { throw ('not a key: ' + $k) }
+  } else {
+    $scan = [Win32In]::VkKeyScanW([char][int]$k.Substring(1))
+    if ($scan -eq -1 -or ((($scan -shr 8) -band 6) -ne 0)) { return $null }
+    $vk = $scan -band 0xFF; $shift = ((($scan -shr 8) -band 1) -eq 1) -and -not $mods.Contains('s')
+  }
+  $ext = 0; if (($vk -ge 0x21 -and $vk -le 0x28) -or $vk -eq 0x2D -or $vk -eq 0x2E) { $ext = 1 }
+  return @{ vk = $vk; shift = $shift; ext = $ext }
+}
 # Captured actions: ($sx,$sy) is where the cursor started, ($lx,$ly) where we
 # last knew it to be, and ($ux,$uy) the user's own movement so far. Jump moves
 # the cursor to the action point and pins it there: every reading folds the
@@ -312,6 +362,36 @@ switch ($cmd) {
     if (Guarded-Point ([int]$a[1]) ([int]$a[2])) { Write-Output 'skipped'; break }
     [Win32In]::MouseAt([int]$a[1],[int]$a[2],(Up-Flag $a[3]))
   }
+  'release' {
+    # release <button>: lets go of a mouse button where the cursor is,
+    # without moving it - what a stop does with a button a Down or Hold
+    # left pressed, so the cursor never jumps back to where it went down.
+    # Never refused (see Guarded): the press was allowed where it happened.
+    [Win32In]::ButtonOnly((Up-Flag $a[1]))
+  }
+  'wheel' {
+    # wheel <x> <y> <up|down|left|right> <n> <ms> <uneven 0|1>: the cursor
+    # goes to (x, y) and the wheel turns n notches that way, one event per
+    # notch, spread over ms (a moment apart at least), the way a wheel is
+    # read; uneven makes the gaps vary like a hand's. A program under the
+    # cursor gets it.
+    if (Guarded-Point ([int]$a[1]) ([int]$a[2])) { Write-Output 'skipped'; break }
+    [Win32In]::MouseAt([int]$a[1],[int]$a[2],0)
+    $n = [Math]::Min([Math]::Max([int]$a[4], 1), 200)
+    $ms = 0; if ($a.Count -gt 5) { $ms = [int]$a[5] }
+    $uneven = ($a.Count -gt 6 -and $a[6] -eq '1')
+    $gap = [Math]::Max(12, [int]($ms / $n))
+    $rnd = New-Object System.Random
+    $delta = 120; $horizontal = $false
+    switch ($a[3]) { 'down' { $delta = -120 } 'left' { $delta = -120; $horizontal = $true } 'right' { $horizontal = $true } }
+    for ($i = 0; $i -lt $n; $i++) {
+      if ($i -gt 0) {
+        $g = $gap; if ($uneven) { $g = [int]($gap * (0.5 + $rnd.NextDouble())) }
+        [System.Threading.Thread]::Sleep($g)
+      }
+      [Win32In]::Wheel($delta, $horizontal)
+    }
+  }
   'cap' {
     # cap <move|click|drag> <ghost 0|1> <button> <x> <y> <x2> <y2> <ms> [path]
     # A whole Captures action in one process: remember the cursor, do the
@@ -397,7 +477,7 @@ switch ($cmd) {
     if ($mods.Contains('s')) { $down += 0x10 }
     if ($mods.Contains('a')) { $down += 0x12 }
     try {
-      foreach ($m in $down) { [Win32In]::keybd_event([byte]$m, 0, 0, [IntPtr]::Zero) }
+      foreach ($m in $down) { Key-Event $m 0 }
       if ($down.Count -gt 0) { [System.Threading.Thread]::Sleep($lead) }
       for ($i = 0; $i -lt $keys.Count; $i++) {
         $k = $keys[$i]; $vk = 0; $shift = $false
@@ -418,18 +498,65 @@ switch ($cmd) {
         }
         # KEYEVENTF_EXTENDEDKEY for the navigation keys, as the keyboard sends them.
         $ext = 0; if (($vk -ge 0x21 -and $vk -le 0x28) -or $vk -eq 0x2D -or $vk -eq 0x2E) { $ext = 1 }
-        if ($shift) { [Win32In]::keybd_event(0x10, 0, 0, [IntPtr]::Zero) }
-        [Win32In]::keybd_event([byte]$vk, 0, $ext, [IntPtr]::Zero)
+        if ($shift) { Key-Event 0x10 0 }
+        Key-Event $vk $ext
         [System.Threading.Thread]::Sleep($hold)
-        [Win32In]::keybd_event([byte]$vk, 0, ($ext -bor 2), [IntPtr]::Zero)
-        if ($shift) { [Win32In]::keybd_event(0x10, 0, 2, [IntPtr]::Zero) }
+        Key-Event $vk ($ext -bor 2)
+        if ($shift) { Key-Event 0x10 2 }
         if ($i -lt $keys.Count - 1) { [System.Threading.Thread]::Sleep($gap) }
       }
       if ($down.Count -gt 0) { [System.Threading.Thread]::Sleep($trail) }
     } finally {
       [array]::Reverse($down)
-      foreach ($m in $down) { [Win32In]::keybd_event([byte]$m, 0, 2, [IntPtr]::Zero) }
+      foreach ($m in $down) { Key-Event $m 2 }
     }
+  }
+  'kdown' {
+    # kdown <mods|-> <keys>: the modifiers go down, then each key (the forms
+    # of 'hold'), and they stay down - a Key action's Down, or the start of
+    # its Hold; 'kup' is the reverse. A character the layout has no key for
+    # cannot be held: SendKeys types it once instead.
+    if (Guarded ([Win32In]::GetForegroundWindow())) { Write-Output 'skipped'; break }
+    $mods = [string]$a[1]; $keys = ([string]$a[2]).Split(',')
+    # Every key is resolved before anything goes down, so a bad one is an
+    # error and not a modifier left pressed; and what did go down before a
+    # failure comes back up.
+    $plan = @(); foreach ($k in $keys) { $plan += ,@($k, (Resolve-Key $k $mods)) }
+    $pressed = @()
+    try {
+      foreach ($m in (Mod-Vks $mods)) { Key-Event $m 0; $pressed += $m }
+      foreach ($pk in $plan) {
+        $r = $pk[1]
+        if ($null -eq $r) {
+          Add-Type -AssemblyName System.Windows.Forms
+          $t = [string][char][int]([string]$pk[0]).Substring(1); if ('+^%~(){}[]'.Contains($t)) { $t = '{' + $t + '}' }
+          [System.Windows.Forms.SendKeys]::SendWait($t)
+          continue
+        }
+        if ($r.shift) { Key-Event 0x10 0; $pressed += 0x10 }
+        Key-Event $r.vk $r.ext; $pressed += $r.vk
+      }
+      $pressed = @()
+    } finally {
+      [array]::Reverse($pressed)
+      foreach ($v in $pressed) { Key-Event $v 2 }
+    }
+  }
+  'kup' {
+    # kup <mods|-> <keys>: lets go of what kdown pressed, keys first (last
+    # down first), then the modifiers. Never refused (see Guarded): a key
+    # left down would be far worse than a release landing on this app.
+    $mods = [string]$a[1]; $keys = ([string]$a[2]).Split(',')
+    [array]::Reverse($keys)
+    foreach ($k in $keys) {
+      $r = Resolve-Key $k $mods
+      if ($null -eq $r) { continue }
+      Key-Event $r.vk ($r.ext -bor 2)
+      if ($r.shift) { Key-Event 0x10 2 }
+    }
+    $down = @(Mod-Vks $mods)
+    [array]::Reverse($down)
+    foreach ($m in $down) { Key-Event $m 2 }
   }
   'cursor' {
     # Where the real cursor is right now, as "x,y" (Capture actions).
@@ -710,6 +837,10 @@ static func _loggable(cmd: String) -> String:
 		if parts[i] == "key":
 			parts[i + 1] = "<%d chars>" % parts[i + 1].length()
 			break
+		# A press by key: the key list (after the modifiers) says what was typed.
+		if (parts[i] == "hold" or parts[i] == "kdown" or parts[i] == "kup") and i + 2 < parts.size():
+			parts[i + 2] = "<%d keys>" % (parts[i + 2].count(",") + 1)
+			break
 	# A travel path is hundreds of points; its length says enough.
 	for i in parts.size():
 		if parts[i].contains(";"):
@@ -887,6 +1018,17 @@ func mouse_button(button: int, pressed: bool, pos: Vector2i) -> void:
 	_run_sync(PackedStringArray([verb, str(pos.x), str(pos.y), str(button)]))
 
 
+func release_button(button: int) -> void:
+	_run_sync(PackedStringArray(["release", str(button)]))
+
+
+func scroll(pos: Vector2i, dir: int, notches: int, ms: int = 0, uneven: bool = false) -> void:
+	_last_pos = pos
+	var n := clampi(notches, 1, 200)
+	_run_sync(PackedStringArray(["wheel", str(pos.x), str(pos.y), LoopActionT.scroll_dir_name(dir), str(n), str(maxi(0, ms)), "1" if uneven else "0"]),
+		maxi(ms, n * 12) * 2 + SERVER_READ_TIMEOUT_MS)
+
+
 ## Moves the real cursor through `path` over `ms` (the helper's 'path').
 func move_path(path: PackedVector2Array, ms: int) -> void:
 	if path.is_empty():
@@ -932,6 +1074,12 @@ func hold_keys(mods: String, keys: PackedStringArray, lead: int, hold: int, gap:
 	var total := lead + trail + keys.size() * (hold + gap)
 	_run_sync(PackedStringArray(["hold", mods if not mods.is_empty() else "-", ",".join(keys),
 		str(lead), str(hold), str(gap), str(trail)]), total + SERVER_READ_TIMEOUT_MS)
+
+
+func press_keys(mods: String, keys: PackedStringArray, pressed: bool) -> void:
+	if keys.is_empty():
+		return
+	_run_sync(PackedStringArray(["kdown" if pressed else "kup", mods if not mods.is_empty() else "-", ",".join(keys)]))
 
 
 func get_cursor_pos() -> Vector2i:

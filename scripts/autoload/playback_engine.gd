@@ -22,6 +22,9 @@ signal status(message: String)
 signal action_executing(layer_index: int, action_index: int)
 ## Emitted whenever the execution tracker head changes.
 signal tracker_changed(global_pos: Vector2i, visible: bool, label: String)
+## The global F8 was pressed while no loop was running (~F8): the builder
+## starts one, as its Run button would.
+signal hotkey_pressed
 
 enum BackendKind { PREVIEW, WINDOWS }
 
@@ -62,13 +65,24 @@ var _has_saved_cursor: bool = false
 # action), so "stop after N passes" can count. Cleared when playback starts.
 var _stop_counts: Dictionary = {}
 
+# What a Down (or a Hold under way) has left pressed: mouse buttons by
+# number (with where they went down), and key presses as {"mods", "keys"} in the
+# order they went down. A stop lets go of all of it, so nothing stays stuck
+# down after F8.
+var _held_buttons: Dictionary = {}
+var _held_keys: Array[Dictionary] = []
+
 # Lazily-created real backend used purely for reading screen pixels (so colour
 # sampling works even while the active playback backend is Preview).
 var _screen_sampler: InputBackendT
 
-## System-wide F8 while a real loop runs (this window's own F8 / Esc need the
-## focus, which a loop clicking other programs takes away). Polled in _process.
+## System-wide F8 (~F8): held the whole time the app is open, so a loop
+## can be started and stopped from any window (this window's own F8 / Esc
+## need the focus, which a loop clicking other programs takes away).
+## Polled in _process. With ~F8 off F8 is never taken over.
 var _stop_hotkey := StopHotkeyT.new()
+## ~F8: the global F8 is held (on) or left to other programs (off).
+var global_hotkey: bool = false
 
 
 func _ready() -> void:
@@ -87,24 +101,51 @@ func _ready() -> void:
 
 
 func _exit_tree() -> void:
+	# Closing the app mid-run: nothing stays pressed, F8 is given back.
+	_release_held()
 	_stop_hotkey.stop()
 
 
 func _process(_dt: float) -> void:
-	if not is_running:
+	if _stop_hotkey.state == StopHotkeyT.State.OFF:
 		set_process(false)
 		return
 	var before: int = _stop_hotkey.state
 	if _stop_hotkey.poll():
-		stop("Stopped: F8 pressed.")
+		if is_running:
+			stop("Stopped: F8 pressed.")
+		else:
+			emit_signal("hotkey_pressed")
 		return
 	if _stop_hotkey.state == before:
 		return
+	var running := "Running… " if is_running else ""
 	match _stop_hotkey.state:
 		StopHotkeyT.State.ARMED:
-			emit_signal("status", "Running… F8 stops the loop from any window.")
+			if is_running:
+				emit_signal("status", "Running… F8 stops the loop from any window.")
+			else:
+				emit_signal("status", "F8 starts and stops the loop from any window.")
 		StopHotkeyT.State.UNAVAILABLE:
-			emit_signal("status", "Running… (global F8 unavailable: %s — F8 / Esc stop it while this window has the focus)" % _stop_hotkey.reason)
+			emit_signal("status", "%s(global F8 unavailable: %s — F5 / F8 / Esc work while this window has the focus)" % [running, _stop_hotkey.reason])
+
+
+## ~F8: the global F8 is registered while the app is open (a start and a
+## stop key), or not at all.
+func set_global_hotkey(on: bool) -> void:
+	global_hotkey = on
+	_refresh_hotkey()
+
+
+## Holds the global F8 while ~F8 is on and lets go of it otherwise; a held
+## one is left as it is.
+func _refresh_hotkey() -> void:
+	var wanted := global_hotkey
+	if wanted and _stop_hotkey.state == StopHotkeyT.State.OFF:
+		_stop_hotkey.start()
+	elif not wanted and _stop_hotkey.state != StopHotkeyT.State.OFF:
+		_stop_hotkey.stop()
+	set_process(_stop_hotkey.state != StopHotkeyT.State.OFF)
 
 
 ## Returns a backend that can actually read screen pixels, or null if none is
@@ -174,18 +215,25 @@ func start() -> void:
 	_generation += 1
 	_has_saved_cursor = false
 	_stop_counts.clear()
-	if backend.is_real():
-		# Only a real loop can take the focus away; a preview never needs it.
-		_stop_hotkey.start()
-		set_process(true)
-	else:
+	_held_buttons.clear()
+	_held_keys.clear()
+	# A global F8 another program owned last time is tried again for this run.
+	if _stop_hotkey.state == StopHotkeyT.State.UNAVAILABLE:
+		_stop_hotkey.stop()
+	_refresh_hotkey()
+	if not backend.is_real():
 		# A Safe run still reads the screen for its Pixel Detects: get the
 		# reader's helper up now rather than at the first detect.
 		var reader := get_screen_sampler()
 		if reader != null and reader.has_method("warm_up"):
 			reader.call("warm_up")
 	emit_signal("playback_started")
-	emit_signal("status", "Running…")
+	if _stop_hotkey.state == StopHotkeyT.State.ARMED:
+		emit_signal("status", "Running… F8 stops the loop from any window.")
+	elif backend.is_real() and not global_hotkey:
+		emit_signal("status", "Running… (~F8 is off: F8 / Esc stop the loop while this window has the focus)")
+	else:
+		emit_signal("status", "Running…")
 	_run_loop(_generation)
 
 
@@ -196,8 +244,8 @@ func stop(reason: String = "Stopped.") -> void:
 	is_running = false
 	last_stop_reason = reason
 	_generation += 1
-	_stop_hotkey.stop()
-	set_process(false)
+	_release_held()
+	_refresh_hotkey()
 	current_layer_index = -1
 	current_action_index = -1
 	detect_rect_pinned = false
@@ -275,7 +323,10 @@ func _wait_loop_delay(project: LoopProjectT, gen: int, what: String) -> void:
 ## `layer_index` / `action_index` locate the action in the project (a Capture
 ## Load with nothing saved disables itself).
 func _execute_action(action: LoopActionT, layer_index: int, action_index: int) -> int:
-	if action.captures and LoopActionT.supports_captures(action.type):
+	# Captures goes with a plain click (a held button put back where the
+	# cursor was would be a drag).
+	if action.captures and LoopActionT.supports_captures(action.type) \
+			and (action.type != LoopActionT.Type.CLICK or action.press_mode == LoopActionT.PressMode.TAP):
 		await _execute_captured(action)
 		return LoopActionT.OnFail.CONTINUE
 	# Every numeric setting is a range; each run draws fresh values from it.
@@ -285,9 +336,12 @@ func _execute_action(action: LoopActionT, layer_index: int, action_index: int) -
 			await _travel(_mouse_pos(), p, action.roll_duration_ms(), action.wiggle, "MOVE")
 		LoopActionT.Type.CLICK:
 			var p := action.roll_point()
-			_set_tracker(p, true, "CLICK")
-			backend.click(action.button, p)
-			_report_skipped(action)
+			if action.press_mode == LoopActionT.PressMode.TAP:
+				_set_tracker(p, true, "CLICK")
+				backend.click(action.button, p)
+				_report_skipped(action)
+			else:
+				await _press_button(action, p)
 		LoopActionT.Type.DRAG:
 			var p := action.roll_point()
 			var p2 := action.roll_point2()
@@ -300,9 +354,39 @@ func _execute_action(action: LoopActionT, layer_index: int, action_index: int) -
 				await _travel(p, p2, action.roll_duration_ms(), action.wiggle, "DRAG")
 				_set_tracker(p2, true, "DRAG END")
 				backend.mouse_button(action.button, false, p2)
+		LoopActionT.Type.SCROLL:
+			var p := action.roll_point()
+			var n := action.roll_notches()
+			var ms := action.roll_duration_ms()
+			_set_tracker(p, true, "SCROLL")
+			emit_signal("status", "Scroll %s ×%d over %d ms." % [LoopActionT.scroll_dir_name(action.scroll_dir), n, ms] if ms > 0 else "Scroll %s ×%d." % [LoopActionT.scroll_dir_name(action.scroll_dir), n])
+			# The helper spreads the notches over the duration, so it runs off
+			# the main thread like a paced key press - in pieces of about
+			# TRAVEL_CHUNK_MS, so a stop takes effect between them (the
+			# helper cannot be interrupted inside a command).
+			var b := backend
+			var gap := maxi(12, ms / n)
+			var per_chunk := maxi(1, TRAVEL_CHUNK_MS / gap)
+			var sent := 0
+			var gen := _generation
+			while sent < n and is_running and gen == _generation:
+				var k := mini(per_chunk, n - sent)
+				var thread := Thread.new()
+				thread.start(func(): b.scroll(p, action.scroll_dir, k, k * gap, action.wiggle))
+				while thread.is_alive():
+					await get_tree().process_frame
+				thread.wait_to_finish()
+				if b.last_skipped:
+					_report_skipped(action)
+					break
+				sent += k
+				if sent < n:
+					await _sleep_ms(gap)
 		LoopActionT.Type.KEY:
 			_set_tracker(tracker_pos, tracker_visible, "KEY")
-			if action.keys_paced:
+			if action.press_mode != LoopActionT.PressMode.TAP:
+				await _press_keys(action)
+			elif action.keys_paced:
 				await _type_paced(action)
 			else:
 				backend.send_keys(action.keys)
@@ -318,28 +402,33 @@ func _execute_action(action: LoopActionT, layer_index: int, action_index: int) -
 			var what := "Image detect" if is_image else "Pixel detect"
 			var target := "image" if is_image else "colour"
 			var hit := await _detect_once(action, gen)
-			# "Wait till found": re-check the same spot until the colour or
-			# image appears (or the loop is stopped). A Safe walk-through
-			# does not wait — safe_continue carries it on regardless.
+			# The choice fires when the colour or image is missing — or, with
+			# "If found", when it is there. "Wait" re-checks the same spot
+			# until that is no longer so (till found / till gone), or the
+			# loop is stopped. A Safe walk-through does not wait —
+			# safe_continue carries it on regardless.
+			var fires := (hit.x >= 0) == action.if_found
 			var wait_mode := action.on_fail == LoopActionT.OnFail.WAIT_FOUND \
 					and not (action.safe_continue and not backend.is_real())
+			var waiting_for := ("the %s to go" % target) if action.if_found else ("the %s" % target)
 			var wait_started := Time.get_ticks_msec()
 			var wait_limit := action.roll_wait_timeout_ms()
-			while wait_mode and hit.x < 0 and is_running and gen == _generation:
+			while wait_mode and fires and is_running and gen == _generation:
 				# Timed out: give up and skip the rest of the layer. (The
 				# fallback is fixed for now; it could follow a chosen
 				# If-not-found option once there are more of them.)
 				if action.wait_timeout and Time.get_ticks_msec() - wait_started >= wait_limit:
-					_last_event = "%s: not found (timed out)." % what
+					_last_event = "%s: still %s (timed out)." % [what, "there" if action.if_found else "not found"]
 					emit_signal("status", _last_event)
 					return LoopActionT.OnFail.SKIP_LAYER
-				_last_event = "%s: waiting for the %s…" % [what, target]
+				_last_event = "%s: waiting for %s…" % [what, waiting_for]
 				emit_signal("status", _last_event)
 				_set_tracker(tracker_pos, tracker_visible, "WAIT DETECT")
 				await _sleep_ms(action.roll_wait_ms())
 				if not is_running or gen != _generation:
 					break
 				hit = await _detect_once(action, gen)
+				fires = (hit.x >= 0) == action.if_found
 			if not is_running or gen != _generation:
 				return LoopActionT.OnFail.CONTINUE
 			var found := hit.x >= 0
@@ -347,14 +436,16 @@ func _execute_action(action: LoopActionT, layer_index: int, action_index: int) -
 				# The tracker marks an image at its middle (hit is its corner).
 				_set_tracker(hit + action.image_size() / 2 if is_image else hit, true, "DETECT")
 				_last_event = "%s: found at (%d, %d)." % [what, hit.x, hit.y]
-				emit_signal("status", _last_event)
 			else:
-				# ~If not found: a Safe run walks on regardless.
-				var walk_on := action.safe_continue and not backend.is_real()
-				_last_event = "%s: not found (Safe: carrying on)." % what if walk_on else "%s: not found." % what
-				emit_signal("status", _last_event)
-				if not walk_on:
+				_last_event = "%s: not found." % what
+			if fires:
+				# ~If: a Safe run walks on regardless.
+				if action.safe_continue and not backend.is_real():
+					_last_event = _last_event.trim_suffix(".") + " (Safe: carrying on)."
+				else:
+					emit_signal("status", _last_event)
 					return action.on_fail
+			emit_signal("status", _last_event)
 		LoopActionT.Type.STOP:
 			_set_tracker(tracker_pos, tracker_visible, "STOP")
 			var count := int(_stop_counts.get(action, 0)) + 1
@@ -393,6 +484,120 @@ func _execute_action(action: LoopActionT, layer_index: int, action_index: int) -
 func _report_skipped(action: LoopActionT) -> void:
 	if backend.last_skipped:
 		emit_signal("status", "%s skipped: it would land on Loop Automator (turn on ~Self to allow that)." % LoopActionT.type_name(action.type))
+
+
+## A Click set to Hold, Down or Up at `p`: the button goes down and is
+## remembered as held (so a stop lets go of it), a Hold sleeps its time and
+## lets go, an Up lets go. The button's name is what the status line says.
+func _press_button(action: LoopActionT, p: Vector2i) -> void:
+	var name := LoopActionT.button_name(action.button)
+	if action.press_mode == LoopActionT.PressMode.UP:
+		_set_tracker(p, true, "UP")
+		backend.mouse_button(action.button, false, p)
+		# Refused by ~Self (it would land on this app): still held, so the
+		# stop lets go of it where it went down.
+		if not backend.last_skipped:
+			_held_buttons.erase(action.button)
+		_report_skipped(action)
+		return
+	var hold := action.press_mode == LoopActionT.PressMode.HOLD
+	_set_tracker(p, true, "HOLD" if hold else "DOWN")
+	backend.mouse_button(action.button, true, p)
+	if backend.last_skipped:
+		_report_skipped(action)
+		return
+	_held_buttons[action.button] = p
+	if not hold:
+		emit_signal("status", "%s button down." % name)
+		return
+	var ms := action.roll_hold_ms()
+	emit_signal("status", "%s button held %d ms." % [name, ms])
+	var gen := _generation
+	await _sleep_ms(ms)
+	# A stop meanwhile has let go already. The release is where the cursor
+	# is now (the user may have moved it), not a jump back to the point.
+	if gen == _generation and _held_buttons.has(action.button):
+		backend.release_button(action.button)
+		_held_buttons.erase(action.button)
+
+
+## A Key set to Hold, Down or Up: its text read as presses (see
+## KeyStrokes: "^c" is Ctrl and c, "(wa)" is w and a), each pressed and
+## remembered as held, or let go of. A Hold sleeps its time and lets go
+## of what it pressed. A stroke a press cannot express (an unknown name)
+## is typed once on the way down and ignored on the way up.
+func _press_keys(action: LoopActionT) -> void:
+	var presses: Array = []
+	var typed := PackedStringArray()
+	for stroke in KeyStrokesT.split(action.keys):
+		var press := KeyStrokesT.parse(stroke)
+		if press.is_empty():
+			typed.append(stroke)
+		else:
+			presses.append({"mods": press["mods"], "keys": press["keys"]})
+	if action.press_mode == LoopActionT.PressMode.UP:
+		_set_tracker(tracker_pos, tracker_visible, "KEY UP")
+		presses.reverse()
+		for press in presses:
+			backend.press_keys(press["mods"], press["keys"], false)
+			_forget_held(press)
+		emit_signal("status", "Keys up: \"%s\"." % action.keys)
+		return
+	var hold := action.press_mode == LoopActionT.PressMode.HOLD
+	_set_tracker(tracker_pos, tracker_visible, "KEY HOLD" if hold else "KEY DOWN")
+	for press in presses:
+		backend.press_keys(press["mods"], press["keys"], true)
+		if backend.last_skipped:
+			_report_skipped(action)
+			return
+		_held_keys.append(press)
+	if not typed.is_empty():
+		backend.send_keys("".join(typed))
+		emit_signal("status", "Keys down: \"%s\" (\"%s\" cannot be held, typed instead)." % [action.keys, "".join(typed)])
+	if not hold:
+		if typed.is_empty():
+			emit_signal("status", "Keys down: \"%s\"." % action.keys)
+		return
+	var ms := action.roll_hold_ms()
+	emit_signal("status", "Keys held %d ms: \"%s\"." % [ms, action.keys])
+	var gen := _generation
+	await _sleep_ms(ms)
+	# A stop meanwhile has let go already.
+	if gen != _generation:
+		return
+	presses.reverse()
+	for press in presses:
+		if _held_index(press) >= 0:
+			backend.press_keys(press["mods"], press["keys"], false)
+			_forget_held(press)
+
+
+## Where `press` (a {"mods", "keys"}) sits in the held list, or -1.
+func _held_index(press: Dictionary) -> int:
+	for i in range(_held_keys.size() - 1, -1, -1):
+		if _held_keys[i]["mods"] == press["mods"] and _held_keys[i]["keys"] == press["keys"]:
+			return i
+	return -1
+
+
+## Drops `press` (a {"mods", "keys"} that was let go of) from the held list.
+func _forget_held(press: Dictionary) -> void:
+	var i := _held_index(press)
+	if i >= 0:
+		_held_keys.remove_at(i)
+
+
+## Lets go of every button and key a Down left pressed (keys in the reverse
+## order they went down), so a stop never leaves something stuck.
+func _release_held() -> void:
+	if backend == null:
+		return
+	for b in _held_buttons.keys():
+		backend.release_button(b)
+	_held_buttons.clear()
+	while not _held_keys.is_empty():
+		var press: Dictionary = _held_keys.pop_back()
+		backend.press_keys(press["mods"], press["keys"], false)
 
 
 ## A mouse action with "Captures": the backend remembers the cursor, performs

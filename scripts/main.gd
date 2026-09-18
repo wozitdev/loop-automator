@@ -35,6 +35,7 @@ var stay_on_edit_check: CheckBox
 ## (saved with the loop).
 var delay_each_check: CheckBox
 var feedback_check: CheckBox
+var hotkey_check: CheckBox
 var _ui_root: VBoxContainer
 var _main_split: HSplitContainer
 var _edit_lock_blocker: ColorRect
@@ -120,6 +121,52 @@ func _ready() -> void:
 	_rebuild_editor()
 	_create_overlay()
 	_refresh_edit_lock()
+	_show_splash()
+
+
+## How long the splash stays before it fades, and how long the fade takes.
+const SPLASH_HOLD_SEC := 0.9
+const SPLASH_FADE_SEC := 0.5
+
+
+## A splash over the builder at launch: the icon and the name on the icon's
+## own dark, fading out once the window is up. Nothing under it is
+## clickable meanwhile (it is gone in under two seconds).
+func _show_splash() -> void:
+	var splash := ColorRect.new()
+	splash.color = Color("1f2430")
+	splash.set_anchors_preset(Control.PRESET_FULL_RECT)
+	splash.mouse_filter = Control.MOUSE_FILTER_STOP
+	var centre := CenterContainer.new()
+	centre.set_anchors_preset(Control.PRESET_FULL_RECT)
+	splash.add_child(centre)
+	var column := VBoxContainer.new()
+	column.alignment = BoxContainer.ALIGNMENT_CENTER
+	column.add_theme_constant_override("separation", 14)
+	centre.add_child(column)
+	var icon := TextureRect.new()
+	icon.texture = load("res://icon.svg")
+	icon.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	icon.custom_minimum_size = Vector2(112, 112)
+	icon.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	column.add_child(icon)
+	var name_lbl := Label.new()
+	name_lbl.text = "Loop Automator"
+	name_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	name_lbl.add_theme_font_size_override("font_size", 30)
+	name_lbl.add_theme_color_override("font_color", Color("e8edf5"))
+	column.add_child(name_lbl)
+	var sub := Label.new()
+	sub.text = "mouse + keyboard loops, with an overlay"
+	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	sub.add_theme_color_override("font_color", Color("4dd0e1"))
+	column.add_child(sub)
+	add_child(splash)
+	var tween := create_tween()
+	tween.tween_interval(SPLASH_HOLD_SEC)
+	tween.tween_property(splash, "modulate:a", 0.0, SPLASH_FADE_SEC)
+	tween.tween_callback(splash.queue_free)
 
 
 func _configure_window() -> void:
@@ -256,8 +303,7 @@ func _build_toolbar() -> Control:
 	loop_next_btn = _icon_button(UiIconsT.right(), "Next loop", func(): _switch_loop(1))
 	hb.add_child(loop_next_btn)
 
-	save_btn = _tool_button("Save", _on_save)
-	save_btn.tooltip_text = "Write this loop to its file"
+	save_btn = _icon_button(UiIconsT.save(), "Save: write this loop to its file", _on_save)
 	hb.add_child(save_btn)
 	# Share: a .loop file in or out.
 	share_btn = MenuButton.new()
@@ -286,7 +332,7 @@ func _build_toolbar() -> Control:
 	# also waited after every action.
 	var delay_tip := "Pause after the loop's last action, before it starts over (ms). Saved with the loop."
 	delay_each_check = CheckBox.new()
-	delay_each_check.text = "~Delay ms"
+	delay_each_check.text = "~Delay"
 	delay_each_check.focus_mode = Control.FOCUS_NONE
 	delay_each_check.tooltip_text = "%s\nChecked: also wait it after every action." % delay_tip
 	delay_each_check.button_pressed = ProjectData.project.delay_after_each_action
@@ -300,6 +346,7 @@ func _build_toolbar() -> Control:
 	for sp in [_delay_pair.lo, _delay_pair.hi]:
 		sp.size_flags_horizontal = Control.SIZE_FILL
 		sp.custom_minimum_size = Vector2(96, 0)
+	_delay_pair.set_suffix("ms")
 	_delay_pair.single_tip = delay_tip
 	if not _delay_pair.ranged:
 		_delay_pair.lo.tooltip_text = delay_tip
@@ -331,6 +378,19 @@ func _build_toolbar() -> Control:
 		_save_setting("feedback", v)
 		Playback.set_feedback(v))
 	hb.add_child(feedback_check)
+	# ~F8: the global F8 is held the whole time the app is open, so a loop
+	# can be started and stopped from any window. Off, F8 is left to other
+	# programs and only works in this window.
+	hotkey_check = CheckBox.new()
+	hotkey_check.text = "~F8"
+	hotkey_check.focus_mode = Control.FOCUS_NONE
+	hotkey_check.tooltip_text = "Checked: F8 starts and stops the loop from any window while Loop Automator is open (other programs do not get F8 meanwhile).\nUnchecked: F8 only works while this window has the focus."
+	hotkey_check.button_pressed = _load_setting("global_hotkey", true)
+	Playback.set_global_hotkey(hotkey_check.button_pressed)
+	hotkey_check.toggled.connect(func(v):
+		_save_setting("global_hotkey", v)
+		Playback.set_global_hotkey(v))
+	hb.add_child(hotkey_check)
 
 	# Let the toolbar scroll horizontally instead of pushing items off-screen
 	# on narrow windows.
@@ -465,7 +525,7 @@ func _build_action_panel() -> Control:
 	add_btn.flat = false
 	var pm := add_btn.get_popup()
 	for t in [LoopActionT.Type.MOVE, LoopActionT.Type.CLICK, LoopActionT.Type.DRAG,
-			LoopActionT.Type.KEY, LoopActionT.Type.WAIT, LoopActionT.Type.PIXEL_DETECT,
+			LoopActionT.Type.SCROLL, LoopActionT.Type.KEY, LoopActionT.Type.WAIT, LoopActionT.Type.PIXEL_DETECT,
 			LoopActionT.Type.IMAGE_DETECT, LoopActionT.Type.CAPTURE, LoopActionT.Type.STOP]:
 		pm.add_item(LoopActionT.type_name(t), t)
 	pm.id_pressed.connect(func(id): ProjectData.add_action(id))
@@ -488,6 +548,7 @@ func _build_editor_panel() -> Control:
 	panel.custom_minimum_size = Vector2(320, 0)
 	var scroll := ScrollContainer.new()
 	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
 	panel.add_child(scroll)
 	editor_box = VBoxContainer.new()
 	editor_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -523,6 +584,11 @@ func _connect_signals() -> void:
 			_switch_to_safe_backend_if_needed()
 		await _animate_stop_feedback(was_real))
 	Playback.action_executing.connect(_on_action_executing)
+	# The global F8 while idle (~F8): a start, as the Run button (a pick in
+	# progress keeps the screen; the button's own cooldown after a stop holds).
+	Playback.hotkey_pressed.connect(func():
+		if not _pick_active and not _dialog_open():
+			_on_play_pressed())
 	_refresh_overlay_label()
 	_refresh_loop_stack_ui()
 
@@ -713,22 +779,29 @@ func _rebuild_editor() -> void:
 		LoopActionT.Type.CLICK:
 			_add_point_fields(a, false)
 			_add_button_field(a)
-			_add_captures_field(a)
+			_add_hold_field(a)
+			# Captures goes with a plain click (see Playback._execute_action).
+			if a.press_mode == LoopActionT.PressMode.TAP:
+				_add_captures_field(a)
 		LoopActionT.Type.DRAG:
 			_add_point_fields(a, true)
 			_add_button_field(a)
 			_add_duration_field(a)
 			_add_captures_field(a)
+		LoopActionT.Type.SCROLL:
+			_add_point_fields(a, false)
+			_add_scroll_fields(a)
+			_add_duration_field(a, "How long the scroll takes: the notches are spread over it (0 = as fast as a wheel goes).\nChecked: the gaps between notches vary a little, like a hand's.")
 		LoopActionT.Type.KEY:
 			_add_keys_field(a)
 		LoopActionT.Type.WAIT:
-			_add_range_field("Wait (ms)", a.wait_ms, a.wait_ms_max, 0, 600000, func(lo: int, hi: int):
+			_add_range_field("Wait", a.wait_ms, a.wait_ms_max, 0, 600000, func(lo: int, hi: int):
 				a.wait_ms = lo
-				a.wait_ms_max = hi)
+				a.wait_ms_max = hi, "ms")
 		LoopActionT.Type.PIXEL_DETECT:
 			_add_rect_fields(a)
 			_add_color_field(a)
-			_add_tolerance_field(a, "How far each colour channel may differ from the expected colour (0 = exact).")
+			_add_tolerance_field(a, "How far each colour channel may differ from the expected colour (0 = exact),")
 			_add_on_fail_field(a)
 		LoopActionT.Type.IMAGE_DETECT:
 			_add_rect_fields(a)
@@ -843,7 +916,7 @@ func _add_rect_fields(a: LoopActionT) -> void:
 
 func _add_button_field(a: LoopActionT) -> void:
 	var row := _row("Button")
-	var opt := OptionButton.new()
+	var opt := _compact_option()
 	opt.add_item("Left", LoopActionT.BUTTON_LEFT)
 	opt.add_item("Right", LoopActionT.BUTTON_RIGHT)
 	opt.add_item("Middle", LoopActionT.BUTTON_MIDDLE)
@@ -852,7 +925,57 @@ func _add_button_field(a: LoopActionT) -> void:
 		a.button = opt.get_item_id(i)
 		_after_edit())
 	row.add_child(opt)
+	if a.type == LoopActionT.Type.CLICK:
+		row.add_child(_press_mode_option(a, "Click"))
 	editor_box.add_child(row)
+
+
+## The press dropdown of a Click or Key: `tap` is what the plain press is
+## called there ("Click" / "Tap"), then Hold, Down and Up. Changing it
+## rebuilds the editor, since Hold has a row of its own.
+func _press_mode_option(a: LoopActionT, tap: String) -> OptionButton:
+	var opt := _compact_option(false)
+	opt.add_item(tap, LoopActionT.PressMode.TAP)
+	opt.add_item("Hold", LoopActionT.PressMode.HOLD)
+	opt.add_item("Down", LoopActionT.PressMode.DOWN)
+	opt.add_item("Up", LoopActionT.PressMode.UP)
+	opt.tooltip_text = "Hold: keep it pressed for a while, then let go.\nDown: press and leave it pressed for the actions after it.\nUp: let go of it. Stopping the loop lets go of everything."
+	opt.select(opt.get_item_index(a.press_mode))
+	opt.item_selected.connect(func(i):
+		a.press_mode = opt.get_item_id(i)
+		_after_edit()
+		_rebuild_editor.call_deferred())
+	return opt
+
+
+## A Scroll's direction and how many notches of the wheel.
+func _add_scroll_fields(a: LoopActionT) -> void:
+	var row := _row("Scroll")
+	var opt := _compact_option()
+	opt.add_item("Up", LoopActionT.ScrollDir.UP)
+	opt.add_item("Down", LoopActionT.ScrollDir.DOWN)
+	opt.add_item("Left", LoopActionT.ScrollDir.LEFT)
+	opt.add_item("Right", LoopActionT.ScrollDir.RIGHT)
+	opt.select(opt.get_item_index(a.scroll_dir))
+	opt.item_selected.connect(func(i):
+		a.scroll_dir = opt.get_item_id(i)
+		_after_edit())
+	row.add_child(opt)
+	editor_box.add_child(row)
+	var nrow := _row("Notches")
+	nrow.tooltip_text = "How many clicks of the wheel (the program under the point gets them)."
+	_add_range_field_in(nrow, a.notches, a.notches_max, 1, 200, func(lo: int, hi: int):
+		a.notches = lo
+		a.notches_max = hi)
+
+
+## A Hold's time, when the press is set to Hold.
+func _add_hold_field(a: LoopActionT) -> void:
+	if a.press_mode != LoopActionT.PressMode.HOLD:
+		return
+	_add_range_field("Hold", a.hold_ms, a.hold_ms_max, 0, 600000, func(lo: int, hi: int):
+		a.hold_ms = lo
+		a.hold_ms_max = hi, "ms")
 
 
 func _add_keys_field(a: LoopActionT) -> void:
@@ -863,6 +986,9 @@ func _add_keys_field(a: LoopActionT) -> void:
 		func(v: bool):
 			a.keys_paced = v
 			_after_edit())
+	# Tap / Hold / Down / Up; the paced typing is a tap's.
+	(row.get_child(0) as CheckBox).disabled = a.press_mode != LoopActionT.PressMode.TAP
+	row.add_child(_press_mode_option(a, "Tap"))
 	var le := LineEdit.new()
 	le.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	le.text = a.keys
@@ -881,6 +1007,7 @@ func _add_keys_field(a: LoopActionT) -> void:
 	capture.pressed.connect(func(): _open_key_capture(le, a))
 	row.add_child(capture)
 	editor_box.add_child(row)
+	_add_hold_field(a)
 	var hint := Label.new()
 	hint.text = "Windows SendKeys format: {ENTER} {TAB} {ESC} ^c (Ctrl+C) %{F4} (Alt+F4)"
 	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
@@ -1053,52 +1180,65 @@ func _show_image_preview(a: LoopActionT) -> void:
 	_image_preview.popup_centered()
 
 
-## What a colour or image that is not found does: skip the rest of the layer
-## or wait for it. The label is the "~If not found" checkbox: checked (the
-## default), a Safe run carries on regardless, so the whole loop can be
-## walked through; Live keeps to the choice.
+## A detect's condition, read as a sentence over two rows: "~If [not found /
+## found]", "Then [Skip rest of layer / Wait till found (gone)]". The "~If"
+## checkbox is the Safe walk-through.
 func _add_on_fail_field(a: LoopActionT) -> void:
 	var target := "image" if a.type == LoopActionT.Type.IMAGE_DETECT else "colour"
-	var row := _row_toggle("If not found", a.safe_continue,
-		"What happens when the %s is not there.\nChecked: in Safe mode nothing is skipped or stopped, so you can walk through the whole loop; Live keeps to the choice." % target,
+	var row := _row_toggle("If", a.safe_continue,
+		"What happens when the %s is not there — or, with \"found\", when it is.\nChecked: in Safe mode nothing is skipped or waited for, so you can walk through the whole loop; Live keeps to the choice." % target,
 		func(v: bool):
 			a.safe_continue = v
 			_after_edit())
+	# "not found" is the usual guard; "found" turns the same detect into its
+	# opposite (skip while the colour is there, wait till it goes).
+	var when := _compact_option()
+	when.add_item("not found", 0)
+	when.add_item("found", 1)
+	when.select(1 if a.if_found else 0)
+	row.add_child(when)
+	editor_box.add_child(row)
 	# Stopping the loop is the Stop action's job now, not a Pixel Detect's.
-	var opt := OptionButton.new()
+	var then_row := _row("Then")
+	var opt := _compact_option()
 	opt.add_item("Skip rest of layer", LoopActionT.OnFail.SKIP_LAYER)
-	opt.add_item("Wait till found", LoopActionT.OnFail.WAIT_FOUND)
+	opt.add_item("Wait till gone" if a.if_found else "Wait till found", LoopActionT.OnFail.WAIT_FOUND)
 	opt.select(maxi(0, opt.get_item_index(a.on_fail)))
 	opt.item_selected.connect(func(i):
 		a.on_fail = opt.get_item_id(i)
 		_after_edit()
 		# Show or hide the re-check interval for "Wait till found".
 		_rebuild_editor.call_deferred())
-	row.add_child(opt)
-	editor_box.add_child(row)
+	when.item_selected.connect(func(i):
+		a.if_found = i == 1
+		opt.set_item_text(opt.get_item_index(LoopActionT.OnFail.WAIT_FOUND), "Wait till gone" if a.if_found else "Wait till found")
+		_after_edit())
+	then_row.add_child(opt)
+	editor_box.add_child(then_row)
 	if a.on_fail == LoopActionT.OnFail.WAIT_FOUND:
-		# "Wait till found" re-checks the same spot on this interval until the
-		# colour appears (F8 / Esc / a Stop action still ends the loop).
-		_add_range_field("Check every (ms)", a.wait_ms, a.wait_ms_max, 0, 600000, func(lo: int, hi: int):
+		# "Wait till found / gone" re-checks the same spot on this interval
+		# until the colour appears / goes (F8 / Esc / a Stop action still
+		# ends the loop).
+		_add_range_field("Check every", a.wait_ms, a.wait_ms_max, 0, 600000, func(lo: int, hi: int):
 			a.wait_ms = lo
-			a.wait_ms_max = hi)
+			a.wait_ms_max = hi, "ms")
 		# ~Timeout: give up after this long (a range, like every number) and
 		# skip the rest of the layer. The range is greyed out while unchecked.
-		var trow := _row_toggle("Timeout (ms)", a.wait_timeout,
+		var trow := _row_toggle("Timeout", a.wait_timeout,
 			"Checked: stop waiting after this long and skip the rest of the layer.",
 			func(v: bool):
 				a.wait_timeout = v
 				_after_edit())
 		var tpair := _add_range_field_in(trow, a.wait_timeout_ms, a.wait_timeout_ms_max, 0, 3600000, func(lo: int, hi: int):
 			a.wait_timeout_ms = lo
-			a.wait_timeout_ms_max = hi)
+			a.wait_timeout_ms_max = hi, "ms")
 		tpair.set_editable(a.wait_timeout)
 		(trow.get_child(0) as CheckBox).toggled.connect(func(v: bool): tpair.set_editable(v))
 
 
 func _add_capture_mode_field(a: LoopActionT) -> void:
 	var row := _row("Mode")
-	var opt := OptionButton.new()
+	var opt := _compact_option()
 	opt.add_item("Save", LoopActionT.CaptureMode.SAVE)
 	opt.add_item("Load", LoopActionT.CaptureMode.LOAD)
 	opt.select(a.capture_mode)
@@ -1118,12 +1258,8 @@ func _add_capture_mode_field(a: LoopActionT) -> void:
 ## inline, which pass it fires on — pass 1 the first time it is reached, N
 ## on the Nth pass.
 func _add_stop_field(a: LoopActionT) -> void:
-	var row := HBoxContainer.new()
-	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	var stop_lbl := Label.new()
-	stop_lbl.text = "Stop"
-	row.add_child(stop_lbl)
-	var opt := OptionButton.new()
+	var row := _row("Stop")
+	var opt := _compact_option(false)
 	opt.add_item("The loop", LoopActionT.StopScope.LOOP)
 	opt.add_item("This layer", LoopActionT.StopScope.LAYER)
 	opt.select(opt.get_item_index(a.stop_scope))
@@ -1131,14 +1267,13 @@ func _add_stop_field(a: LoopActionT) -> void:
 		a.stop_scope = opt.get_item_id(i)
 		_after_edit())
 	row.add_child(opt)
-	var after := Label.new()
-	after.text = "on pass"
-	row.add_child(after)
+	# "on pass N" inside the box, so the row fits the panel.
 	var sp := SpinBox.new()
 	sp.min_value = 1
 	sp.max_value = 1000000
 	sp.step = 1
 	sp.value = a.stop_after
+	sp.prefix = "on pass"
 	sp.custom_minimum_size = Vector2(72, 0)
 	sp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	sp.tooltip_text = "1 = stop the first time this action is reached.\nN = stop on the Nth pass that reaches it (a run limiter)."
@@ -1245,6 +1380,11 @@ class RangePair:
 		hi.editable = editable
 		tilde.disabled = not editable
 
+	## The unit ("ms", "%") shown inside the boxes, after the number.
+	func set_suffix(unit: String) -> void:
+		lo.suffix = unit
+		hi.suffix = unit
+
 	func _spin(value: int, min_v: int, max_v: int) -> SpinBox:
 		var sp := SpinBox.new()
 		sp.min_value = min_v
@@ -1304,24 +1444,26 @@ class RangePair:
 
 ## Adds a labelled RangePair row to the editor and returns the pair (for
 ## callers that need to toggle it later). `setter` receives (lo, hi).
-func _add_range_field(label: String, lo: int, hi: int, min_v: int, max_v: int, setter: Callable) -> RangePair:
-	return _add_range_field_in(_row(label), lo, hi, min_v, max_v, setter)
+func _add_range_field(label: String, lo: int, hi: int, min_v: int, max_v: int, setter: Callable, unit: String = "") -> RangePair:
+	return _add_range_field_in(_row(label), lo, hi, min_v, max_v, setter, unit)
 
 
-## A RangePair added to `row` (which already holds its label or toggle).
-func _add_range_field_in(row: Container, lo: int, hi: int, min_v: int, max_v: int, setter: Callable) -> RangePair:
+## A RangePair added to `row` (which already holds its label or toggle);
+## `unit` ("ms", "%") is shown inside the boxes, not on the label.
+func _add_range_field_in(row: Container, lo: int, hi: int, min_v: int, max_v: int, setter: Callable, unit: String = "") -> RangePair:
 	var pair := RangePair.new()
 	pair.build(row, lo, hi, min_v, max_v, func(l: int, h: int):
 		setter.call(l, h)
 		_after_edit())
+	pair.set_suffix(unit)
 	editor_box.add_child(row)
 	return pair
 
 
 ## A detect's tolerance range, with `tip` on the row saying what it allows.
 func _add_tolerance_field(a: LoopActionT, tip: String) -> void:
-	var row := _row("Tolerance (0-255)")
-	row.tooltip_text = tip
+	var row := _row("Tolerance")
+	row.tooltip_text = tip + " 0-255."
 	_add_range_field_in(row, a.tolerance, a.tolerance_max, 0, 255, func(lo: int, hi: int):
 		a.tolerance = lo
 		a.tolerance_max = hi)
@@ -1333,16 +1475,16 @@ func _add_tolerance_field(a: LoopActionT, tip: String) -> void:
 ## (hovered, pressed, another theme) is still found. Then the per-pixel
 ## tolerance.
 func _add_image_tolerance_fields(a: LoopActionT) -> void:
-	var mrow := _row_toggle("Mismatch (%)", a.ignore_colour,
+	var mrow := _row_toggle("Mismatch", a.ignore_colour,
 		"How much of the image may be off, as a share of its pixels (0 = every pixel must match).\nChecked: pixels are compared by light and dark only, so the image is still found when it is tinted differently (hovered, pressed, another theme).",
 		func(v: bool):
 			a.ignore_colour = v
 			_after_edit())
 	_add_range_field_in(mrow, a.mismatch, a.mismatch_max, 0, LoopActionT.MISMATCH_MAX, func(lo: int, hi: int):
 		a.mismatch = lo
-		a.mismatch_max = hi)
-	var trow := _row("Tolerance (0-255)")
-	trow.tooltip_text = "How far each pixel's colour channels may differ from the image (0 = an exact match)."
+		a.mismatch_max = hi, "%")
+	var trow := _row("Tolerance")
+	trow.tooltip_text = "How far each pixel's colour channels may differ from the image, 0-255 (0 = an exact match)."
 	_add_range_field_in(trow, a.tolerance, a.tolerance_max, 0, 255, func(lo: int, hi: int):
 		a.tolerance = lo
 		a.tolerance_max = hi)
@@ -1351,15 +1493,14 @@ func _add_image_tolerance_fields(a: LoopActionT) -> void:
 ## A Move / Drag's duration: how long the travel takes. Its label is a
 ## checkbox, "~Duration (ms)": checked, the cursor wanders a
 ## little on the way, like a hand, without moving where it starts or lands.
-func _add_duration_field(a: LoopActionT) -> void:
-	var row := _row_toggle("Duration (ms)", a.wiggle,
-		"How long the cursor takes to get there (ms).\nChecked: it wanders a little on the way, like a hand would; where it starts and lands stays exact.",
+func _add_duration_field(a: LoopActionT, tip: String = "How long the cursor takes to get there.\nChecked: it wanders a little on the way, like a hand would; where it starts and lands stays exact.") -> void:
+	var row := _row_toggle("Duration", a.wiggle, tip,
 		func(v: bool):
 			a.wiggle = v
 			_after_edit())
 	_add_range_field_in(row, a.duration_ms, a.duration_ms_max, 0, 60000, func(lo: int, hi: int):
 		a.duration_ms = lo
-		a.duration_ms_max = hi)
+		a.duration_ms_max = hi, "ms")
 
 
 # ======================================================================
@@ -1720,8 +1861,8 @@ func _refresh_loop_stack_ui() -> void:
 	if loop_next_btn != null:
 		loop_next_btn.disabled = total <= 1
 	if save_btn != null:
-		var pending_mark := " *" if ProjectData.active_loop_is_pending() else ""
-		save_btn.text = "Save%s" % pending_mark
+		# An unsaved change shows as a "*" beside the icon.
+		save_btn.text = "*" if ProjectData.active_loop_is_pending() else ""
 	var loop_name := _shorten_text(ProjectData.active_loop_display_name(), 32)
 	var pending_text := " (unsaved)" if ProjectData.active_loop_is_pending() else ""
 	status_label.text = "Loop %d/%d · %s%s" % [_active_loop_number(), maxi(1, total), loop_name, pending_text]
@@ -2103,6 +2244,16 @@ func _rename_layer_dialog(index: int) -> void:
 #  Hotkeys
 # ======================================================================
 ## Returns true when the user is typing, so navigation keys don't hijack input.
+## True while one of the builder's dialogs (a confirmation, the import /
+## export file dialog, the image preview) is up: a question should be
+## answered, not run past.
+func _dialog_open() -> bool:
+	for c in get_children():
+		if c is AcceptDialog and (c as Window).visible:
+			return true
+	return _image_preview != null and _image_preview.visible
+
+
 func _is_editing_text() -> bool:
 	var f := get_viewport().gui_get_focus_owner()
 	return f is LineEdit or f is TextEdit or f is SpinBox
@@ -2131,7 +2282,12 @@ func _input(event: InputEvent) -> void:
 			get_viewport().set_input_as_handled()
 			return
 		KEY_F8:
-			Playback.stop()
+			# The same start / stop as the global F8 (which, when held,
+			# takes the key before this window ever sees it).
+			if Playback.is_running:
+				Playback.stop()
+			else:
+				_on_play_pressed()
 			get_viewport().set_input_as_handled()
 			return
 		KEY_ESCAPE:
@@ -2209,6 +2365,20 @@ func _option_button_width(btn: OptionButton, sample: String) -> float:
 	return ceilf(text_w + arrow_w + margins + 2.0 * btn.get_theme_constant("h_separation"))
 
 
+## An OptionButton for the editor rows. Expanding, it shares the input
+## column with the others on its row, shrinking (with an ellipsis) rather
+## than pushing the row past the panel; not expanding, it is as wide as
+## its longest item and leaves the rest of the row to the others.
+func _compact_option(expand: bool = true) -> OptionButton:
+	var opt := OptionButton.new()
+	if expand:
+		opt.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		opt.fit_to_longest_item = false
+		opt.clip_text = true
+		opt.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+	return opt
+
+
 func _row(label: String) -> HBoxContainer:
 	var row := HBoxContainer.new()
 	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -2231,6 +2401,7 @@ func _row_toggle(label: String, checked: bool, tip: String, on_toggle: Callable)
 	cb.focus_mode = Control.FOCUS_NONE
 	cb.button_pressed = checked
 	cb.custom_minimum_size = Vector2(120, 0)
+	cb.clip_text = true
 	cb.toggled.connect(on_toggle)
 	row.add_child(cb)
 	return row

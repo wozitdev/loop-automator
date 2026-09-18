@@ -1,14 +1,16 @@
 extends RefCounted
 class_name StopHotkey
-## A system-wide stop key for a running real-backend loop.
+## A system-wide F8 (~F8): the start and stop key of the loop from any
+## window.
 ##
 ## Loop Automator's own F8 / Esc only work while its window has the focus,
-## and a loop that clicks other programs takes the focus away with it. So for
-## as long as a real loop runs, a small helper process holds F8 as a global
-## hotkey (RegisterHotKey) and prints a line for every press; the engine
-## polls that each frame and stops the loop. F8 is reserved system-wide
-## meanwhile (other programs do not see it) and released the moment the loop
-## stops. Windows only; elsewhere `state` is UNAVAILABLE.
+## and a loop that clicks other programs takes the focus away with it. So
+## while ~F8 is on, a small helper process holds F8 as a global hotkey
+## (RegisterHotKey) and prints a line for every press; the engine polls
+## that each frame and stops - or starts - the loop. F8 is reserved
+## system-wide meanwhile (other programs do not see it) and released the
+## moment the helper is stopped. Windows only; elsewhere `state` is
+## UNAVAILABLE.
 
 const PowerShellHostT := preload("res://scripts/powershell_host.gd")
 const SCRIPT_FILE := "stop_hotkey.ps1"

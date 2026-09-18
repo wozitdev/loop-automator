@@ -18,6 +18,7 @@ enum Type {
 	CAPTURE,       ## Save the mouse position, or move back to the saved one
 	STOP,          ## Stop the loop (or end this layer), now or after N passes
 	IMAGE_DETECT,  ## Look for a small screenshot anywhere in a screen rect
+	SCROLL,        ## Move to (x, y) and turn the mouse wheel
 }
 
 ## Biggest template an IMAGE_DETECT keeps, on a side: any screen region, and
@@ -59,6 +60,25 @@ enum CaptureMode {
 	LOAD,  ## Move the mouse back to the remembered position
 }
 
+## CLICK / KEY: how the press goes. TAP is the plain click or keystroke;
+## HOLD keeps it down for `hold_ms` and lets go; DOWN presses and leaves it
+## held for later actions (hold W and click, Shift and drag); UP lets go
+## of it. A stop lets go of everything still held.
+enum PressMode {
+	TAP,
+	HOLD,
+	DOWN,
+	UP,
+}
+
+## SCROLL: which way the wheel turns.
+enum ScrollDir {
+	UP,
+	DOWN,
+	LEFT,
+	RIGHT,
+}
+
 var type: int = Type.MOVE
 var enabled: bool = true
 var comment: String = ""
@@ -80,6 +100,15 @@ var wiggle: bool = false
 ## way typing goes, instead of all at once (see KeyStrokes for what "one
 ## at a time" keeps together).
 var keys_paced: bool = false
+## CLICK / KEY: tap, hold, down or up (see PressMode); HOLD keeps the press
+## down for `hold_ms` (a range, like every number).
+var press_mode: int = PressMode.TAP
+var hold_ms: int = 500
+var hold_ms_max: int = 500
+## SCROLL: the direction and how many notches (a range, like every number).
+var scroll_dir: int = ScrollDir.DOWN
+var notches: int = 3
+var notches_max: int = 3
 ## STOP: what it ends (the loop, or just this layer's pass).
 var stop_scope: int = StopScope.LOOP
 ## STOP: fire on this pass that reaches it (1 = the first). PIXEL_DETECT
@@ -118,6 +147,11 @@ var color: Color = Color(1, 1, 1, 1)
 var tolerance: int = 16
 var tolerance_max: int = 16
 var on_fail: int = OnFail.SKIP_LAYER
+## PIXEL_DETECT / IMAGE_DETECT: `on_fail` fires when the colour or image IS
+## there, not when it is missing — "if found, skip the rest of the layer",
+## "wait till gone". The other way round from the default (see the "If"
+## dropdown), so the same detect covers both halves of a condition.
+var if_found: bool = false
 ## PIXEL_DETECT / IMAGE_DETECT: in Safe mode a colour or image that is not
 ## found changes nothing (no skip, no stop), so a whole loop can be walked
 ## through; Live keeps to `on_fail`.
@@ -187,6 +221,14 @@ func roll_mismatch() -> int:
 	return clampi(roll(mismatch, mismatch_max), 0, MISMATCH_MAX)
 
 
+func roll_hold_ms() -> int:
+	return roll(hold_ms, hold_ms_max)
+
+
+func roll_notches() -> int:
+	return maxi(1, roll(notches, notches_max))
+
+
 func roll_wait_timeout_ms() -> int:
 	return maxi(0, roll(wait_timeout_ms, wait_timeout_ms_max))
 
@@ -249,6 +291,7 @@ static func type_name(t: int) -> String:
 		Type.CAPTURE: return "Capture Mouse"
 		Type.STOP: return "Stop"
 		Type.IMAGE_DETECT: return "Image Detect"
+		Type.SCROLL: return "Scroll"
 	return "Action"
 
 
@@ -260,7 +303,7 @@ static func supports_captures(t: int) -> bool:
 ## True for the action types that sit at a screen position (drawn on the
 ## overlay as a point or rect and joined by the ordered path).
 static func has_position(t: int) -> bool:
-	return t == Type.MOVE or t == Type.CLICK or t == Type.DRAG or is_detect(t)
+	return t == Type.MOVE or t == Type.CLICK or t == Type.DRAG or t == Type.SCROLL or is_detect(t)
 
 
 ## True for the two detects: a screen rect scanned for a colour (PIXEL_DETECT)
@@ -268,6 +311,25 @@ static func has_position(t: int) -> bool:
 ## If-not-found and ~Self handling.
 static func is_detect(t: int) -> bool:
 	return t == Type.PIXEL_DETECT or t == Type.IMAGE_DETECT
+
+
+## The press, in words, for the list and the overlay: "" for a plain tap,
+## else "hold 500 ms" / "down" / "up".
+func press_text() -> String:
+	match press_mode:
+		PressMode.HOLD: return "hold %s ms" % range_text(hold_ms, hold_ms_max)
+		PressMode.DOWN: return "down"
+		PressMode.UP: return "up"
+	return ""
+
+
+## "up" / "down" / "left" / "right".
+static func scroll_dir_name(dir: int) -> String:
+	match dir:
+		ScrollDir.UP: return "up"
+		ScrollDir.LEFT: return "left"
+		ScrollDir.RIGHT: return "right"
+	return "down"
 
 
 static func button_name(b: int) -> String:
@@ -312,31 +374,41 @@ static func new_of_type(t: int) -> Self:
 			a.tolerance = 16
 			a.tolerance_max = 16
 			a.on_fail = OnFail.SKIP_LAYER
+		Type.SCROLL:
+			a.scroll_dir = ScrollDir.DOWN
+			a.notches = 3
+			a.notches_max = 3
 	return a
 
 
 ## Short, human readable line for the action list.
 func describe() -> String:
-	var suffix := " ↩" if captures and supports_captures(type) else ""
+	# Captures goes with a plain click only (see Playback._execute_action).
+	var suffix := " ↩" if captures and supports_captures(type) and (type != Type.CLICK or press_mode == PressMode.TAP) else ""
 	var xs := range_text(x, x_max)
 	var ys := range_text(y, y_max)
 	match type:
 		Type.MOVE:
 			return "Move → (%s, %s)%s" % [xs, ys, suffix]
 		Type.CLICK:
-			return "%s click @ (%s, %s)%s" % [button_name(button), xs, ys, suffix]
+			var press := press_text()
+			return "%s %s @ (%s, %s)%s" % [button_name(button), press if not press.is_empty() else "click", xs, ys, suffix]
 		Type.DRAG:
 			return "%s drag (%s, %s) → (%s, %s)%s" % [button_name(button), xs, ys, range_text(x2, x2_max), range_text(y2, y2_max), suffix]
+		Type.SCROLL:
+			var over := "" if maxi(duration_ms, duration_ms_max) == 0 else " over %s ms" % range_text(duration_ms, duration_ms_max)
+			return "Scroll %s ×%s @ (%s, %s)%s" % [scroll_dir_name(scroll_dir), range_text(notches, notches_max), xs, ys, over]
 		Type.KEY:
-			return "Key: \"%s\"" % keys
+			var press := press_text()
+			return "Key%s: \"%s\"" % [" " + press if not press.is_empty() else "", keys]
 		Type.WAIT:
 			return "Wait %s ms" % range_text(wait_ms, wait_ms_max)
 		Type.PIXEL_DETECT:
 			var ws := range_text(w, w_max)
 			var hs := range_text(h, h_max)
 			if follow_cursor:
-				return "Detect %s in %s×%s @ cursor" % [color.to_html(false), ws, hs]
-			return "Detect %s in [%s, %s, %s×%s]" % [color.to_html(false), xs, ys, ws, hs]
+				return "Detect %s in %s×%s @ cursor%s" % [color.to_html(false), ws, hs, detect_suffix()]
+			return "Detect %s in [%s, %s, %s×%s]%s" % [color.to_html(false), xs, ys, ws, hs, detect_suffix()]
 		Type.CAPTURE:
 			return "Capture: %s mouse position" % ("Save" if capture_mode == CaptureMode.SAVE else "Load")
 		Type.STOP:
@@ -348,9 +420,17 @@ func describe() -> String:
 			var size := image_size()
 			var what := "%d×%d image" % [size.x, size.y] if size.x > 0 else "image (none)"
 			if follow_cursor:
-				return "Find %s in %s×%s @ cursor" % [what, range_text(w, w_max), range_text(h, h_max)]
-			return "Find %s in [%s, %s, %s×%s]" % [what, xs, ys, range_text(w, w_max), range_text(h, h_max)]
+				return "Find %s in %s×%s @ cursor%s" % [what, range_text(w, w_max), range_text(h, h_max), detect_suffix()]
+			return "Find %s in [%s, %s, %s×%s]%s" % [what, xs, ys, range_text(w, w_max), range_text(h, h_max), detect_suffix()]
 	return "Action"
+
+
+## What a detect does with its result, for the list: nothing for the
+## default (not found → skip), a word for the other choices.
+func detect_suffix() -> String:
+	if on_fail == OnFail.WAIT_FOUND:
+		return " · wait till gone" if if_found else " · wait till found"
+	return " · if found" if if_found else ""
 
 
 ## The screen rect a detect (PIXEL_DETECT / IMAGE_DETECT) scans this time: a
@@ -379,7 +459,7 @@ func detect_extent(cursor: Vector2i) -> Rect2i:
 ## detect's extent. `cursor` places a follow-cursor detect.
 func overlay_point(cursor: Vector2i = Vector2i.ZERO) -> Vector2:
 	match type:
-		Type.MOVE, Type.CLICK, Type.DRAG:
+		Type.MOVE, Type.CLICK, Type.DRAG, Type.SCROLL:
 			return Vector2(point_a_extent().get_center())
 		Type.PIXEL_DETECT, Type.IMAGE_DETECT:
 			# The top-left corner: the inside of the rect is kept clear on the
@@ -406,6 +486,7 @@ func to_dict() -> Dictionary:
 		"tolerance": tolerance,
 		"tolerance_max": tolerance_max,
 		"on_fail": on_fail,
+		"if_found": if_found,
 		"safe_continue": safe_continue,
 		"captures": captures,
 		"ghost_cursor": ghost_cursor,
@@ -413,6 +494,12 @@ func to_dict() -> Dictionary:
 		"follow_cursor": follow_cursor,
 		"wiggle": wiggle,
 		"keys_paced": keys_paced,
+		"press_mode": press_mode,
+		"scroll_dir": scroll_dir,
+		"notches": notches,
+		"notches_max": notches_max,
+		"hold_ms": hold_ms,
+		"hold_ms_max": hold_ms_max,
 		"stop_scope": stop_scope,
 		"stop_after": stop_after,
 		"wait_timeout": wait_timeout,
@@ -461,6 +548,17 @@ static func from_dict(d: Dictionary) -> Self:
 	# as SKIP_LAYER (see OnFail). SKIP_LAYER and WAIT_FOUND are kept.
 	if a.on_fail != OnFail.SKIP_LAYER and a.on_fail != OnFail.WAIT_FOUND:
 		a.on_fail = OnFail.SKIP_LAYER
+	a.if_found = bool(d.get("if_found", false))
+	a.scroll_dir = int(d.get("scroll_dir", ScrollDir.DOWN))
+	if a.scroll_dir < ScrollDir.UP or a.scroll_dir > ScrollDir.RIGHT:
+		a.scroll_dir = ScrollDir.DOWN
+	a.notches = maxi(1, int(d.get("notches", 3)))
+	a.notches_max = maxi(1, int(d.get("notches_max", a.notches)))
+	a.press_mode = int(d.get("press_mode", PressMode.TAP))
+	if a.press_mode < PressMode.TAP or a.press_mode > PressMode.UP:
+		a.press_mode = PressMode.TAP
+	a.hold_ms = maxi(0, int(d.get("hold_ms", 500)))
+	a.hold_ms_max = maxi(0, int(d.get("hold_ms_max", a.hold_ms)))
 	a.stop_scope = int(d.get("stop_scope", StopScope.LOOP))
 	# 1-based: the old 0 ("first pass") reads the same as 1 now.
 	a.stop_after = maxi(1, int(d.get("stop_after", 1)))

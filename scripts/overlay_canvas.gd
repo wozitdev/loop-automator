@@ -222,6 +222,12 @@ func _draw_layer(li: int, layer: LoopLayerT, offset: Vector2) -> void:
 			LoopActionT.Type.CLICK:
 				_draw_range_box(action.point_a_extent(), offset, col)
 				_draw_click_guide(local, col, action.button, is_selected)
+				# A hold / down / up says so beside the point.
+				if action.press_mode != LoopActionT.PressMode.TAP:
+					_draw_tag(local + Vector2(26, 4), col, action.press_text().to_upper(), false)
+			LoopActionT.Type.SCROLL:
+				_draw_range_box(action.point_a_extent(), offset, col)
+				_draw_scroll_guide(local, col, action, is_selected)
 			LoopActionT.Type.DRAG:
 				var b_extent := action.point_b_extent()
 				_draw_range_box(action.point_a_extent(), offset, col)
@@ -253,6 +259,8 @@ func _draw_layer(li: int, layer: LoopLayerT, offset: Vector2) -> void:
 			if action.type == LoopActionT.Type.KEY:
 				var ktxt: String = action.keys if action.keys.length() <= 14 else action.keys.substr(0, 13) + "…"
 				text = "KEY  " + ktxt
+				if action.press_mode != LoopActionT.PressMode.TAP:
+					text = "KEY %s  %s" % [action.press_text().to_upper(), ktxt]
 			elif action.type == LoopActionT.Type.WAIT:
 				text = "WAIT  %s ms" % LoopActionT.range_text(action.wait_ms, action.wait_ms_max)
 			elif action.type == LoopActionT.Type.CAPTURE:
@@ -322,6 +330,7 @@ func _draw_detect_guide(action: LoopActionT, screen_rect: Rect2i, offset: Vector
 		LoopActionT.range_text(action.tolerance, action.tolerance_max)]
 	if action.follow_cursor:
 		text += "  · cursor"
+	text += action.detect_suffix().replace(" · ", "  · ")
 	if is_image and action.ignore_colour:
 		text += "  · ignore colour"
 	if is_image and maxi(action.mismatch, action.mismatch_max) > 0:
@@ -392,6 +401,25 @@ func _draw_click_guide(p: Vector2, col: Color, button: int, selected: bool) -> v
 	draw_circle(p, 3.5, col)
 	# Button chip (first letter of Left/Right/Middle), below-right of the point.
 	_draw_badge(p + Vector2(13, 13), LoopActionT.button_name(button).substr(0, 1), col)
+	if selected:
+		_selection_ring(p, 20.0)
+
+
+## SCROLL: a wheel (a ring with a notch) and an arrow the way it turns, with
+## the notch count on a chip.
+func _draw_scroll_guide(p: Vector2, col: Color, action: LoopActionT, selected: bool) -> void:
+	draw_arc(p, 7.0, 0, TAU, 24, col, 2.0)
+	draw_line(p + Vector2(0, -3), p + Vector2(0, 3), col, 2.0)
+	var dir := Vector2.DOWN
+	match action.scroll_dir:
+		LoopActionT.ScrollDir.UP: dir = Vector2.UP
+		LoopActionT.ScrollDir.LEFT: dir = Vector2.LEFT
+		LoopActionT.ScrollDir.RIGHT: dir = Vector2.RIGHT
+	var from := p + dir * 11.0
+	var to := p + dir * 26.0
+	draw_line(from, to, col, 2.0)
+	_draw_arrow_head(from, to, col)
+	_draw_tag(p + Vector2(14, 10), col, "×" + LoopActionT.range_text(action.notches, action.notches_max), false)
 	if selected:
 		_selection_ring(p, 20.0)
 
