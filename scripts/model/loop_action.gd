@@ -395,7 +395,8 @@ func describe() -> String:
 		Type.DRAG:
 			return "%s drag (%s, %s) → (%s, %s)%s" % [button_name(button), xs, ys, range_text(x2, x2_max), range_text(y2, y2_max), suffix]
 		Type.SCROLL:
-			return "Scroll %s ×%s @ (%s, %s)" % [scroll_dir_name(scroll_dir), range_text(notches, notches_max), xs, ys]
+			var over := "" if maxi(duration_ms, duration_ms_max) == 0 else " over %s ms" % range_text(duration_ms, duration_ms_max)
+			return "Scroll %s ×%s @ (%s, %s)%s" % [scroll_dir_name(scroll_dir), range_text(notches, notches_max), xs, ys, over]
 		Type.KEY:
 			var press := press_text()
 			return "Key%s: \"%s\"" % [" " + press if not press.is_empty() else "", keys]

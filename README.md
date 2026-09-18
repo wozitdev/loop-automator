@@ -57,14 +57,16 @@ layer 1, just broken out so you can view each layer's visuals separately.
   hand-like wander on the way; start and end stay exact).
 - **Click** — move to `(x, y)` and click Left / Right / Middle. The press
   dropdown beside the button makes it a **Hold** (the button stays down for
-  **Hold (ms)**, then is let go), a **Down** (pressed and left that way for
+  **Hold** time, then is let go), a **Down** (pressed and left that way for
   the actions after it — drag around a detect, hold a mouse button while a
   key is tapped) or an **Up**. Stopping the loop lets go of anything still
   held. **Captures** goes with a plain click.
 - **Drag** — press at A, move to B over the duration, release.
 - **Scroll** — move to `(x, y)` and turn the mouse wheel Up / Down / Left /
   Right by a number of **Notches** (a range, like every number), one wheel
-  click at a time. The program under the point gets them.
+  click at a time - spread over the **Duration** if it has one (`~Duration`
+  makes the gaps uneven, like a hand's). The program under the point gets
+  them.
 - **Key** — send keystrokes. In Live mode this uses the
   [`SendKeys`](https://learn.microsoft.com/dotnet/api/system.windows.forms.sendkeys)
   format, e.g. `abc`, `{ENTER}`, `^c` (Ctrl+C), `%{F4}` (Alt+F4). You can
@@ -82,7 +84,7 @@ layer 1, just broken out so you can view each layer's visuals separately.
   way a person types, each key held a moment; a combo such as `^c` or
   `+(abc)` stays one press (Ctrl down, `c` pressed and held, Ctrl up).
   The press dropdown beside the box makes the keys a **Hold** (every key in
-  the text goes down and stays down for **Hold (ms)** — hold `w` to walk),
+  the text goes down and stays down for the **Hold** time — hold `w` to walk),
   a **Down** (pressed and left that way for the actions after it — Shift
   down, a drag, Shift up) or an **Up**. `^c` held is Ctrl and `c` down
   together; `(wa)` is `w` and `a`. A key that cannot be held (a name the
@@ -97,7 +99,7 @@ layer 1, just broken out so you can view each layer's visuals separately.
   **Follow Cursor** and the rect is centred on the mouse instead of X / Y — it
   moves with the mouse on the overlay and is scanned wherever the mouse is when
   the action runs. The condition reads as a sentence: **If** *not found*,
-  **Skip rest of layer** — or **Wait till found**, which re-checks the same
+  **Then** **Skip rest of layer** — or **Wait till found**, which re-checks the same
   spot on an interval until the colour appears (tick **~Timeout** to give
   up after a while and skip the rest of the layer instead). Flip *not found*
   to *found* and the same detect works the other way round: skip the rest
@@ -119,8 +121,8 @@ layer 1, just broken out so you can view each layer's visuals separately.
   matches when those change) — tolerance 0 is
   an exact match, higher lets each pixel's channels differ by up to that much
   — so a change of scale, theme or font breaks the match. An image bigger
-  than the rect can never be found; the editor says so under it. **Mismatch
-  (%)** is how much of the image may be off (a share of its pixels, up to
+  than the rect can never be found; the editor says so under it. **Mismatch**
+  is how much of the image may be off (in %) (a share of its pixels, up to
   50 %; 0 = every pixel must match — the more is allowed, the longer a big
   rect takes to scan). Check **~Mismatch** to compare by light and dark
   only, so the image is still found when it is tinted differently (hovered,
@@ -174,7 +176,7 @@ pair expanded.
 
 ### The loop delay
 
-**~Delay ms** in the toolbar is the pause after the loop's last action, before
+**~Delay** in the toolbar is the pause after the loop's last action, before
 it starts over. It is also a checkbox: tick it and the same delay is waited
 after every action, a fresh random value each time when it is a range — a
 quick way to slow a whole loop down without adding a Wait after every step
@@ -232,12 +234,13 @@ default) a small helper holds F8 as a system-wide hotkey the whole time Loop
 Automator is open: press it anywhere and the loop starts in the chosen Mode,
 press it again and the loop stops — so a Live loop can be started from the
 program it is going to drive, without switching back to the builder. Other
-programs don't see F8 meanwhile. Untick ~F8 and F8 is only taken over while
-a **Live** loop runs, as a stop key: the loop clicks other programs and takes
-the keyboard focus with it, so the builder's own hotkeys would not reach it.
-The status line says whether F8 is armed; if another program already owns
-it, the status line tells you and F5 / F8 / Esc still work whenever the
-builder has the focus. Stopping — by F8, Esc, the button or a Stop action —
+programs don't see F8 meanwhile. Untick ~F8 and F8 is left to other programs:
+it then only works while the builder has the focus, like F5 and Esc - note
+that a Live loop clicks other programs and takes the keyboard focus with it,
+so with ~F8 off you stop it by clicking back into the builder first. The
+status line says whether F8 is armed; if another program already owns it,
+the status line tells you and F5 / F8 / Esc still work whenever the builder
+has the focus. Stopping — by F8, Esc, the button or a Stop action —
 lets go of every key and mouse button a Down or Hold left pressed.
 
 ### Loops

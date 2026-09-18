@@ -34,6 +34,11 @@ func click(button: int, pos: Vector2i) -> void:
 	mouse_button(button, true, pos)
 	mouse_button(button, false, pos)
 
+## Lets go of `button` where the cursor is, without moving it: how a stop
+## lets go of a button a Down or Hold left pressed.
+func release_button(_button: int) -> void:
+	pass
+
 func send_keys(_text: String) -> void:
 	pass
 
@@ -54,9 +59,10 @@ func press_keys(_mods: String, _keys: PackedStringArray, _pressed: bool) -> void
 
 
 ## Moves the cursor to `pos` and turns the mouse wheel `notches` clicks in
-## `dir` (a LoopAction.ScrollDir), one wheel event per notch. Blocks for
-## the whole scroll (callers run it off the main thread).
-func scroll(pos: Vector2i, _dir: int, _notches: int) -> void:
+## `dir` (a LoopAction.ScrollDir), one wheel event per notch, spread over
+## `ms` (a moment apart at least; `uneven` varies the gaps like a hand).
+## Blocks for the whole scroll (callers run it off the main thread).
+func scroll(pos: Vector2i, _dir: int, _notches: int, _ms: int = 0, _uneven: bool = false) -> void:
 	move_to(pos)
 
 ## Returns the colour of a single screen pixel, or a transparent colour

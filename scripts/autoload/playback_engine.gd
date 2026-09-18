@@ -66,7 +66,7 @@ var _has_saved_cursor: bool = false
 var _stop_counts: Dictionary = {}
 
 # What a Down (or a Hold under way) has left pressed: mouse buttons by
-# number (where they went down), and key presses as {"mods", "keys"} in the
+# number (with where they went down), and key presses as {"mods", "keys"} in the
 # order they went down. A stop lets go of all of it, so nothing stays stuck
 # down after F8.
 var _held_buttons: Dictionary = {}
@@ -76,12 +76,12 @@ var _held_keys: Array[Dictionary] = []
 # sampling works even while the active playback backend is Preview).
 var _screen_sampler: InputBackendT
 
-## System-wide F8: held while a real loop runs (this window's own F8 / Esc
-## need the focus, which a loop clicking other programs takes away), and,
-## with ~F8 on, the whole time the app is open, so a loop can be started
-## from any window too. Polled in _process.
+## System-wide F8 (~F8): held the whole time the app is open, so a loop
+## can be started and stopped from any window (this window's own F8 / Esc
+## need the focus, which a loop clicking other programs takes away).
+## Polled in _process. With ~F8 off F8 is never taken over.
 var _stop_hotkey := StopHotkeyT.new()
-## ~F8: keep the global F8 while idle as well, as a start key.
+## ~F8: the global F8 is held (on) or left to other programs (off).
 var global_hotkey: bool = false
 
 
@@ -125,20 +125,20 @@ func _process(_dt: float) -> void:
 			else:
 				emit_signal("status", "F8 starts and stops the loop from any window.")
 		StopHotkeyT.State.UNAVAILABLE:
-			emit_signal("status", "%s(global F8 unavailable: %s — F8 / Esc work while this window has the focus)" % [running, _stop_hotkey.reason])
+			emit_signal("status", "%s(global F8 unavailable: %s — F5 / F8 / Esc work while this window has the focus)" % [running, _stop_hotkey.reason])
 
 
-## ~F8: the global F8 stays registered while the app is open, a start key
-## as well as a stop key.
+## ~F8: the global F8 is registered while the app is open (a start and a
+## stop key), or not at all.
 func set_global_hotkey(on: bool) -> void:
 	global_hotkey = on
 	_refresh_hotkey()
 
 
-## Holds the global F8 while it is wanted (a real run, or ~F8) and lets
-## go of it otherwise; a held one is left as it is.
+## Holds the global F8 while ~F8 is on and lets go of it otherwise; a held
+## one is left as it is.
 func _refresh_hotkey() -> void:
-	var wanted := global_hotkey or (is_running and backend != null and backend.is_real())
+	var wanted := global_hotkey
 	if wanted and _stop_hotkey.state == StopHotkeyT.State.OFF:
 		_stop_hotkey.start()
 	elif not wanted and _stop_hotkey.state != StopHotkeyT.State.OFF:
@@ -215,9 +215,7 @@ func start() -> void:
 	_stop_counts.clear()
 	_held_buttons.clear()
 	_held_keys.clear()
-	# Only a real loop can take the focus away; a preview never needs the
-	# global F8 (~F8 may hold it anyway). A key another program owned last
-	# time is tried again for this run.
+	# A global F8 another program owned last time is tried again for this run.
 	if _stop_hotkey.state == StopHotkeyT.State.UNAVAILABLE:
 		_stop_hotkey.stop()
 	_refresh_hotkey()
@@ -230,6 +228,8 @@ func start() -> void:
 	emit_signal("playback_started")
 	if _stop_hotkey.state == StopHotkeyT.State.ARMED:
 		emit_signal("status", "Running… F8 stops the loop from any window.")
+	elif backend.is_real() and not global_hotkey:
+		emit_signal("status", "Running… (~F8 is off: F8 / Esc stop the loop while this window has the focus)")
 	else:
 		emit_signal("status", "Running…")
 	_run_loop(_generation)
@@ -355,13 +355,14 @@ func _execute_action(action: LoopActionT, layer_index: int, action_index: int) -
 		LoopActionT.Type.SCROLL:
 			var p := action.roll_point()
 			var n := action.roll_notches()
+			var ms := action.roll_duration_ms()
 			_set_tracker(p, true, "SCROLL")
-			emit_signal("status", "Scroll %s ×%d." % [LoopActionT.scroll_dir_name(action.scroll_dir), n])
-			# The helper sends the notches a moment apart, so it runs off the
-			# main thread like a paced key press.
+			emit_signal("status", "Scroll %s ×%d over %d ms." % [LoopActionT.scroll_dir_name(action.scroll_dir), n, ms] if ms > 0 else "Scroll %s ×%d." % [LoopActionT.scroll_dir_name(action.scroll_dir), n])
+			# The helper spreads the notches over the duration, so it runs off
+			# the main thread like a paced key press.
 			var b := backend
 			var thread := Thread.new()
-			thread.start(func(): b.scroll(p, action.scroll_dir, n))
+			thread.start(func(): b.scroll(p, action.scroll_dir, n, ms, action.wiggle))
 			while thread.is_alive():
 				await get_tree().process_frame
 			thread.wait_to_finish()
@@ -498,9 +499,10 @@ func _press_button(action: LoopActionT, p: Vector2i) -> void:
 	emit_signal("status", "%s button held %d ms." % [name, ms])
 	var gen := _generation
 	await _sleep_ms(ms)
-	# A stop meanwhile has let go already.
+	# A stop meanwhile has let go already. The release is where the cursor
+	# is now (the user may have moved it), not a jump back to the point.
 	if gen == _generation and _held_buttons.has(action.button):
-		backend.mouse_button(action.button, false, p)
+		backend.release_button(action.button)
 		_held_buttons.erase(action.button)
 
 
@@ -576,7 +578,7 @@ func _release_held() -> void:
 	if backend == null:
 		return
 	for b in _held_buttons.keys():
-		backend.mouse_button(b, false, _held_buttons[b])
+		backend.release_button(b)
 	_held_buttons.clear()
 	while not _held_keys.is_empty():
 		var press: Dictionary = _held_keys.pop_back()

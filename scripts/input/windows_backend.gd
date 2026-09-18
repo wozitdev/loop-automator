@@ -78,6 +78,7 @@ public class Win32In {
   [DllImport(\"winmm.dll\")] public static extern uint timeEndPeriod(uint ms);
   [DllImport(\"user32.dll\")] public static extern bool ShowWindow(IntPtr h,int n);
   [DllImport(\"user32.dll\")] public static extern void keybd_event(byte vk,byte scan,uint flags,IntPtr extra);
+  [DllImport(\"user32.dll\")] public static extern uint MapVirtualKeyW(uint code,uint type);
   [DllImport(\"user32.dll\", CharSet=CharSet.Unicode)] public static extern short VkKeyScanW(char ch);
   [DllImport(\"user32.dll\")] public static extern int GetWindowLongW(IntPtr h,int i);
   [DllImport(\"user32.dll\")] public static extern int SetWindowLongW(IntPtr h,int i,int v);
@@ -117,6 +118,13 @@ public class Win32In {
     inp[0].mi.dwFlags = 0x0001 | 0x8000 | 0x4000 | buttonFlag;  // MOVE | ABSOLUTE | VIRTUALDESK
     SendInput(1,inp,Marshal.SizeOf(typeof(Win32Input)));
   }
+  // A button press or release where the cursor is, with no move at all.
+  public static void ButtonOnly(uint buttonFlag) {
+    Win32Input[] inp = new Win32Input[1];
+    inp[0].type = 0;
+    inp[0].mi.dwFlags = buttonFlag;
+    SendInput(1,inp,Marshal.SizeOf(typeof(Win32Input)));
+  }
   // One wheel notch (delta +-120: up / right positive) where the cursor is.
   public static void Wheel(int delta,bool horizontal) {
     Win32Input[] inp = new Win32Input[1];
@@ -132,6 +140,12 @@ public class Win32In {
 function Down-Flag([string]$btn) { switch ($btn) { '1' { 0x0008 } '2' { 0x0020 } default { 0x0002 } } }
 function Up-Flag([string]$btn) { switch ($btn) { '1' { 0x0010 } '2' { 0x0040 } default { 0x0004 } } }
 function Read-Cursor { $p = New-Object Win32Pt; [Win32In]::GetCursorPos([ref]$p) | Out-Null; return $p }
+# One key event, with the scan code the key has on this layout: a program
+# that reads keys by scan code (a game) ignores an event without one.
+function Key-Event([int]$vk, [int]$flags) {
+  $scan = [Win32In]::MapVirtualKeyW([uint32]$vk, 0) -band 0xFF
+  [Win32In]::keybd_event([byte]$vk, [byte]$scan, [uint32]$flags, [IntPtr]::Zero)
+}
 # The modifier letters of a key command (c / s / a) as virtual keys, in the
 # order they go down.
 function Mod-Vks([string]$mods) {
@@ -348,17 +362,33 @@ switch ($cmd) {
     if (Guarded-Point ([int]$a[1]) ([int]$a[2])) { Write-Output 'skipped'; break }
     [Win32In]::MouseAt([int]$a[1],[int]$a[2],(Up-Flag $a[3]))
   }
+  'release' {
+    # release <button>: lets go of a mouse button where the cursor is,
+    # without moving it - what a stop does with a button a Down or Hold
+    # left pressed, so the cursor never jumps back to where it went down.
+    # Never refused (see Guarded): the press was allowed where it happened.
+    [Win32In]::ButtonOnly((Up-Flag $a[1]))
+  }
   'wheel' {
-    # wheel <x> <y> <up|down|left|right> <n>: the cursor goes to (x, y) and
-    # the wheel turns n notches that way, one event per notch a moment
-    # apart, the way a wheel is read (a program under the cursor gets it).
+    # wheel <x> <y> <up|down|left|right> <n> <ms> <uneven 0|1>: the cursor
+    # goes to (x, y) and the wheel turns n notches that way, one event per
+    # notch, spread over ms (a moment apart at least), the way a wheel is
+    # read; uneven makes the gaps vary like a hand's. A program under the
+    # cursor gets it.
     if (Guarded-Point ([int]$a[1]) ([int]$a[2])) { Write-Output 'skipped'; break }
     [Win32In]::MouseAt([int]$a[1],[int]$a[2],0)
     $n = [Math]::Min([Math]::Max([int]$a[4], 1), 200)
+    $ms = 0; if ($a.Count -gt 5) { $ms = [int]$a[5] }
+    $uneven = ($a.Count -gt 6 -and $a[6] -eq '1')
+    $gap = [Math]::Max(12, [int]($ms / $n))
+    $rnd = New-Object System.Random
     $delta = 120; $horizontal = $false
     switch ($a[3]) { 'down' { $delta = -120 } 'left' { $delta = -120; $horizontal = $true } 'right' { $horizontal = $true } }
     for ($i = 0; $i -lt $n; $i++) {
-      if ($i -gt 0) { [System.Threading.Thread]::Sleep(12) }
+      if ($i -gt 0) {
+        $g = $gap; if ($uneven) { $g = [int]($gap * (0.5 + $rnd.NextDouble())) }
+        [System.Threading.Thread]::Sleep($g)
+      }
       [Win32In]::Wheel($delta, $horizontal)
     }
   }
@@ -447,7 +477,7 @@ switch ($cmd) {
     if ($mods.Contains('s')) { $down += 0x10 }
     if ($mods.Contains('a')) { $down += 0x12 }
     try {
-      foreach ($m in $down) { [Win32In]::keybd_event([byte]$m, 0, 0, [IntPtr]::Zero) }
+      foreach ($m in $down) { Key-Event $m 0 }
       if ($down.Count -gt 0) { [System.Threading.Thread]::Sleep($lead) }
       for ($i = 0; $i -lt $keys.Count; $i++) {
         $k = $keys[$i]; $vk = 0; $shift = $false
@@ -468,17 +498,17 @@ switch ($cmd) {
         }
         # KEYEVENTF_EXTENDEDKEY for the navigation keys, as the keyboard sends them.
         $ext = 0; if (($vk -ge 0x21 -and $vk -le 0x28) -or $vk -eq 0x2D -or $vk -eq 0x2E) { $ext = 1 }
-        if ($shift) { [Win32In]::keybd_event(0x10, 0, 0, [IntPtr]::Zero) }
-        [Win32In]::keybd_event([byte]$vk, 0, $ext, [IntPtr]::Zero)
+        if ($shift) { Key-Event 0x10 0 }
+        Key-Event $vk $ext
         [System.Threading.Thread]::Sleep($hold)
-        [Win32In]::keybd_event([byte]$vk, 0, ($ext -bor 2), [IntPtr]::Zero)
-        if ($shift) { [Win32In]::keybd_event(0x10, 0, 2, [IntPtr]::Zero) }
+        Key-Event $vk ($ext -bor 2)
+        if ($shift) { Key-Event 0x10 2 }
         if ($i -lt $keys.Count - 1) { [System.Threading.Thread]::Sleep($gap) }
       }
       if ($down.Count -gt 0) { [System.Threading.Thread]::Sleep($trail) }
     } finally {
       [array]::Reverse($down)
-      foreach ($m in $down) { [Win32In]::keybd_event([byte]$m, 0, 2, [IntPtr]::Zero) }
+      foreach ($m in $down) { Key-Event $m 2 }
     }
   }
   'kdown' {
@@ -494,7 +524,7 @@ switch ($cmd) {
     $plan = @(); foreach ($k in $keys) { $plan += ,@($k, (Resolve-Key $k $mods)) }
     $pressed = @()
     try {
-      foreach ($m in (Mod-Vks $mods)) { [Win32In]::keybd_event([byte]$m, 0, 0, [IntPtr]::Zero); $pressed += $m }
+      foreach ($m in (Mod-Vks $mods)) { Key-Event $m 0; $pressed += $m }
       foreach ($pk in $plan) {
         $r = $pk[1]
         if ($null -eq $r) {
@@ -503,13 +533,13 @@ switch ($cmd) {
           [System.Windows.Forms.SendKeys]::SendWait($t)
           continue
         }
-        if ($r.shift) { [Win32In]::keybd_event(0x10, 0, 0, [IntPtr]::Zero); $pressed += 0x10 }
-        [Win32In]::keybd_event([byte]$r.vk, 0, $r.ext, [IntPtr]::Zero); $pressed += $r.vk
+        if ($r.shift) { Key-Event 0x10 0; $pressed += 0x10 }
+        Key-Event $r.vk $r.ext; $pressed += $r.vk
       }
       $pressed = @()
     } finally {
       [array]::Reverse($pressed)
-      foreach ($v in $pressed) { [Win32In]::keybd_event([byte]$v, 0, 2, [IntPtr]::Zero) }
+      foreach ($v in $pressed) { Key-Event $v 2 }
     }
   }
   'kup' {
@@ -521,12 +551,12 @@ switch ($cmd) {
     foreach ($k in $keys) {
       $r = Resolve-Key $k $mods
       if ($null -eq $r) { continue }
-      [Win32In]::keybd_event([byte]$r.vk, 0, ($r.ext -bor 2), [IntPtr]::Zero)
-      if ($r.shift) { [Win32In]::keybd_event(0x10, 0, 2, [IntPtr]::Zero) }
+      Key-Event $r.vk ($r.ext -bor 2)
+      if ($r.shift) { Key-Event 0x10 2 }
     }
     $down = @(Mod-Vks $mods)
     [array]::Reverse($down)
-    foreach ($m in $down) { [Win32In]::keybd_event([byte]$m, 0, 2, [IntPtr]::Zero) }
+    foreach ($m in $down) { Key-Event $m 2 }
   }
   'cursor' {
     # Where the real cursor is right now, as "x,y" (Capture actions).
@@ -988,11 +1018,15 @@ func mouse_button(button: int, pressed: bool, pos: Vector2i) -> void:
 	_run_sync(PackedStringArray([verb, str(pos.x), str(pos.y), str(button)]))
 
 
-func scroll(pos: Vector2i, dir: int, notches: int) -> void:
+func release_button(button: int) -> void:
+	_run_sync(PackedStringArray(["release", str(button)]))
+
+
+func scroll(pos: Vector2i, dir: int, notches: int, ms: int = 0, uneven: bool = false) -> void:
 	_last_pos = pos
 	var n := clampi(notches, 1, 200)
-	_run_sync(PackedStringArray(["wheel", str(pos.x), str(pos.y), LoopActionT.scroll_dir_name(dir), str(n)]),
-		n * 12 + SERVER_READ_TIMEOUT_MS)
+	_run_sync(PackedStringArray(["wheel", str(pos.x), str(pos.y), LoopActionT.scroll_dir_name(dir), str(n), str(maxi(0, ms)), "1" if uneven else "0"]),
+		maxi(ms, n * 12) * 2 + SERVER_READ_TIMEOUT_MS)
 
 
 ## Moves the real cursor through `path` over `ms` (the helper's 'path').
