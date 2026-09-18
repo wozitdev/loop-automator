@@ -303,8 +303,7 @@ func _build_toolbar() -> Control:
 	loop_next_btn = _icon_button(UiIconsT.right(), "Next loop", func(): _switch_loop(1))
 	hb.add_child(loop_next_btn)
 
-	save_btn = _tool_button("Save", _on_save)
-	save_btn.tooltip_text = "Write this loop to its file"
+	save_btn = _icon_button(UiIconsT.save(), "Save: write this loop to its file", _on_save)
 	hb.add_child(save_btn)
 	# Share: a .loop file in or out.
 	share_btn = MenuButton.new()
@@ -1862,8 +1861,8 @@ func _refresh_loop_stack_ui() -> void:
 	if loop_next_btn != null:
 		loop_next_btn.disabled = total <= 1
 	if save_btn != null:
-		var pending_mark := " *" if ProjectData.active_loop_is_pending() else ""
-		save_btn.text = "Save%s" % pending_mark
+		# An unsaved change shows as a "*" beside the icon.
+		save_btn.text = "*" if ProjectData.active_loop_is_pending() else ""
 	var loop_name := _shorten_text(ProjectData.active_loop_display_name(), 32)
 	var pending_text := " (unsaved)" if ProjectData.active_loop_is_pending() else ""
 	status_label.text = "Loop %d/%d · %s%s" % [_active_loop_number(), maxi(1, total), loop_name, pending_text]

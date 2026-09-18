@@ -249,8 +249,8 @@ The toolbar keeps a stack of loops. **New** starts one: its first layer gets
 a random name from the Bible (`Moses`, then `Moses 2` if that is taken), and
 **a loop is named after its first layer** — rename or reorder the layers and
 the loop's name in the picker follows. The **Loop** picker and the arrows beside it flip
-between loops, **Save** writes the current one to its file (a `*` marks
-unsaved changes), the two-sheets icon duplicates it as a new, unsaved loop
+between loops, the disk icon saves the current one to its file (a `*` beside
+it marks unsaved changes), the two-sheets icon duplicates it as a new, unsaved loop
 named `<name> copy`, and the trash icon deletes it, file included. A layer has
 the same two icons under the layer list. A loop cannot lose its last layer:
 deleting it just tells you so.

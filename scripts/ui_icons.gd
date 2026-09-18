@@ -20,6 +20,13 @@ const DUPLICATE_SVG := """<svg xmlns="http://www.w3.org/2000/svg" width="14" hei
 <rect x="4.4" y="4.2" width="8.4" height="10.6" rx="1.2" fill="#e6e6e6"/>
 </svg>"""
 
+## Save: a floppy disk - the shutter at the top, the label at the bottom.
+const SAVE_SVG := """<svg xmlns="http://www.w3.org/2000/svg" width="14" height="16" viewBox="0 0 14 16">
+<path d="M1.6 1.6 H10.4 L12.4 3.6 V14.4 H1.6 Z" fill="none" stroke="#e6e6e6" stroke-width="1.4" stroke-linejoin="round"/>
+<rect x="4" y="1.8" width="5.4" height="3.4" rx="0.5" fill="#e6e6e6"/>
+<rect x="3.4" y="8.6" width="7.2" height="5" rx="0.6" fill="#e6e6e6"/>
+</svg>"""
+
 ## Play: a triangle pointing right.
 const PLAY_SVG := """<svg xmlns="http://www.w3.org/2000/svg" width="14" height="16" viewBox="0 0 14 16">
 <path d="M3 2.2 L12 8 L3 13.8 Z" fill="#e6e6e6" stroke="#e6e6e6" stroke-width="1" stroke-linejoin="round"/>
@@ -94,6 +101,10 @@ static func trash() -> Texture2D:
 ## clones the script.)
 static func copy() -> Texture2D:
 	return _icon("copy", DUPLICATE_SVG)
+
+
+static func save() -> Texture2D:
+	return _icon("save", SAVE_SVG)
 
 
 static func play() -> Texture2D:
