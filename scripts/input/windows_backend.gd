@@ -148,8 +148,10 @@ function Mod-Vks([string]$mods) {
 # $null for a character the layout has no plain key for.
 function Resolve-Key([string]$k, [string]$mods) {
   $vk = 0; $shift = $false
-  if ($k.StartsWith('v')) { $vk = [int]$k.Substring(1) }
-  else {
+  if ($k.StartsWith('v')) {
+    $vk = [int]$k.Substring(1)
+    if ($vk -lt 1 -or $vk -gt 254) { throw ('not a key: ' + $k) }
+  } else {
     $scan = [Win32In]::VkKeyScanW([char][int]$k.Substring(1))
     if ($scan -eq -1 -or ((($scan -shr 8) -band 6) -ne 0)) { return $null }
     $vk = $scan -band 0xFF; $shift = ((($scan -shr 8) -band 1) -eq 1) -and -not $mods.Contains('s')
@@ -486,17 +488,28 @@ switch ($cmd) {
     # cannot be held: SendKeys types it once instead.
     if (Guarded ([Win32In]::GetForegroundWindow())) { Write-Output 'skipped'; break }
     $mods = [string]$a[1]; $keys = ([string]$a[2]).Split(',')
-    foreach ($m in (Mod-Vks $mods)) { [Win32In]::keybd_event([byte]$m, 0, 0, [IntPtr]::Zero) }
-    foreach ($k in $keys) {
-      $r = Resolve-Key $k $mods
-      if ($null -eq $r) {
-        Add-Type -AssemblyName System.Windows.Forms
-        $t = [string][char][int]$k.Substring(1); if ('+^%~(){}[]'.Contains($t)) { $t = '{' + $t + '}' }
-        [System.Windows.Forms.SendKeys]::SendWait($t)
-        continue
+    # Every key is resolved before anything goes down, so a bad one is an
+    # error and not a modifier left pressed; and what did go down before a
+    # failure comes back up.
+    $plan = @(); foreach ($k in $keys) { $plan += ,@($k, (Resolve-Key $k $mods)) }
+    $pressed = @()
+    try {
+      foreach ($m in (Mod-Vks $mods)) { [Win32In]::keybd_event([byte]$m, 0, 0, [IntPtr]::Zero); $pressed += $m }
+      foreach ($pk in $plan) {
+        $r = $pk[1]
+        if ($null -eq $r) {
+          Add-Type -AssemblyName System.Windows.Forms
+          $t = [string][char][int]([string]$pk[0]).Substring(1); if ('+^%~(){}[]'.Contains($t)) { $t = '{' + $t + '}' }
+          [System.Windows.Forms.SendKeys]::SendWait($t)
+          continue
+        }
+        if ($r.shift) { [Win32In]::keybd_event(0x10, 0, 0, [IntPtr]::Zero); $pressed += 0x10 }
+        [Win32In]::keybd_event([byte]$r.vk, 0, $r.ext, [IntPtr]::Zero); $pressed += $r.vk
       }
-      if ($r.shift) { [Win32In]::keybd_event(0x10, 0, 0, [IntPtr]::Zero) }
-      [Win32In]::keybd_event([byte]$r.vk, 0, $r.ext, [IntPtr]::Zero)
+      $pressed = @()
+    } finally {
+      [array]::Reverse($pressed)
+      foreach ($v in $pressed) { [Win32In]::keybd_event([byte]$v, 0, 2, [IntPtr]::Zero) }
     }
   }
   'kup' {

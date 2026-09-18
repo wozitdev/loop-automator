@@ -478,7 +478,10 @@ func _press_button(action: LoopActionT, p: Vector2i) -> void:
 	if action.press_mode == LoopActionT.PressMode.UP:
 		_set_tracker(p, true, "UP")
 		backend.mouse_button(action.button, false, p)
-		_held_buttons.erase(action.button)
+		# Refused by ~Self (it would land on this app): still held, so the
+		# stop lets go of it where it went down.
+		if not backend.last_skipped:
+			_held_buttons.erase(action.button)
 		_report_skipped(action)
 		return
 	var hold := action.press_mode == LoopActionT.PressMode.HOLD

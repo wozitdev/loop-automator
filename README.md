@@ -42,7 +42,7 @@ Prefer running from source? Open the folder in Godot 4.7 and press **F5** — se
 |------------|---------|
 | **Project / Loop** | The full automation. Runs forever, top to bottom, then repeats. |
 | **Layer**  | A named group of actions. *All enabled layers run every iteration.* Layers exist purely to organise a loop into flip-through "screens" with their own colour + overlay view. |
-| **Action** | One step: Move, Click, Drag, Key, Wait, Pixel Detect, Image Detect, Capture Mouse, or Stop. |
+| **Action** | One step: Move, Click, Drag, Scroll, Key, Wait, Pixel Detect, Image Detect, Capture Mouse, or Stop. |
 
 So a loop with `Layer 1` and `Layer 2` runs **Layer 1's actions, then Layer 2's
 actions, then repeats** — exactly as described: layer 2 runs in the same loop as
@@ -55,8 +55,16 @@ layer 1, just broken out so you can view each layer's visuals separately.
 - **Move** — move the cursor to `(x, y)`; with a duration the cursor travels
   there over that time instead of jumping (`~Duration` adds a little
   hand-like wander on the way; start and end stay exact).
-- **Click** — move to `(x, y)` and click Left / Right / Middle.
+- **Click** — move to `(x, y)` and click Left / Right / Middle. The press
+  dropdown beside the button makes it a **Hold** (the button stays down for
+  **Hold (ms)**, then is let go), a **Down** (pressed and left that way for
+  the actions after it — drag around a detect, hold a mouse button while a
+  key is tapped) or an **Up**. Stopping the loop lets go of anything still
+  held. **Captures** goes with a plain click.
 - **Drag** — press at A, move to B over the duration, release.
+- **Scroll** — move to `(x, y)` and turn the mouse wheel Up / Down / Left /
+  Right by a number of **Notches** (a range, like every number), one wheel
+  click at a time. The program under the point gets them.
 - **Key** — send keystrokes. In Live mode this uses the
   [`SendKeys`](https://learn.microsoft.com/dotnet/api/system.windows.forms.sendkeys)
   format, e.g. `abc`, `{ENTER}`, `^c` (Ctrl+C), `%{F4}` (Alt+F4). You can
@@ -73,6 +81,13 @@ layer 1, just broken out so you can view each layer's visuals separately.
   **~Keys** box to type the text one key at a time with random pauses, the
   way a person types, each key held a moment; a combo such as `^c` or
   `+(abc)` stays one press (Ctrl down, `c` pressed and held, Ctrl up).
+  The press dropdown beside the box makes the keys a **Hold** (every key in
+  the text goes down and stays down for **Hold (ms)** — hold `w` to walk),
+  a **Down** (pressed and left that way for the actions after it — Shift
+  down, a drag, Shift up) or an **Up**. `^c` held is Ctrl and `c` down
+  together; `(wa)` is `w` and `a`. A key that cannot be held (a name the
+  keyboard has no key for) is typed once instead. Stopping the loop lets go
+  of everything still held.
 - **Wait** — pause N milliseconds.
 - **Pixel Detect** — look for an expected colour (± tolerance) anywhere in a screen rect.
   The whole rect is scanned (the centre first). **Sample & place** centres the
@@ -81,12 +96,17 @@ layer 1, just broken out so you can view each layer's visuals separately.
   picking, a swatch next to the cursor previews the colour under it. Tick
   **Follow Cursor** and the rect is centred on the mouse instead of X / Y — it
   moves with the mouse on the overlay and is scanned wherever the mouse is when
-  the action runs. When the colour is *not* found the loop **skips the rest
-  of the layer**, or set **If not found** to **Wait till found** and it
-  re-checks the same spot on an interval until the colour appears. With **~If
-  not found** checked (the default) a Safe run carries on regardless, so the
-  whole loop can be walked through. With **~Self** on, a detect may match on
-  Loop Automator's own window; off (default) it ignores it. The overlay is
+  the action runs. The condition reads as a sentence: **If** *not found*,
+  **Skip rest of layer** — or **Wait till found**, which re-checks the same
+  spot on an interval until the colour appears (tick **~Timeout** to give
+  up after a while and skip the rest of the layer instead). Flip *not found*
+  to *found* and the same detect works the other way round: skip the rest
+  of the layer while the colour is there, or **Wait till gone**. That is
+  the "else" half of a condition — one layer guarded by *not found*, the
+  next by *found* — and a way to wait for a loading screen or a popup to
+  go away. With the **~If** box checked (the default) a Safe run carries
+  on regardless, so the whole loop can be walked through. With **~Self** on,
+  a detect may match on Loop Automator's own window; off (default) it ignores it. The overlay is
   never read.
 - **Image Detect** — look for a small screenshot anywhere in a screen rect: every
   pixel of it within ± tolerance of the screen, at any offset the image fits.
@@ -105,8 +125,8 @@ layer 1, just broken out so you can view each layer's visuals separately.
   rect takes to scan). Check **~Mismatch** to compare by light and dark
   only, so the image is still found when it is tinted differently (hovered,
   pressed, another theme). Rect,
-  **Follow Cursor**, **If not found**, **Wait till found** and **~Self** work
-  as for Pixel Detect. The scan runs in the helper, so a whole screen is
+  **Follow Cursor**, **If** *not found* / *found*, **Wait till found** /
+  **gone**, **~Timeout** and **~Self** work as for Pixel Detect. The scan runs in the helper, so a whole screen is
   checked in a few tens of milliseconds.
 - **Stop** — stop the loop, or **This layer** to just end the current layer's
   pass, when reached. Set **after N passes** to stop only once it has been
@@ -198,8 +218,8 @@ one). Both are saved with the loop.
 ### Hotkeys
 | Key | Action |
 |-----|--------|
-| F5  | Start / stop the loop |
-| F8 / Esc | Stop the loop |
+| F5 / F8 | Start / stop the loop (F8 from any window, see below) |
+| Esc | Stop the loop |
 | ← / → · PgUp / PgDn · `[` / `]` | Flip to previous / next layer |
 | 1–9 | Jump to layer N |
 | `\` | Toggle Show All layers |
@@ -207,13 +227,18 @@ one). Both are saved with the loop.
 > Navigation keys are ignored while typing in a text field, so editing names,
 > keys, and comments still works normally.
 
-While a loop runs in **Live** mode, **F8 stops it from any
-window** — the loop clicks other programs and takes the keyboard focus with
-it, so the builder's own hotkeys would not reach it. A small helper holds F8
-as a system-wide hotkey for exactly as long as the loop runs (other programs
-don't see F8 meanwhile); the status line says whether it is armed. If another
-program already owns F8, the status line tells you and F8 / Esc still work
-whenever the builder has the focus.
+**F8 works from any window.** With **~F8** (right end of the toolbar, on by
+default) a small helper holds F8 as a system-wide hotkey the whole time Loop
+Automator is open: press it anywhere and the loop starts in the chosen Mode,
+press it again and the loop stops — so a Live loop can be started from the
+program it is going to drive, without switching back to the builder. Other
+programs don't see F8 meanwhile. Untick ~F8 and F8 is only taken over while
+a **Live** loop runs, as a stop key: the loop clicks other programs and takes
+the keyboard focus with it, so the builder's own hotkeys would not reach it.
+The status line says whether F8 is armed; if another program already owns
+it, the status line tells you and F5 / F8 / Esc still work whenever the
+builder has the focus. Stopping — by F8, Esc, the button or a Stop action —
+lets go of every key and mouse button a Down or Hold left pressed.
 
 ### Loops
 
@@ -297,7 +322,7 @@ scripts/
     input_backend.gd       # backend interface
     preview_backend.gd     # safe, no-OS backend
     windows_backend.gd     # experimental real Windows input
-    stop_hotkey.gd         # system-wide F8 while a real loop runs
+    stop_hotkey.gd         # system-wide F8 (a real loop, or ~F8)
 ```
 
 ## Notes / limitations

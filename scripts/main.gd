@@ -540,7 +540,7 @@ func _connect_signals() -> void:
 	# The global F8 while idle (~F8): a start, as the Run button (a pick in
 	# progress keeps the screen; the button's own cooldown after a stop holds).
 	Playback.hotkey_pressed.connect(func():
-		if not _pick_active:
+		if not _pick_active and not _dialog_open():
 			_on_play_pressed())
 	_refresh_overlay_label()
 	_refresh_loop_stack_ui()
@@ -2193,6 +2193,16 @@ func _rename_layer_dialog(index: int) -> void:
 #  Hotkeys
 # ======================================================================
 ## Returns true when the user is typing, so navigation keys don't hijack input.
+## True while one of the builder's dialogs (a confirmation, the import /
+## export file dialog, the image preview) is up: a question should be
+## answered, not run past.
+func _dialog_open() -> bool:
+	for c in get_children():
+		if c is AcceptDialog and (c as Window).visible:
+			return true
+	return _image_preview != null and _image_preview.visible
+
+
 func _is_editing_text() -> bool:
 	var f := get_viewport().gui_get_focus_owner()
 	return f is LineEdit or f is TextEdit or f is SpinBox

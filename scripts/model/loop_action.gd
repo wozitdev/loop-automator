@@ -313,11 +313,6 @@ static func is_detect(t: int) -> bool:
 	return t == Type.PIXEL_DETECT or t == Type.IMAGE_DETECT
 
 
-## True for the actions that have a press mode (see PressMode).
-static func has_press_mode(t: int) -> bool:
-	return t == Type.CLICK or t == Type.KEY
-
-
 ## The press, in words, for the list and the overlay: "" for a plain tap,
 ## else "hold 500 ms" / "down" / "up".
 func press_text() -> String:
