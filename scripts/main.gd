@@ -102,6 +102,12 @@ var _hover_has_last: bool = false
 var _key_capture: KeyCaptureT
 var _key_capture_field: LineEdit
 var _key_capture_action: LoopActionT
+## The Image Detect editor's "bigger than the rect" label, and the action it
+## is about (null when the editor shows something else).
+var _image_fit_warning: Label
+var _image_fit_action: LoopActionT
+## The Image Detect full-size view (see _show_image_preview), made on first use.
+var _image_preview: AcceptDialog
 
 
 func _ready() -> void:
@@ -674,6 +680,8 @@ func _rebuild_editor() -> void:
 	_close_key_capture()
 	for c in editor_box.get_children():
 		c.queue_free()
+	_image_fit_warning = null
+	_image_fit_action = null
 
 	var a := ProjectData.selected_action()
 	_editing_action = a
@@ -720,16 +728,12 @@ func _rebuild_editor() -> void:
 		LoopActionT.Type.PIXEL_DETECT:
 			_add_rect_fields(a)
 			_add_color_field(a)
-			_add_range_field("Tolerance (0-255)", a.tolerance, a.tolerance_max, 0, 255, func(lo: int, hi: int):
-				a.tolerance = lo
-				a.tolerance_max = hi)
+			_add_tolerance_field(a, "How far each colour channel may differ from the expected colour (0 = exact).")
 			_add_on_fail_field(a)
 		LoopActionT.Type.IMAGE_DETECT:
 			_add_rect_fields(a)
 			_add_image_field(a)
-			_add_range_field("Tolerance (0-255)", a.tolerance, a.tolerance_max, 0, 255, func(lo: int, hi: int):
-				a.tolerance = lo
-				a.tolerance_max = hi)
+			_add_image_tolerance_fields(a)
 			_add_on_fail_field(a)
 		LoopActionT.Type.CAPTURE:
 			_add_capture_mode_field(a)
@@ -749,6 +753,8 @@ func _after_edit() -> void:
 		return
 	ProjectData.notify_action_modified()
 	_update_list_item(_editing_layer_index, _editing_action_index)
+	if _image_fit_action != null:
+		_refresh_image_fit_warning(_image_fit_action)
 
 
 ## A range moved so that it is centred on `centre`, keeping its width: what
@@ -812,17 +818,7 @@ func _add_rect_fields(a: LoopActionT) -> void:
 	_add_range_field("Height", a.h, a.h_max, 1, 20000, func(lo: int, hi: int):
 		a.h = lo
 		a.h_max = hi)
-	var row := HBoxContainer.new()
-	var follow := CheckBox.new()
-	follow.text = "Follow Cursor"
-	follow.tooltip_text = "Centre the rect on the mouse and move it with the mouse, instead of using X / Y."
-	follow.button_pressed = a.follow_cursor
-	follow.toggled.connect(func(v):
-		a.follow_cursor = v
-		set_xy_editable.call(not v)
-		_after_edit())
-	row.add_child(follow)
-	row.add_child(_grab_button(UiIconsT.target(), "Pick rect on screen", func():
+	editor_box.add_child(_grab_button(UiIconsT.target(), "Pick detection rect on screen", func():
 		_begin_rect_pick(func(r: Rect2i):
 			# A dragged rect is exact: fixed position and size.
 			a.x = r.position.x
@@ -833,7 +829,16 @@ func _add_rect_fields(a: LoopActionT) -> void:
 			a.w_max = a.w
 			a.h = maxi(1, r.size.y)
 			a.h_max = a.h)))
-	editor_box.add_child(row)
+	var follow := CheckBox.new()
+	follow.text = "Follow Cursor"
+	follow.tooltip_text = "Centre the rect on the mouse and move it with the mouse, instead of using X / Y."
+	follow.focus_mode = Control.FOCUS_NONE
+	follow.button_pressed = a.follow_cursor
+	follow.toggled.connect(func(v):
+		a.follow_cursor = v
+		set_xy_editable.call(not v)
+		_after_edit())
+	editor_box.add_child(follow)
 
 
 func _add_button_field(a: LoopActionT) -> void:
@@ -937,7 +942,7 @@ func _add_color_field(a: LoopActionT) -> void:
 			_sample_color_into(a, g), true))
 	just.tooltip_text = "Sample a colour on screen without moving the rect."
 	buttons.add_child(just)
-	var pick := _grab_button(UiIconsT.target(), "Pick & sample", func():
+	var pick := _grab_button(UiIconsT.target(), "Sample & place", func():
 		_begin_point_pick(func(g: Vector2i):
 			# Centre the (smallest) rect on the picked point, so the pixel
 			# sampled here is inside every rect playback can scan (and is the
@@ -954,9 +959,10 @@ func _add_color_field(a: LoopActionT) -> void:
 
 
 ## IMAGE_DETECT's template: a thumbnail of it (or "No image yet") with its
-## size, and the two capture buttons, which mirror Pixel Detect's sampling:
-## "Just capture" grabs the dragged area as the image and leaves the rect
-## alone; "Capture & place" also makes that area the rect, so the action
+## size and a button that shows it full size, a warning when it cannot fit
+## the rect, and the two sample buttons, which mirror Pixel Detect's:
+## "Just sample" grabs the dragged area as the image and leaves the rect
+## alone; "Sample & place" also makes that area the rect, so the action
 ## checks that the image is still right there.
 func _add_image_field(a: LoopActionT) -> void:
 	var row := _row("Image")
@@ -967,32 +973,84 @@ func _add_image_field(a: LoopActionT) -> void:
 		thumb.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 		thumb.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
 		thumb.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
-		# Shown no bigger than it is, and at most a few rows tall.
+		# Shown no bigger than it is, and at most a few rows tall; a click on
+		# it (or the eye) shows it full size.
 		var size := a.image_size()
 		var fit := minf(1.0, minf(160.0 / size.x, 64.0 / size.y))
 		thumb.custom_minimum_size = Vector2(size) * fit
 		thumb.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+		thumb.tooltip_text = "Click to see the image full size."
+		thumb.gui_input.connect(func(ev: InputEvent):
+			if ev is InputEventMouseButton and ev.pressed and ev.button_index == MOUSE_BUTTON_LEFT:
+				_show_image_preview(a))
 		row.add_child(thumb)
 		var dims := Label.new()
 		dims.text = "%d×%d" % [size.x, size.y]
 		dims.modulate = Color(1, 1, 1, 0.7)
 		row.add_child(dims)
+		row.add_child(_icon_button(UiIconsT.eye(), "See the image full size.", func(): _show_image_preview(a)))
 	else:
 		var none := Label.new()
 		none.text = "No image yet"
 		none.modulate = Color(1, 1, 1, 0.7)
 		row.add_child(none)
 	editor_box.add_child(row)
+	# An image wider or taller than the smallest rect can never be found. The
+	# label follows Width / Height edits (see _refresh_image_fit_warning).
+	_image_fit_warning = Label.new()
+	_image_fit_warning.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_image_fit_warning.modulate = Color(1.0, 0.75, 0.4)
+	editor_box.add_child(_image_fit_warning)
+	_image_fit_action = a
+	_refresh_image_fit_warning(a)
 	var buttons := HBoxContainer.new()
-	var just := _grab_button(UiIconsT.dropper(), "Just capture", func():
+	var just := _grab_button(UiIconsT.dropper(), "Just sample", func():
 		_begin_rect_pick(func(r: Rect2i): _capture_image_into(a, r, false)))
-	just.tooltip_text = "Drag over what to look for; it is captured as the image. The rect stays where it is."
+	just.tooltip_text = "Drag over what to look for; it is sampled as the image. The rect stays where it is."
 	buttons.add_child(just)
-	var place := _grab_button(UiIconsT.target(), "Capture & place", func():
+	var place := _grab_button(UiIconsT.target(), "Sample & place", func():
 		_begin_rect_pick(func(r: Rect2i): _capture_image_into(a, r, true)))
-	place.tooltip_text = "Drag over what to look for; it is captured as the image and the rect is set to that spot."
+	place.tooltip_text = "Drag over what to look for; it is sampled as the image and the rect is set to that spot."
 	buttons.add_child(place)
 	editor_box.add_child(buttons)
+
+
+## Shows or hides the "bigger than the rect" label for `a` (an image wider
+## or taller than the smallest rect the ranges allow can never be found).
+func _refresh_image_fit_warning(a: LoopActionT) -> void:
+	if not is_instance_valid(_image_fit_warning):
+		return
+	var need := a.image_size()
+	var fits := need.x <= mini(a.w, a.w_max) and need.y <= mini(a.h, a.h_max)
+	_image_fit_warning.visible = need.x > 0 and not fits
+	if _image_fit_warning.visible:
+		_image_fit_warning.text = "Bigger than the rect, so it can't be found: make the rect at least %d×%d." % [need.x, need.y]
+
+
+## Opens `a`'s image at full size (pixel for pixel, shrunk only if it would
+## not fit the screen) in its own window. One window is kept and re-used.
+func _show_image_preview(a: LoopActionT) -> void:
+	var tex := a.image_texture()
+	if tex == null:
+		return
+	if _image_preview == null:
+		_image_preview = AcceptDialog.new()
+		_image_preview.ok_button_text = "Close"
+		var view := TextureRect.new()
+		view.name = "View"
+		view.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		view.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		view.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+		_image_preview.add_child(view)
+		add_child(_image_preview)
+	var size := a.image_size()
+	_image_preview.title = "Image %d×%d" % [size.x, size.y]
+	(_image_preview.get_node("View") as TextureRect).texture = tex
+	# Room for the image plus the dialog's own margins and button; never
+	# more than the screen has.
+	var screen := DisplayServer.screen_get_usable_rect(DisplayServer.window_get_current_screen()).size
+	_image_preview.size = Vector2i(mini(size.x + 24, screen.x - 40), mini(size.y + 70, screen.y - 40))
+	_image_preview.popup_centered()
 
 
 ## What a colour or image that is not found does: skip the rest of the layer
@@ -1024,34 +1082,18 @@ func _add_on_fail_field(a: LoopActionT) -> void:
 		_add_range_field("Check every (ms)", a.wait_ms, a.wait_ms_max, 0, 600000, func(lo: int, hi: int):
 			a.wait_ms = lo
 			a.wait_ms_max = hi)
-		# ~Timeout: give up after this long and skip the rest of the layer.
-		var trow := HBoxContainer.new()
-		trow.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		var tcb := CheckBox.new()
-		tcb.text = "~Timeout (ms)"
-		tcb.focus_mode = Control.FOCUS_NONE
-		tcb.button_pressed = a.wait_timeout
-		tcb.custom_minimum_size = Vector2(120, 0)
-		tcb.tooltip_text = "Checked: stop waiting after this long and skip the rest of the layer."
-		var tsp := SpinBox.new()
-		tsp.min_value = 0
-		tsp.max_value = 3600000
-		tsp.step = 1
-		tsp.value = a.wait_timeout_ms
-		tsp.editable = a.wait_timeout
-		tsp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		tsp.get_line_edit().text_changed.connect(func(_t: String): tsp.set_meta(&"typed", true))
-		tsp.value_changed.connect(func(v: float):
-			tsp.set_meta(&"typed", false)
-			a.wait_timeout_ms = int(v)
-			_after_edit())
-		tcb.toggled.connect(func(v: bool):
-			a.wait_timeout = v
-			tsp.editable = v
-			_after_edit())
-		trow.add_child(tcb)
-		trow.add_child(tsp)
-		editor_box.add_child(trow)
+		# ~Timeout: give up after this long (a range, like every number) and
+		# skip the rest of the layer. The range is greyed out while unchecked.
+		var trow := _row_toggle("Timeout (ms)", a.wait_timeout,
+			"Checked: stop waiting after this long and skip the rest of the layer.",
+			func(v: bool):
+				a.wait_timeout = v
+				_after_edit())
+		var tpair := _add_range_field_in(trow, a.wait_timeout_ms, a.wait_timeout_ms_max, 0, 3600000, func(lo: int, hi: int):
+			a.wait_timeout_ms = lo
+			a.wait_timeout_ms_max = hi)
+		tpair.set_editable(a.wait_timeout)
+		(trow.get_child(0) as CheckBox).toggled.connect(func(v: bool): tpair.set_editable(v))
 
 
 func _add_capture_mode_field(a: LoopActionT) -> void:
@@ -1274,6 +1316,36 @@ func _add_range_field_in(row: Container, lo: int, hi: int, min_v: int, max_v: in
 		_after_edit())
 	editor_box.add_child(row)
 	return pair
+
+
+## A detect's tolerance range, with `tip` on the row saying what it allows.
+func _add_tolerance_field(a: LoopActionT, tip: String) -> void:
+	var row := _row("Tolerance (0-255)")
+	row.tooltip_text = tip
+	_add_range_field_in(row, a.tolerance, a.tolerance_max, 0, 255, func(lo: int, hi: int):
+		a.tolerance = lo
+		a.tolerance_max = hi)
+
+
+## An Image Detect's two allowances. "Mismatch (%)": how much of the image
+## may fail to match; its label is the "~Mismatch" checkbox: checked, pixels
+## are compared by light and dark only, so a tinted copy of the image
+## (hovered, pressed, another theme) is still found. Then the per-pixel
+## tolerance.
+func _add_image_tolerance_fields(a: LoopActionT) -> void:
+	var mrow := _row_toggle("Mismatch (%)", a.ignore_colour,
+		"How much of the image may be off, as a share of its pixels (0 = every pixel must match).\nChecked: pixels are compared by light and dark only, so the image is still found when it is tinted differently (hovered, pressed, another theme).",
+		func(v: bool):
+			a.ignore_colour = v
+			_after_edit())
+	_add_range_field_in(mrow, a.mismatch, a.mismatch_max, 0, LoopActionT.MISMATCH_MAX, func(lo: int, hi: int):
+		a.mismatch = lo
+		a.mismatch_max = hi)
+	var trow := _row("Tolerance (0-255)")
+	trow.tooltip_text = "How far each pixel's colour channels may differ from the image (0 = an exact match)."
+	_add_range_field_in(trow, a.tolerance, a.tolerance_max, 0, 255, func(lo: int, hi: int):
+		a.tolerance = lo
+		a.tolerance_max = hi)
 
 
 ## A Move / Drag's duration: how long the travel takes. Its label is a
@@ -1515,7 +1587,7 @@ func _capture_image_into(a: LoopActionT, r: Rect2i, place: bool) -> void:
 		a.h_max = a.h
 		a.follow_cursor = false
 	var size := a.image_size()
-	status_label.text = "Captured a %d×%d image at (%d, %d)." % [size.x, size.y, r.position.x, r.position.y]
+	status_label.text = "Sampled a %d×%d image at (%d, %d)." % [size.x, size.y, r.position.x, r.position.y]
 	_after_edit()
 	_rebuild_editor()
 
@@ -2107,6 +2179,8 @@ func _tool_button(text: String, cb: Callable) -> Button:
 func _grab_button(icon: Texture2D, text: String, cb: Callable) -> Button:
 	var b := Button.new()
 	b.icon = icon
+	# The editor's pick / sample buttons fill the row (two on a row share it).
+	b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	# Text right next to the icon, not centred away from it.
 	b.alignment = HORIZONTAL_ALIGNMENT_LEFT
 	b.text = text

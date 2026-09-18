@@ -20,9 +20,15 @@ enum Type {
 	IMAGE_DETECT,  ## Look for a small screenshot anywhere in a screen rect
 }
 
-## Biggest template an IMAGE_DETECT keeps, on a side: enough for a button or
-## a dialog, and a cap on what a stray whole-screen drag puts in the file.
-const IMAGE_MAX_SIDE := 512
+## Biggest template an IMAGE_DETECT keeps, on a side: any screen region, and
+## only a cap on what goes in the file (a screen-sized PNG is a few hundred
+## KB).
+const IMAGE_MAX_SIDE := 2048
+## The outermost pixels of a template are not compared (see the scans), so
+## a drag that took in a sliver of whatever surrounds the target still
+## matches when that changes. Templates too small to have an inside keep
+## all their pixels.
+const IMAGE_EDGE := 3
 
 ## Mouse button identifiers used across backends.
 const BUTTON_LEFT := 0
@@ -79,10 +85,12 @@ var stop_scope: int = StopScope.LOOP
 ## STOP: fire on this pass that reaches it (1 = the first). PIXEL_DETECT
 ## reuses wait_ms as its "wait till found" re-check gap.
 var stop_after: int = 1
-## PIXEL_DETECT "wait till found": give up after `wait_timeout_ms` and skip
-## the rest of the layer, instead of waiting forever.
+## Detects' "wait till found": give up after `wait_timeout_ms` (a range,
+## rolled once per wait) and skip the rest of the layer, instead of waiting
+## forever.
 var wait_timeout: bool = false
 var wait_timeout_ms: int = 5000
+var wait_timeout_ms_max: int = 5000
 
 # Geometry / parameters (only the relevant ones are used per type). Every
 # numeric setting is a range: `x` .. `x_max` and so on. Each time the action
@@ -118,6 +126,16 @@ var safe_continue: bool = true
 ## stored and sent to the screen reader in); empty until one is captured.
 ## Set it through set_image_png so the decoded copies below stay in step.
 var image_png := PackedByteArray()
+## IMAGE_DETECT: compare each pixel by how light it is, not its colour, so a
+## differently tinted copy (hovered, pressed, another theme) still matches.
+var ignore_colour: bool = false
+## IMAGE_DETECT: how much of the image may fail to match, as a percentage of
+## its pixels (a range, like every number; 0 = every pixel must match). Past
+## MISMATCH_MAX a "match" would mean little, and the scan grows slower the
+## more is allowed (see WindowsBackend.find_image).
+const MISMATCH_MAX := 50
+var mismatch: int = 0
+var mismatch_max: int = 0
 var _image: Image = null
 var _image_texture: ImageTexture = null
 
@@ -163,6 +181,14 @@ func roll_duration_ms() -> int:
 
 func roll_tolerance() -> int:
 	return clampi(roll(tolerance, tolerance_max), 0, 255)
+
+
+func roll_mismatch() -> int:
+	return clampi(roll(mismatch, mismatch_max), 0, MISMATCH_MAX)
+
+
+func roll_wait_timeout_ms() -> int:
+	return maxi(0, roll(wait_timeout_ms, wait_timeout_ms_max))
 
 
 ## Where point A (MOVE / CLICK / DRAG start) can land.
@@ -391,6 +417,10 @@ func to_dict() -> Dictionary:
 		"stop_after": stop_after,
 		"wait_timeout": wait_timeout,
 		"wait_timeout_ms": wait_timeout_ms,
+		"wait_timeout_ms_max": wait_timeout_ms_max,
+		"ignore_colour": ignore_colour,
+		"mismatch": mismatch,
+		"mismatch_max": mismatch_max,
 	}
 	# The template goes in only when there is one: it is the one bulky field.
 	if not image_png.is_empty():
@@ -436,6 +466,10 @@ static func from_dict(d: Dictionary) -> Self:
 	a.stop_after = maxi(1, int(d.get("stop_after", 1)))
 	a.wait_timeout = bool(d.get("wait_timeout", false))
 	a.wait_timeout_ms = maxi(0, int(d.get("wait_timeout_ms", 5000)))
+	a.wait_timeout_ms_max = maxi(0, int(d.get("wait_timeout_ms_max", a.wait_timeout_ms)))
+	a.ignore_colour = bool(d.get("ignore_colour", false))
+	a.mismatch = int(d.get("mismatch", 0))
+	a.mismatch_max = int(d.get("mismatch_max", a.mismatch))
 	a.safe_continue = bool(d.get("safe_continue", true))
 	a.captures = bool(d.get("captures", false))
 	# "lag_compensation" is the pre-release name of the same option.

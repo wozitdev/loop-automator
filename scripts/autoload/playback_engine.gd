@@ -324,11 +324,12 @@ func _execute_action(action: LoopActionT, layer_index: int, action_index: int) -
 			var wait_mode := action.on_fail == LoopActionT.OnFail.WAIT_FOUND \
 					and not (action.safe_continue and not backend.is_real())
 			var wait_started := Time.get_ticks_msec()
+			var wait_limit := action.roll_wait_timeout_ms()
 			while wait_mode and hit.x < 0 and is_running and gen == _generation:
 				# Timed out: give up and skip the rest of the layer. (The
 				# fallback is fixed for now; it could follow a chosen
 				# If-not-found option once there are more of them.)
-				if action.wait_timeout and Time.get_ticks_msec() - wait_started >= action.wait_timeout_ms:
+				if action.wait_timeout and Time.get_ticks_msec() - wait_started >= wait_limit:
 					_last_event = "%s: not found (timed out)." % what
 					emit_signal("status", _last_event)
 					return LoopActionT.OnFail.SKIP_LAYER
@@ -586,11 +587,13 @@ func _load_cursor(label: String) -> void:
 const DETECT_MAX_SAMPLES := 250000
 
 
-## Where the mouse is right now, for a follow-cursor detect. The real
-## backend reads the OS cursor directly (no helper process); the preview
-## backend answers with its virtual cursor.
+## Where the mouse is right now, for a follow-cursor detect: the OS cursor
+## (read directly, no helper process). A Safe run reads the real screen too,
+## so its rect follows the real mouse as well, not the preview's virtual
+## cursor (which sits at the origin until a Move) — only where no screen can
+## be read at all does the virtual cursor stand in.
 func _mouse_pos() -> Vector2i:
-	if backend.is_real():
+	if backend.is_real() or get_screen_sampler() != null:
 		return DisplayServer.mouse_get_position()
 	return backend.get_cursor_pos()
 
@@ -617,7 +620,7 @@ func _detect_once(action: LoopActionT, gen: int) -> Vector2i:
 ## Looks for `action.color` (± a tolerance rolled from the action's range, per
 ## channel) anywhere in `rect` (the rect rolled for this run). Returns the
 ## screen position of the first match, or (-1, -1). The backend checks the
-## rect's centre first — it is where "Pick & sample" read the colour from —
+## rect's centre first — it is where "Sample & place" read the colour from —
 ## then a grid of every step-th pixel. A Safe run reads the real screen too
 ## (a read touches nothing), through the same reader colour picking uses;
 ## only where no screen reader exists at all is the colour taken as found,
@@ -646,7 +649,9 @@ func _find_color(action: LoopActionT, rect: Rect2i) -> Vector2i:
 
 
 ## Looks for `action`'s template image (every pixel ± a tolerance rolled from
-## the action's range) anywhere in `rect`, at every offset it fits. Returns
+## the action's range, on brightness alone with `ignore_colour`, up to a
+## rolled `mismatch` % of its pixels off) anywhere in `rect`, at every offset
+## it fits. Returns
 ## the screen position of its top-left corner at the first match, or
 ## (-1, -1). Reads through the same reader and ~Self guard as _find_color;
 ## with no screen reader at all the image is taken as found (Safe on an OS
@@ -665,14 +670,16 @@ func _find_image(action: LoopActionT, rect: Rect2i) -> Vector2i:
 		return Vector2i(-1, -1)
 	reader.avoid_pid = 0 if feedback else OS.get_process_id()
 	var tolerance := action.roll_tolerance()
-	var result := reader.find_image(rect, action.image_png, tolerance)
+	var mismatch := action.roll_mismatch()
+	var result := reader.find_image(rect, action.image_png, tolerance, action.ignore_colour, mismatch, LoopActionT.IMAGE_EDGE)
 	if result.is_empty():
 		print("Image detect in [%d, %d, %d×%d]: screen read failed (see warning above) -> not found" % [rect.position.x, rect.position.y, rect.size.x, rect.size.y])
 		return Vector2i(-1, -1)
 	var hit: Vector2i = result["hit"]
 	if hit == Vector2i(-1, -1):
-		print("Image detect in [%d, %d, %d×%d]: %d×%d image +-%d not in rect -> not found" % [
-			rect.position.x, rect.position.y, rect.size.x, rect.size.y, size.x, size.y, tolerance])
+		print("Image detect in [%d, %d, %d×%d]: %d×%d image +-%d (%d%% may be off%s) not in rect -> not found" % [
+			rect.position.x, rect.position.y, rect.size.x, rect.size.y, size.x, size.y, tolerance, mismatch,
+			", ignore colour" if action.ignore_colour else ""])
 	return hit
 
 

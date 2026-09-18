@@ -75,7 +75,7 @@ layer 1, just broken out so you can view each layer's visuals separately.
   `+(abc)` stays one press (Ctrl down, `c` pressed and held, Ctrl up).
 - **Wait** — pause N milliseconds.
 - **Pixel Detect** — look for an expected colour (± tolerance) anywhere in a screen rect.
-  The whole rect is scanned (the centre first). **Pick & sample** centres the
+  The whole rect is scanned (the centre first). **Sample & place** centres the
   rect on the point you click and reads its colour; **Just sample** reads the
   colour of the point you click without moving the rect. While either is
   picking, a swatch next to the cursor previews the colour under it. Tick
@@ -90,11 +90,21 @@ layer 1, just broken out so you can view each layer's visuals separately.
   never read.
 - **Image Detect** — look for a small screenshot anywhere in a screen rect: every
   pixel of it within ± tolerance of the screen, at any offset the image fits.
-  **Just capture** grabs the area you drag over as the image and leaves the
-  rect alone; **Capture & place** also makes that area the rect, so the action
-  checks that the image is still right there. An image can be up to 512×512
-  and is stored inside the loop file; it must match pixel for pixel (bar the
-  tolerance), so a change of scale, theme or font breaks the match. Rect,
+  **Just sample** grabs the area you drag over as the image and leaves the
+  rect alone; **Sample & place** also makes that area the rect, so the action
+  checks that the image is still right there. Click the thumbnail (or the
+  eye) to see the image full size. The image is stored inside the loop file
+  and must match pixel for pixel, bar its outermost three pixels, which are
+  never compared (so a drag that took in a sliver of the surroundings still
+  matches when those change) — tolerance 0 is
+  an exact match, higher lets each pixel's channels differ by up to that much
+  — so a change of scale, theme or font breaks the match. An image bigger
+  than the rect can never be found; the editor says so under it. **Mismatch
+  (%)** is how much of the image may be off (a share of its pixels, up to
+  50 %; 0 = every pixel must match — the more is allowed, the longer a big
+  rect takes to scan). Check **~Mismatch** to compare by light and dark
+  only, so the image is still found when it is tinted differently (hovered,
+  pressed, another theme). Rect,
   **Follow Cursor**, **If not found**, **Wait till found** and **~Self** work
   as for Pixel Detect. The scan runs in the helper, so a whole screen is
   checked in a few tens of milliseconds.
@@ -134,7 +144,7 @@ pair expanded.
 - **Pick on screen** keeps a range's *width* and re-centres it on the point
   you click: a 20-pixel jitter stays a 20-pixel jitter around the new spot
   (a fixed point simply moves). A dragged **rect** is exact: fixed position
-  and size. **Pick & sample** fixes the rect's position so the sampled pixel
+  and size. **Sample & place** fixes the rect's position so the sampled pixel
   is inside every size the range allows.
 - The action list and the overlay show ranges as `min–max`; on the overlay a
   point with a range is drawn at the middle of a dashed box covering where
