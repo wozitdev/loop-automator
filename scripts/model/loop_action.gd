@@ -18,6 +18,7 @@ enum Type {
 	CAPTURE,       ## Save the mouse position, or move back to the saved one
 	STOP,          ## Stop the loop (or end this layer), now or after N passes
 	IMAGE_DETECT,  ## Look for a small screenshot anywhere in a screen rect
+	SCROLL,        ## Move to (x, y) and turn the mouse wheel
 }
 
 ## Biggest template an IMAGE_DETECT keeps, on a side: any screen region, and
@@ -70,6 +71,14 @@ enum PressMode {
 	UP,
 }
 
+## SCROLL: which way the wheel turns.
+enum ScrollDir {
+	UP,
+	DOWN,
+	LEFT,
+	RIGHT,
+}
+
 var type: int = Type.MOVE
 var enabled: bool = true
 var comment: String = ""
@@ -96,6 +105,10 @@ var keys_paced: bool = false
 var press_mode: int = PressMode.TAP
 var hold_ms: int = 500
 var hold_ms_max: int = 500
+## SCROLL: the direction and how many notches (a range, like every number).
+var scroll_dir: int = ScrollDir.DOWN
+var notches: int = 3
+var notches_max: int = 3
 ## STOP: what it ends (the loop, or just this layer's pass).
 var stop_scope: int = StopScope.LOOP
 ## STOP: fire on this pass that reaches it (1 = the first). PIXEL_DETECT
@@ -212,6 +225,10 @@ func roll_hold_ms() -> int:
 	return roll(hold_ms, hold_ms_max)
 
 
+func roll_notches() -> int:
+	return maxi(1, roll(notches, notches_max))
+
+
 func roll_wait_timeout_ms() -> int:
 	return maxi(0, roll(wait_timeout_ms, wait_timeout_ms_max))
 
@@ -274,6 +291,7 @@ static func type_name(t: int) -> String:
 		Type.CAPTURE: return "Capture Mouse"
 		Type.STOP: return "Stop"
 		Type.IMAGE_DETECT: return "Image Detect"
+		Type.SCROLL: return "Scroll"
 	return "Action"
 
 
@@ -285,7 +303,7 @@ static func supports_captures(t: int) -> bool:
 ## True for the action types that sit at a screen position (drawn on the
 ## overlay as a point or rect and joined by the ordered path).
 static func has_position(t: int) -> bool:
-	return t == Type.MOVE or t == Type.CLICK or t == Type.DRAG or is_detect(t)
+	return t == Type.MOVE or t == Type.CLICK or t == Type.DRAG or t == Type.SCROLL or is_detect(t)
 
 
 ## True for the two detects: a screen rect scanned for a colour (PIXEL_DETECT)
@@ -308,6 +326,15 @@ func press_text() -> String:
 		PressMode.DOWN: return "down"
 		PressMode.UP: return "up"
 	return ""
+
+
+## "up" / "down" / "left" / "right".
+static func scroll_dir_name(dir: int) -> String:
+	match dir:
+		ScrollDir.UP: return "up"
+		ScrollDir.LEFT: return "left"
+		ScrollDir.RIGHT: return "right"
+	return "down"
 
 
 static func button_name(b: int) -> String:
@@ -352,6 +379,10 @@ static func new_of_type(t: int) -> Self:
 			a.tolerance = 16
 			a.tolerance_max = 16
 			a.on_fail = OnFail.SKIP_LAYER
+		Type.SCROLL:
+			a.scroll_dir = ScrollDir.DOWN
+			a.notches = 3
+			a.notches_max = 3
 	return a
 
 
@@ -368,6 +399,8 @@ func describe() -> String:
 			return "%s %s @ (%s, %s)%s" % [button_name(button), press if not press.is_empty() else "click", xs, ys, suffix]
 		Type.DRAG:
 			return "%s drag (%s, %s) → (%s, %s)%s" % [button_name(button), xs, ys, range_text(x2, x2_max), range_text(y2, y2_max), suffix]
+		Type.SCROLL:
+			return "Scroll %s ×%s @ (%s, %s)" % [scroll_dir_name(scroll_dir), range_text(notches, notches_max), xs, ys]
 		Type.KEY:
 			var press := press_text()
 			return "Key%s: \"%s\"" % [" " + press if not press.is_empty() else "", keys]
@@ -429,7 +462,7 @@ func detect_extent(cursor: Vector2i) -> Rect2i:
 ## detect's extent. `cursor` places a follow-cursor detect.
 func overlay_point(cursor: Vector2i = Vector2i.ZERO) -> Vector2:
 	match type:
-		Type.MOVE, Type.CLICK, Type.DRAG:
+		Type.MOVE, Type.CLICK, Type.DRAG, Type.SCROLL:
 			return Vector2(point_a_extent().get_center())
 		Type.PIXEL_DETECT, Type.IMAGE_DETECT:
 			# The top-left corner: the inside of the rect is kept clear on the
@@ -465,6 +498,9 @@ func to_dict() -> Dictionary:
 		"wiggle": wiggle,
 		"keys_paced": keys_paced,
 		"press_mode": press_mode,
+		"scroll_dir": scroll_dir,
+		"notches": notches,
+		"notches_max": notches_max,
 		"hold_ms": hold_ms,
 		"hold_ms_max": hold_ms_max,
 		"stop_scope": stop_scope,
@@ -516,6 +552,11 @@ static func from_dict(d: Dictionary) -> Self:
 	if a.on_fail != OnFail.SKIP_LAYER and a.on_fail != OnFail.WAIT_FOUND:
 		a.on_fail = OnFail.SKIP_LAYER
 	a.if_found = bool(d.get("if_found", false))
+	a.scroll_dir = int(d.get("scroll_dir", ScrollDir.DOWN))
+	if a.scroll_dir < ScrollDir.UP or a.scroll_dir > ScrollDir.RIGHT:
+		a.scroll_dir = ScrollDir.DOWN
+	a.notches = maxi(1, int(d.get("notches", 3)))
+	a.notches_max = maxi(1, int(d.get("notches_max", a.notches)))
 	a.press_mode = int(d.get("press_mode", PressMode.TAP))
 	if a.press_mode < PressMode.TAP or a.press_mode > PressMode.UP:
 		a.press_mode = PressMode.TAP

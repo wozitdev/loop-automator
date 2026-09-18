@@ -9,6 +9,7 @@ class_name WindowsBackend
 
 const PowerShellHostT := preload("res://scripts/powershell_host.gd")
 const MousePathT := preload("res://scripts/model/mouse_path.gd")
+const LoopActionT := preload("res://scripts/model/loop_action.gd")
 const HELPER_FILE := "input_helper.ps1"
 
 ## Absolute path of the helper script, "" when it could not be written (no
@@ -114,6 +115,14 @@ public class Win32In {
     inp[0].mi.dx = (int)Math.Ceiling((x - vx) * 65536.0 / vw);
     inp[0].mi.dy = (int)Math.Ceiling((y - vy) * 65536.0 / vh);
     inp[0].mi.dwFlags = 0x0001 | 0x8000 | 0x4000 | buttonFlag;  // MOVE | ABSOLUTE | VIRTUALDESK
+    SendInput(1,inp,Marshal.SizeOf(typeof(Win32Input)));
+  }
+  // One wheel notch (delta +-120: up / right positive) where the cursor is.
+  public static void Wheel(int delta,bool horizontal) {
+    Win32Input[] inp = new Win32Input[1];
+    inp[0].type = 0;
+    inp[0].mi.mouseData = unchecked((uint)delta);
+    inp[0].mi.dwFlags = horizontal ? 0x01000u : 0x0800u;  // HWHEEL | WHEEL
     SendInput(1,inp,Marshal.SizeOf(typeof(Win32Input)));
   }
 }
@@ -336,6 +345,20 @@ switch ($cmd) {
   'up' {
     if (Guarded-Point ([int]$a[1]) ([int]$a[2])) { Write-Output 'skipped'; break }
     [Win32In]::MouseAt([int]$a[1],[int]$a[2],(Up-Flag $a[3]))
+  }
+  'wheel' {
+    # wheel <x> <y> <up|down|left|right> <n>: the cursor goes to (x, y) and
+    # the wheel turns n notches that way, one event per notch a moment
+    # apart, the way a wheel is read (a program under the cursor gets it).
+    if (Guarded-Point ([int]$a[1]) ([int]$a[2])) { Write-Output 'skipped'; break }
+    [Win32In]::MouseAt([int]$a[1],[int]$a[2],0)
+    $n = [Math]::Min([Math]::Max([int]$a[4], 1), 200)
+    $delta = 120; $horizontal = $false
+    switch ($a[3]) { 'down' { $delta = -120 } 'left' { $delta = -120; $horizontal = $true } 'right' { $horizontal = $true } }
+    for ($i = 0; $i -lt $n; $i++) {
+      if ($i -gt 0) { [System.Threading.Thread]::Sleep(12) }
+      [Win32In]::Wheel($delta, $horizontal)
+    }
   }
   'cap' {
     # cap <move|click|drag> <ghost 0|1> <button> <x> <y> <x2> <y2> <ms> [path]
@@ -950,6 +973,13 @@ func mouse_button(button: int, pressed: bool, pos: Vector2i) -> void:
 	_last_pos = pos
 	var verb := "down" if pressed else "up"
 	_run_sync(PackedStringArray([verb, str(pos.x), str(pos.y), str(button)]))
+
+
+func scroll(pos: Vector2i, dir: int, notches: int) -> void:
+	_last_pos = pos
+	var n := clampi(notches, 1, 200)
+	_run_sync(PackedStringArray(["wheel", str(pos.x), str(pos.y), LoopActionT.scroll_dir_name(dir), str(n)]),
+		n * 12 + SERVER_READ_TIMEOUT_MS)
 
 
 ## Moves the real cursor through `path` over `ms` (the helper's 'path').

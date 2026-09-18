@@ -465,7 +465,7 @@ func _build_action_panel() -> Control:
 	add_btn.flat = false
 	var pm := add_btn.get_popup()
 	for t in [LoopActionT.Type.MOVE, LoopActionT.Type.CLICK, LoopActionT.Type.DRAG,
-			LoopActionT.Type.KEY, LoopActionT.Type.WAIT, LoopActionT.Type.PIXEL_DETECT,
+			LoopActionT.Type.SCROLL, LoopActionT.Type.KEY, LoopActionT.Type.WAIT, LoopActionT.Type.PIXEL_DETECT,
 			LoopActionT.Type.IMAGE_DETECT, LoopActionT.Type.CAPTURE, LoopActionT.Type.STOP]:
 		pm.add_item(LoopActionT.type_name(t), t)
 	pm.id_pressed.connect(func(id): ProjectData.add_action(id))
@@ -722,6 +722,9 @@ func _rebuild_editor() -> void:
 			_add_button_field(a)
 			_add_duration_field(a)
 			_add_captures_field(a)
+		LoopActionT.Type.SCROLL:
+			_add_point_fields(a, false)
+			_add_scroll_fields(a)
 		LoopActionT.Type.KEY:
 			_add_keys_field(a)
 		LoopActionT.Type.WAIT:
@@ -876,6 +879,27 @@ func _press_mode_option(a: LoopActionT, tap: String) -> OptionButton:
 		_after_edit()
 		_rebuild_editor.call_deferred())
 	return opt
+
+
+## A Scroll's direction and how many notches of the wheel.
+func _add_scroll_fields(a: LoopActionT) -> void:
+	var row := _row("Scroll")
+	var opt := OptionButton.new()
+	opt.add_item("Up", LoopActionT.ScrollDir.UP)
+	opt.add_item("Down", LoopActionT.ScrollDir.DOWN)
+	opt.add_item("Left", LoopActionT.ScrollDir.LEFT)
+	opt.add_item("Right", LoopActionT.ScrollDir.RIGHT)
+	opt.select(opt.get_item_index(a.scroll_dir))
+	opt.item_selected.connect(func(i):
+		a.scroll_dir = opt.get_item_id(i)
+		_after_edit())
+	row.add_child(opt)
+	editor_box.add_child(row)
+	var nrow := _row("Notches")
+	nrow.tooltip_text = "How many clicks of the wheel (the program under the point gets them)."
+	_add_range_field_in(nrow, a.notches, a.notches_max, 1, 200, func(lo: int, hi: int):
+		a.notches = lo
+		a.notches_max = hi)
 
 
 ## A Hold's time, when the press is set to Hold.

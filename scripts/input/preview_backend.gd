@@ -21,6 +21,9 @@ func mouse_button(_button: int, _pressed: bool, pos: Vector2i) -> void:
 func send_keys(_text: String) -> void:
 	pass
 
+func scroll(pos: Vector2i, _dir: int, _notches: int) -> void:
+	virtual_cursor = pos
+
 func get_pixel(pos: Vector2i) -> Color:
 	# Cannot read foreign windows safely; sample Godot's own viewport if the
 	# point happens to be inside this window, otherwise return transparent.

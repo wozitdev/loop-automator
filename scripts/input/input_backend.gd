@@ -52,6 +52,13 @@ func hold_keys(_mods: String, _keys: PackedStringArray, _lead: int, _hold: int, 
 func press_keys(_mods: String, _keys: PackedStringArray, _pressed: bool) -> void:
 	pass
 
+
+## Moves the cursor to `pos` and turns the mouse wheel `notches` clicks in
+## `dir` (a LoopAction.ScrollDir), one wheel event per notch. Blocks for
+## the whole scroll (callers run it off the main thread).
+func scroll(pos: Vector2i, _dir: int, _notches: int) -> void:
+	move_to(pos)
+
 ## Returns the colour of a single screen pixel, or a transparent colour
 ## if the backend cannot read the screen.
 func get_pixel(_pos: Vector2i) -> Color:
