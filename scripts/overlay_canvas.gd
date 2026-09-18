@@ -322,6 +322,7 @@ func _draw_detect_guide(action: LoopActionT, screen_rect: Rect2i, offset: Vector
 		LoopActionT.range_text(action.tolerance, action.tolerance_max)]
 	if action.follow_cursor:
 		text += "  · cursor"
+	text += action.detect_suffix().replace(" · ", "  · ")
 	if is_image and action.ignore_colour:
 		text += "  · ignore colour"
 	if is_image and maxi(action.mismatch, action.mismatch_max) > 0:

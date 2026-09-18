@@ -118,6 +118,11 @@ var color: Color = Color(1, 1, 1, 1)
 var tolerance: int = 16
 var tolerance_max: int = 16
 var on_fail: int = OnFail.SKIP_LAYER
+## PIXEL_DETECT / IMAGE_DETECT: `on_fail` fires when the colour or image IS
+## there, not when it is missing — "if found, skip the rest of the layer",
+## "wait till gone". The other way round from the default (see the "If"
+## dropdown), so the same detect covers both halves of a condition.
+var if_found: bool = false
 ## PIXEL_DETECT / IMAGE_DETECT: in Safe mode a colour or image that is not
 ## found changes nothing (no skip, no stop), so a whole loop can be walked
 ## through; Live keeps to `on_fail`.
@@ -335,8 +340,8 @@ func describe() -> String:
 			var ws := range_text(w, w_max)
 			var hs := range_text(h, h_max)
 			if follow_cursor:
-				return "Detect %s in %s×%s @ cursor" % [color.to_html(false), ws, hs]
-			return "Detect %s in [%s, %s, %s×%s]" % [color.to_html(false), xs, ys, ws, hs]
+				return "Detect %s in %s×%s @ cursor%s" % [color.to_html(false), ws, hs, detect_suffix()]
+			return "Detect %s in [%s, %s, %s×%s]%s" % [color.to_html(false), xs, ys, ws, hs, detect_suffix()]
 		Type.CAPTURE:
 			return "Capture: %s mouse position" % ("Save" if capture_mode == CaptureMode.SAVE else "Load")
 		Type.STOP:
@@ -348,9 +353,17 @@ func describe() -> String:
 			var size := image_size()
 			var what := "%d×%d image" % [size.x, size.y] if size.x > 0 else "image (none)"
 			if follow_cursor:
-				return "Find %s in %s×%s @ cursor" % [what, range_text(w, w_max), range_text(h, h_max)]
-			return "Find %s in [%s, %s, %s×%s]" % [what, xs, ys, range_text(w, w_max), range_text(h, h_max)]
+				return "Find %s in %s×%s @ cursor%s" % [what, range_text(w, w_max), range_text(h, h_max), detect_suffix()]
+			return "Find %s in [%s, %s, %s×%s]%s" % [what, xs, ys, range_text(w, w_max), range_text(h, h_max), detect_suffix()]
 	return "Action"
+
+
+## What a detect does with its result, for the list: nothing for the
+## default (not found → skip), a word for the other choices.
+func detect_suffix() -> String:
+	if on_fail == OnFail.WAIT_FOUND:
+		return " · wait till gone" if if_found else " · wait till found"
+	return " · if found" if if_found else ""
 
 
 ## The screen rect a detect (PIXEL_DETECT / IMAGE_DETECT) scans this time: a
@@ -406,6 +419,7 @@ func to_dict() -> Dictionary:
 		"tolerance": tolerance,
 		"tolerance_max": tolerance_max,
 		"on_fail": on_fail,
+		"if_found": if_found,
 		"safe_continue": safe_continue,
 		"captures": captures,
 		"ghost_cursor": ghost_cursor,
@@ -461,6 +475,7 @@ static func from_dict(d: Dictionary) -> Self:
 	# as SKIP_LAYER (see OnFail). SKIP_LAYER and WAIT_FOUND are kept.
 	if a.on_fail != OnFail.SKIP_LAYER and a.on_fail != OnFail.WAIT_FOUND:
 		a.on_fail = OnFail.SKIP_LAYER
+	a.if_found = bool(d.get("if_found", false))
 	a.stop_scope = int(d.get("stop_scope", StopScope.LOOP))
 	# 1-based: the old 0 ("first pass") reads the same as 1 now.
 	a.stop_after = maxi(1, int(d.get("stop_after", 1)))

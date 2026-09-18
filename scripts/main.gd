@@ -1053,32 +1053,43 @@ func _show_image_preview(a: LoopActionT) -> void:
 	_image_preview.popup_centered()
 
 
-## What a colour or image that is not found does: skip the rest of the layer
-## or wait for it. The label is the "~If not found" checkbox: checked (the
-## default), a Safe run carries on regardless, so the whole loop can be
-## walked through; Live keeps to the choice.
+## A detect's condition, read as a sentence: "~If [not found / found]
+## [Skip rest of layer / Wait till found (gone)]". The "~If" checkbox is
+## the Safe walk-through.
 func _add_on_fail_field(a: LoopActionT) -> void:
 	var target := "image" if a.type == LoopActionT.Type.IMAGE_DETECT else "colour"
-	var row := _row_toggle("If not found", a.safe_continue,
-		"What happens when the %s is not there.\nChecked: in Safe mode nothing is skipped or stopped, so you can walk through the whole loop; Live keeps to the choice." % target,
+	var row := _row_toggle("If", a.safe_continue,
+		"What happens when the %s is not there — or, with \"found\", when it is.\nChecked: in Safe mode nothing is skipped or waited for, so you can walk through the whole loop; Live keeps to the choice." % target,
 		func(v: bool):
 			a.safe_continue = v
 			_after_edit())
+	# "not found" is the usual guard; "found" turns the same detect into its
+	# opposite (skip while the colour is there, wait till it goes).
+	var when := OptionButton.new()
+	when.add_item("not found", 0)
+	when.add_item("found", 1)
+	when.select(1 if a.if_found else 0)
+	row.add_child(when)
 	# Stopping the loop is the Stop action's job now, not a Pixel Detect's.
 	var opt := OptionButton.new()
 	opt.add_item("Skip rest of layer", LoopActionT.OnFail.SKIP_LAYER)
-	opt.add_item("Wait till found", LoopActionT.OnFail.WAIT_FOUND)
+	opt.add_item("Wait till gone" if a.if_found else "Wait till found", LoopActionT.OnFail.WAIT_FOUND)
 	opt.select(maxi(0, opt.get_item_index(a.on_fail)))
 	opt.item_selected.connect(func(i):
 		a.on_fail = opt.get_item_id(i)
 		_after_edit()
 		# Show or hide the re-check interval for "Wait till found".
 		_rebuild_editor.call_deferred())
+	when.item_selected.connect(func(i):
+		a.if_found = i == 1
+		opt.set_item_text(opt.get_item_index(LoopActionT.OnFail.WAIT_FOUND), "Wait till gone" if a.if_found else "Wait till found")
+		_after_edit())
 	row.add_child(opt)
 	editor_box.add_child(row)
 	if a.on_fail == LoopActionT.OnFail.WAIT_FOUND:
-		# "Wait till found" re-checks the same spot on this interval until the
-		# colour appears (F8 / Esc / a Stop action still ends the loop).
+		# "Wait till found / gone" re-checks the same spot on this interval
+		# until the colour appears / goes (F8 / Esc / a Stop action still
+		# ends the loop).
 		_add_range_field("Check every (ms)", a.wait_ms, a.wait_ms_max, 0, 600000, func(lo: int, hi: int):
 			a.wait_ms = lo
 			a.wait_ms_max = hi)

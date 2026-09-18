@@ -318,28 +318,33 @@ func _execute_action(action: LoopActionT, layer_index: int, action_index: int) -
 			var what := "Image detect" if is_image else "Pixel detect"
 			var target := "image" if is_image else "colour"
 			var hit := await _detect_once(action, gen)
-			# "Wait till found": re-check the same spot until the colour or
-			# image appears (or the loop is stopped). A Safe walk-through
-			# does not wait — safe_continue carries it on regardless.
+			# The choice fires when the colour or image is missing — or, with
+			# "If found", when it is there. "Wait" re-checks the same spot
+			# until that is no longer so (till found / till gone), or the
+			# loop is stopped. A Safe walk-through does not wait —
+			# safe_continue carries it on regardless.
+			var fires := (hit.x >= 0) == action.if_found
 			var wait_mode := action.on_fail == LoopActionT.OnFail.WAIT_FOUND \
 					and not (action.safe_continue and not backend.is_real())
+			var waiting_for := ("the %s to go" % target) if action.if_found else ("the %s" % target)
 			var wait_started := Time.get_ticks_msec()
 			var wait_limit := action.roll_wait_timeout_ms()
-			while wait_mode and hit.x < 0 and is_running and gen == _generation:
+			while wait_mode and fires and is_running and gen == _generation:
 				# Timed out: give up and skip the rest of the layer. (The
 				# fallback is fixed for now; it could follow a chosen
 				# If-not-found option once there are more of them.)
 				if action.wait_timeout and Time.get_ticks_msec() - wait_started >= wait_limit:
-					_last_event = "%s: not found (timed out)." % what
+					_last_event = "%s: still %s (timed out)." % [what, "there" if action.if_found else "not found"]
 					emit_signal("status", _last_event)
 					return LoopActionT.OnFail.SKIP_LAYER
-				_last_event = "%s: waiting for the %s…" % [what, target]
+				_last_event = "%s: waiting for %s…" % [what, waiting_for]
 				emit_signal("status", _last_event)
 				_set_tracker(tracker_pos, tracker_visible, "WAIT DETECT")
 				await _sleep_ms(action.roll_wait_ms())
 				if not is_running or gen != _generation:
 					break
 				hit = await _detect_once(action, gen)
+				fires = (hit.x >= 0) == action.if_found
 			if not is_running or gen != _generation:
 				return LoopActionT.OnFail.CONTINUE
 			var found := hit.x >= 0
@@ -347,14 +352,16 @@ func _execute_action(action: LoopActionT, layer_index: int, action_index: int) -
 				# The tracker marks an image at its middle (hit is its corner).
 				_set_tracker(hit + action.image_size() / 2 if is_image else hit, true, "DETECT")
 				_last_event = "%s: found at (%d, %d)." % [what, hit.x, hit.y]
-				emit_signal("status", _last_event)
 			else:
-				# ~If not found: a Safe run walks on regardless.
-				var walk_on := action.safe_continue and not backend.is_real()
-				_last_event = "%s: not found (Safe: carrying on)." % what if walk_on else "%s: not found." % what
-				emit_signal("status", _last_event)
-				if not walk_on:
+				_last_event = "%s: not found." % what
+			if fires:
+				# ~If: a Safe run walks on regardless.
+				if action.safe_continue and not backend.is_real():
+					_last_event = _last_event.trim_suffix(".") + " (Safe: carrying on)."
+				else:
+					emit_signal("status", _last_event)
 					return action.on_fail
+			emit_signal("status", _last_event)
 		LoopActionT.Type.STOP:
 			_set_tracker(tracker_pos, tracker_visible, "STOP")
 			var count := int(_stop_counts.get(action, 0)) + 1
