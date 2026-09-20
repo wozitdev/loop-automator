@@ -75,6 +75,10 @@ var _held_keys: Array[Dictionary] = []
 # Lazily-created real backend used purely for reading screen pixels (so colour
 # sampling works even while the active playback backend is Preview).
 var _screen_sampler: InputBackendT
+# Backends let go of while their helper was still starting (see
+# InputBackend.shutdown): each is asked again at the next switch, run or
+# quit until it has settled, since its own thread keeps it alive till then.
+var _retired: Array = []
 
 ## System-wide F8 (~F8): held the whole time the app is open, so a loop
 ## can be started and stopped from any window (this window's own F8 / Esc
@@ -104,6 +108,13 @@ func _exit_tree() -> void:
 	# Closing the app mid-run: nothing stays pressed, F8 is given back.
 	_release_held()
 	_stop_hotkey.stop()
+	# The backends end their helpers while the scripts are still loaded: a
+	# warm-up thread still running backend code at teardown is a crash.
+	if backend != null:
+		backend.shutdown(true)
+	if _screen_sampler != null:
+		_screen_sampler.shutdown(true)
+	_sweep_retired(true)
 
 
 func _process(_dt: float) -> void:
@@ -161,12 +172,33 @@ func get_screen_sampler() -> InputBackendT:
 	return null
 
 
+## Shuts `b` down; one that could not finish at once (its helper still
+## starting) is kept in `_retired` and asked again later.
+func _retire(b: InputBackendT) -> void:
+	b.shutdown()
+	if not b.settled():
+		_retired.append(b)
+
+
+## Asks every retired backend to finish shutting down (joining a thread that
+## has ended) and forgets the settled ones; with `wait`, all of them settle.
+func _sweep_retired(wait: bool = false) -> void:
+	for i in range(_retired.size() - 1, -1, -1):
+		var b: InputBackendT = _retired[i]
+		b.shutdown(wait)
+		if b.settled():
+			_retired.remove_at(i)
+
+
 ## Switches the backend. A running loop is stopped first: it must never carry
 ## on with a different backend than the one it was started with (a preview
 ## hot-swapped to Windows would suddenly drive the real mouse).
 func set_backend(kind: int) -> void:
 	if is_running:
 		stop()
+	_sweep_retired()
+	if backend != null:
+		_retire(backend)
 	match kind:
 		BackendKind.WINDOWS:
 			if OS.get_name() == "Windows":
@@ -214,6 +246,7 @@ func start() -> void:
 	is_running = true
 	_generation += 1
 	_has_saved_cursor = false
+	_sweep_retired()
 	_stop_counts.clear()
 	_held_buttons.clear()
 	_held_keys.clear()
@@ -298,6 +331,10 @@ func _run_loop(gen: int) -> void:
 			break
 		if not delayed_after_last:
 			await _wait_loop_delay(project, gen, "Loop delay")
+		# One frame per pass whatever the delay: a pass with nothing to wait
+		# for (no actions, or instant ones with a 0 ms delay) would otherwise
+		# spin without ever letting a frame - or a stop - through.
+		await get_tree().process_frame
 	# Loop ended naturally (only happens if stopped).
 
 
@@ -389,8 +426,7 @@ func _execute_action(action: LoopActionT, layer_index: int, action_index: int) -
 			elif action.keys_paced:
 				await _type_paced(action)
 			else:
-				backend.send_keys(action.keys)
-				_report_skipped(action)
+				_type_plain(action)
 		LoopActionT.Type.WAIT:
 			var wait := action.roll_wait_ms()
 			emit_signal("status", "Wait: %d ms" % wait)
@@ -663,6 +699,46 @@ const KEY_TRAIL_MAX_MS := 60
 ## A group "(abc…)" longer than this is one helper call too long to stop;
 ## SendKeys sends it instead.
 const KEY_GROUP_MAX := 32
+
+
+## How long a key SendKeys cannot send (see KeyStrokes.EXTRA) is held when
+## the plain typing taps it.
+const EXTRA_TAP_MS := 30
+
+
+## Types a Key action's text the plain way: SendKeys gets it as it is. A
+## few keys SendKeys cannot send ({SUPER}, a lone {CTRL}, the $ Win prefix -
+## see KeyStrokes.EXTRA), so a text with one is cut around those strokes: the
+## stretches between them go to SendKeys, each such stroke (with its ^ + %
+## modifiers, if any) is one press by the helper, in order.
+func _type_plain(action: LoopActionT) -> void:
+	var runs: Array = []   # Strings for SendKeys, presses for the helper
+	var plain := ""
+	for stroke in KeyStrokesT.split(action.keys):
+		var press := KeyStrokesT.parse(stroke)
+		if not KeyStrokesT.helper_only(press):
+			plain += stroke
+			continue
+		if not plain.is_empty():
+			runs.append(plain)
+			plain = ""
+		for r in press["repeat"]:
+			runs.append(press)
+	if runs.is_empty():
+		# Nothing SendKeys cannot send: the text goes as written, untouched.
+		backend.send_keys(action.keys)
+		_report_skipped(action)
+		return
+	if not plain.is_empty():
+		runs.append(plain)
+	for run in runs:
+		if run is String:
+			backend.send_keys(run)
+		else:
+			backend.hold_keys(run["mods"], run["keys"], 0, EXTRA_TAP_MS, 0, 0)
+		if backend.last_skipped:
+			_report_skipped(action)
+			return
 
 
 ## Types a Key action's text one keystroke at a time (see KeyStrokes.split:

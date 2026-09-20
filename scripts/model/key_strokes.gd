@@ -5,7 +5,8 @@ class_name KeyStrokes
 ## `parse` turns a stroke into the keys to hold down for it, so a press can
 ## have real timing (modifiers first, the key held a moment, then let go).
 
-## SendKeys key names (upper case) and their Windows virtual-key codes.
+## SendKeys key names (upper case) and their Windows virtual-key codes,
+## plus a few names of ours for keys SendKeys cannot send (see EXTRA).
 const NAMED := {
 	"ENTER": 0x0D, "TAB": 0x09, "ESC": 0x1B, "ESCAPE": 0x1B,
 	"BACKSPACE": 0x08, "BS": 0x08, "BKSP": 0x08,
@@ -18,14 +19,23 @@ const NAMED := {
 	"F1": 0x70, "F2": 0x71, "F3": 0x72, "F4": 0x73, "F5": 0x74, "F6": 0x75,
 	"F7": 0x76, "F8": 0x77, "F9": 0x78, "F10": 0x79, "F11": 0x7A, "F12": 0x7B,
 	"F13": 0x7C, "F14": 0x7D, "F15": 0x7E, "F16": 0x7F,
+	"SUPER": 0x5B, "WIN": 0x5B, "LWIN": 0x5B, "RWIN": 0x5C,
+	"CTRL": 0x11, "CONTROL": 0x11, "SHIFT": 0x10, "ALT": 0x12, "SPACE": 0x20,
 }
+## Virtual keys SendKeys has no name for: the Windows key, a modifier on
+## its own (SendKeys knows Ctrl only as the ^ in front of another key), and
+## Space by name. A stroke with one of these is always pressed by the
+## helper (see helper_only); everything else may go to SendKeys as text.
+const EXTRA := [0x5B, 0x5C, 0x11, 0x10, 0x12, 0x20]
 const VK_ENTER := 0x0D
 
 
 ## `text` cut into the keystrokes it stands for: a plain character, a
 ## braced key ("{ENTER}", "{F4 3}", "{{}", "{}}"), or a group "(abc)", each
-## with the ^ + % modifiers in front of it kept attached ("^c", "+(ab)",
-## "%{F4}" stay one stroke, so a combo is pressed as one).
+## with the ^ + % $ modifiers in front of it kept attached ("^c", "+(ab)",
+## "%{F4}", "$r" stay one stroke, so a combo is pressed as one). "$" is the
+## Windows key as a modifier, a name of ours (SendKeys has none): a stroke
+## with it is always pressed by the helper (see helper_only).
 static func split(text: String) -> PackedStringArray:
 	var out := PackedStringArray()
 	var mods := ""
@@ -33,7 +43,7 @@ static func split(text: String) -> PackedStringArray:
 	var n := text.length()
 	while i < n:
 		var ch := text[i]
-		if ch == "^" or ch == "+" or ch == "%":
+		if ch == "^" or ch == "+" or ch == "%" or ch == "$":
 			mods += ch
 			i += 1
 			continue
@@ -57,7 +67,7 @@ static func split(text: String) -> PackedStringArray:
 
 
 ## One stroke as keys to press: {"mods": letters of c (Ctrl), s (Shift),
-## a (Alt) to hold throughout; "keys": the keys in order, "c<code>" for a
+## a (Alt), w (Win) to hold throughout; "keys": the keys in order, "c<code>" for a
 ## character (the helper finds its key on the keyboard layout) or "v<vk>"
 ## for a named key; "repeat": how many times}. Empty when the stroke is not
 ## something a key press expresses (an unknown name, an odd group), and
@@ -65,8 +75,8 @@ static func split(text: String) -> PackedStringArray:
 static func parse(stroke: String) -> Dictionary:
 	var mods := ""
 	var i := 0
-	while i < stroke.length() and stroke[i] in "^+%":
-		mods += {"^": "c", "+": "s", "%": "a"}[stroke[i]]
+	while i < stroke.length() and stroke[i] in "^+%$":
+		mods += {"^": "c", "+": "s", "%": "a", "$": "w"}[stroke[i]]
 		i += 1
 	var rest := stroke.substr(i)
 	var keys := PackedStringArray()
@@ -94,7 +104,7 @@ static func parse(stroke: String) -> Dictionary:
 				repeat = int(parts[1])
 	elif rest.begins_with("(") and rest.ends_with(")"):
 		for ch in rest.substr(1, rest.length() - 2):
-			if ch in "{}()^+%":
+			if ch in "{}()^+%$":
 				return {}   # nested syntax inside a group: leave it to SendKeys
 			keys.append("v%d" % VK_ENTER if ch == "~" else "c%d" % ch.unicode_at(0))
 		if keys.is_empty():
@@ -104,3 +114,17 @@ static func parse(stroke: String) -> Dictionary:
 	else:
 		return {}
 	return {"mods": mods, "keys": keys, "repeat": repeat}
+
+
+## Whether `press` (a parse result) has a key SendKeys cannot type (see
+## EXTRA) or the Win modifier, so the stroke must go through the helper
+## even where the rest of the text is left to SendKeys.
+static func helper_only(press: Dictionary) -> bool:
+	if press.is_empty():
+		return false
+	if String(press["mods"]).contains("w"):
+		return true
+	for k in press["keys"]:
+		if k.begins_with("v") and int(k.substr(1)) in EXTRA:
+			return true
+	return false

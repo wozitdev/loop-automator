@@ -17,6 +17,19 @@ func backend_name() -> String:
 func is_real() -> bool:
 	return false
 
+## Ends whatever the backend keeps running (a helper process, a worker
+## thread). Called on the main thread before the backend is let go of;
+## with `wait` nothing of it is still at work when this returns (the quit
+## path), without it a slow start-up may be left to finish on its own.
+func shutdown(_wait: bool = false) -> void:
+	pass
+
+## True once nothing of the backend is still at work after shutdown() (a
+## thread joined, a helper gone). A backend that is not settled must be
+## kept and asked again: a worker thread holds it alive until it is joined.
+func settled() -> bool:
+	return true
+
 func move_to(pos: Vector2i) -> void:
 	pass
 
@@ -43,7 +56,7 @@ func send_keys(_text: String) -> void:
 	pass
 
 ## One keystroke with real timing (~Keys): the modifiers in `mods` (letters
-## c / s / a for Ctrl / Shift / Alt) go down, `lead` ms later each key in
+## c / s / a / w for Ctrl / Shift / Alt / Win) go down, `lead` ms later each key in
 ## `keys` (see KeyStrokes.parse) is held `hold` ms, `gap` ms apart, and
 ## `trail` ms after the last one the modifiers come back up. Blocks for the
 ## whole press (callers run it off the main thread).

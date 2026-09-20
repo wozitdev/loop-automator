@@ -16,7 +16,7 @@ config/description="Visual TAS-style builder for automated mouse/keyboard loops 
 run/main_scene="res://scenes/main.tscn"
 config/features=PackedStringArray("4.7")
 config/icon="res://icon.svg"
-boot_splash/bg_color=Color(0.1216, 0.1412, 0.1882, 1)
+boot_splash/bg_color=Color(0.2039, 0.2353, 0.3059, 1)
 boot_splash/show_image=false
 
 [autoload]
@@ -38,3 +38,5 @@ window/per_pixel_transparency/allowed=true
 ; overlay shows up as an opaque black window), so use Compatibility everywhere.
 renderer/rendering_method="gl_compatibility"
 renderer/rendering_method.mobile="gl_compatibility"
+; The builder window behind the panels, the same colour as the splash.
+environment/defaults/default_clear_color=Color(0.2039, 0.2353, 0.3059, 1)
