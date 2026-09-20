@@ -8,8 +8,11 @@ class_name LoopProject
 ## functions would fail. A self-preload const always resolves.
 const Self := preload("res://scripts/model/loop_project.gd")
 const LoopLayerT := preload("res://scripts/model/loop_layer.gd")
+const LoopActionT := preload("res://scripts/model/loop_action.gd")
 
-const FILE_VERSION := 1
+## 2: "$" in a Key's text is the Windows key as a modifier (see KeyStrokes);
+## a literal "$" is "{$}". Version 1 files are rewritten on load.
+const FILE_VERSION := 2
 
 var name: String = "Untitled Loop"
 ## Pause inserted between full loop iterations: a random value from
@@ -57,6 +60,12 @@ static func from_dict(d: Dictionary) -> Self:
 				p.layers.append(LoopLayerT.from_dict(ld))
 	if p.layers.is_empty():
 		p.layers.append(LoopLayerT.make("Layer 1", 0))
+	if int(d.get("version", 1)) < 2:
+		# "$" used to be a plain character; it is the Win modifier now.
+		for layer in p.layers:
+			for a in layer.actions:
+				if a.type == LoopActionT.Type.KEY:
+					a.keys = a.keys.replace("{$}", char(1)).replace("$", "{$}").replace(char(1), "{$}")
 	return p
 
 

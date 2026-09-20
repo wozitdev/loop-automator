@@ -37,6 +37,9 @@ var _server_mutex := Mutex.new()
 ## Starts the server in the background (see warm_up) so its ~1.5 s start-up
 ## (two C# compiles) is not paid by the first action of a run.
 var _warm_thread: Thread
+## Set by shutdown(): no server is started any more, and a warm-up thread
+## still at work ends the server itself when it is done (see _server_call).
+var _closing := false
 
 const HELPER_SCRIPT := """param([Parameter(ValueFromRemainingArguments=$true)][string[]]$a)
 # 'guard <pid> <command...>': clicks and keys that would land on a window of
@@ -143,16 +146,19 @@ function Read-Cursor { $p = New-Object Win32Pt; [Win32In]::GetCursorPos([ref]$p)
 # One key event, with the scan code the key has on this layout: a program
 # that reads keys by scan code (a game) ignores an event without one.
 function Key-Event([int]$vk, [int]$flags) {
+  # The Windows keys are extended keys, as the keyboard sends them.
+  if ($vk -eq 0x5B -or $vk -eq 0x5C) { $flags = $flags -bor 1 }
   $scan = [Win32In]::MapVirtualKeyW([uint32]$vk, 0) -band 0xFF
   [Win32In]::keybd_event([byte]$vk, [byte]$scan, [uint32]$flags, [IntPtr]::Zero)
 }
-# The modifier letters of a key command (c / s / a) as virtual keys, in the
-# order they go down.
+# The modifier letters of a key command (c / s / a / w: Ctrl, Shift, Alt,
+# Win) as virtual keys, in the order they go down.
 function Mod-Vks([string]$mods) {
   $d = @()
   if ($mods.Contains('c')) { $d += 0x11 }
   if ($mods.Contains('s')) { $d += 0x10 }
   if ($mods.Contains('a')) { $d += 0x12 }
+  if ($mods.Contains('w')) { $d += 0x5B }
   return $d
 }
 # A key of the kdown / kup commands (\"c<code>\" a character found on the
@@ -464,7 +470,7 @@ switch ($cmd) {
   }
   'hold' {
     # hold <mods|-> <keys> <lead> <hold> <gap> <trail>: one keystroke with
-    # real timing (~Keys). The modifiers (letters c / s / a) go down, $lead
+    # real timing (~Keys). The modifiers (letters c / s / a / w) go down, $lead
     # ms later each key (\"c<code>\" a character found on the keyboard
     # layout, \"v<vk>\" a virtual key) is held $hold ms, $gap ms apart, and
     # $trail ms after the last the modifiers come up. A character the
@@ -476,6 +482,7 @@ switch ($cmd) {
     if ($mods.Contains('c')) { $down += 0x11 }
     if ($mods.Contains('s')) { $down += 0x10 }
     if ($mods.Contains('a')) { $down += 0x12 }
+    if ($mods.Contains('w')) { $down += 0x5B }
     try {
       foreach ($m in $down) { Key-Event $m 0 }
       if ($down.Count -gt 0) { [System.Threading.Thread]::Sleep($lead) }
@@ -782,6 +789,35 @@ func is_real() -> bool:
 	return true
 
 
+## Ends the server and, with `wait`, joins the warm-up thread. Main thread
+## only. The owner calls this before dropping the backend. Starting the
+## server takes a second or two, so a thread still at it is not waited for
+## unless asked (a Run and a quick Stop would stall the UI): it sees
+## `_closing` and ends the server itself. At quit `wait` is given, since
+## a thread running this code once the scripts are gone is a crash;
+## PREDELETE below is the last resort.
+func shutdown(wait: bool = false) -> void:
+	_closing = true
+	if _warm_thread != null and _warm_thread.is_alive() and not wait:
+		# The lock is free only while the thread is not inside _server_call:
+		# then the server (if it got up) is ended here, since the thread
+		# has already passed its own check.
+		if _server_mutex.try_lock():
+			_stop_server()
+			_server_mutex.unlock()
+		return
+	if _warm_thread != null:
+		_warm_thread.wait_to_finish()
+		_warm_thread = null
+	_server_mutex.lock()
+	_stop_server()
+	_server_mutex.unlock()
+
+
+func settled() -> bool:
+	return _warm_thread == null and _server.is_empty()
+
+
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_PREDELETE:
 		# No instance method calls here: the script instance is already gone.
@@ -824,6 +860,8 @@ func _server_call(cmd: String, timeout_ms: int = SERVER_READ_TIMEOUT_MS) -> Dict
 			push_warning("WindowsBackend: helper server did not answer %s; restarting it on the next call." % JSON.stringify(_loggable(cmd)))
 			_stop_server()
 		result["line"] = line
+	if _closing:
+		_stop_server()   # shut down meanwhile: this thread ends the server
 	_server_mutex.unlock()
 	return result
 
@@ -861,6 +899,8 @@ func _server_read(cmd: String) -> String:
 ## True with a live server (starting one if needed). Holds off for a while
 ## after a failed start so a broken helper does not cost a start-up per read.
 func _server_ready() -> bool:
+	if _closing:
+		return false
 	if not _server.is_empty():
 		if OS.is_process_running(_server["pid"]):
 			return true

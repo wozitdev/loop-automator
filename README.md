@@ -79,8 +79,13 @@ layer 1, just broken out so you can view each layer's visuals separately.
   keys stay pressed for the next key; **Undo** removes the last captured
   key, **Clear** starts from an empty field. The window can be resized - the
   keys scale with it - and the size you leave it at is remembered. The
-  Windows key cannot be sent by `SendKeys`, so it is ignored. Check the
-  **~Keys** box to type the text one key at a time with random pauses, the
+  Windows key is `$`, a prefix like `^` `+` `%`: `$r` is Win+R (the Run
+  box), `$+s` Win+Shift+S. That is our addition - `SendKeys` has no Windows
+  key - as are `{SUPER}` (also `{WIN}`, `{LWIN}`, `{RWIN}`) for a tap of the
+  key on its own, `{CTRL}`, `{SHIFT}` and `{ALT}` for a modifier on its own,
+  and `{SPACE}` for a space by name. A literal `$` is written `{$}`, as `^`
+  is `{^}` (loop files from before 0.9.4 are rewritten that way when
+  loaded). None of these can sit inside `( )`. Check the **~Keys** box to type the text one key at a time with random pauses, the
   way a person types, each key held a moment; a combo such as `^c` or
   `+(abc)` stays one press (Ctrl down, `c` pressed and held, Ctrl up).
   The press dropdown beside the box makes the keys a **Hold** (every key in
@@ -255,8 +260,8 @@ named `<name> copy`, and the trash icon deletes it, file included. A layer has
 the same two icons under the layer list. A loop cannot lose its last layer:
 deleting it just tells you so.
 
-**Share** moves loops in and out as `.loop` JSON files: *Import* adds a file
-to the stack as a new loop, *Export* writes the current loop out — see
+**Share** (the three-dots icon) moves loops in and out as `.loop` JSON files:
+*Import* adds a file to the stack as a new loop, *Export* writes the current loop out — see
 [examples/](examples/) for a starter loop. Before a file is imported you are
 shown what it holds — layers, actions, and the text every Key action types —
 and what a loop can do; nothing is loaded until you press **Import** (see

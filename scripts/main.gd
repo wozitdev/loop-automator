@@ -134,7 +134,7 @@ const SPLASH_FADE_SEC := 0.5
 ## clickable meanwhile (it is gone in under two seconds).
 func _show_splash() -> void:
 	var splash := ColorRect.new()
-	splash.color = Color("1f2430")
+	splash.color = Color("343c4e")
 	splash.set_anchors_preset(Control.PRESET_FULL_RECT)
 	splash.mouse_filter = Control.MOUSE_FILTER_STOP
 	var centre := CenterContainer.new()
@@ -307,7 +307,7 @@ func _build_toolbar() -> Control:
 	hb.add_child(save_btn)
 	# Share: a .loop file in or out.
 	share_btn = MenuButton.new()
-	share_btn.text = "Share"
+	share_btn.icon = UiIconsT.share()
 	share_btn.flat = false
 	share_btn.focus_mode = Control.FOCUS_NONE
 	share_btn.tooltip_text = "Import a .loop file as a new loop, or export this loop to one"
@@ -1009,7 +1009,7 @@ func _add_keys_field(a: LoopActionT) -> void:
 	editor_box.add_child(row)
 	_add_hold_field(a)
 	var hint := Label.new()
-	hint.text = "Windows SendKeys format: {ENTER} {TAB} {ESC} ^c (Ctrl+C) %{F4} (Alt+F4)"
+	hint.text = "Windows SendKeys format: {ENTER} {TAB} {ESC} ^c (Ctrl+C) %{F4} (Alt+F4) $r (Win+R) {SUPER} (Windows key alone) {CTRL} (Ctrl alone) {^} {$} (the character)"
 	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	hint.modulate = Color(1, 1, 1, 0.7)
 	editor_box.add_child(hint)
@@ -1856,10 +1856,7 @@ func _refresh_loop_stack_ui() -> void:
 	if active_idx >= 0:
 		loop_picker.select(active_idx)
 	var total := ProjectData.loop_stack.size()
-	if loop_prev_btn != null:
-		loop_prev_btn.disabled = total <= 1
-	if loop_next_btn != null:
-		loop_next_btn.disabled = total <= 1
+	_refresh_loop_nav()
 	if save_btn != null:
 		# An unsaved change shows as a "*" beside the icon.
 		save_btn.text = "*" if ProjectData.active_loop_is_pending() else ""
@@ -1888,6 +1885,16 @@ func _on_loop_picker_selected(i: int) -> void:
 	# A number still being typed belongs to the loop being left.
 	_commit_pending_edits()
 	ProjectData.open_loop(id)
+
+
+## The ◀ ▶ loop buttons are greyed out while there is no other loop to go
+## to. Called again after an unlock, which enables every button.
+func _refresh_loop_nav() -> void:
+	var alone := ProjectData.loop_stack.size() <= 1
+	if loop_prev_btn != null:
+		loop_prev_btn.disabled = alone
+	if loop_next_btn != null:
+		loop_next_btn.disabled = alone
 
 
 func _switch_loop(delta: int) -> void:
@@ -1924,6 +1931,8 @@ func _refresh_edit_lock() -> void:
 	if _ui_root != null:
 		_set_controls_locked(_ui_root, locked)
 		_ui_root.modulate = tint
+		if not locked:
+			_refresh_loop_nav()   # the unlock enabled the ◀ ▶ buttons too
 	if play_btn != null:
 		# Keep this as the only clickable control in lock mode.
 		play_btn.disabled = _stop_cooldown_active

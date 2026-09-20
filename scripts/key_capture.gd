@@ -4,9 +4,11 @@ class_name KeyCapture
 ## them into Windows SendKeys text: type on the real keyboard while this
 ## window has the focus, or click the keys. Letters, digits and punctuation
 ## become themselves (SendKeys' own special characters escaped in braces),
-## named keys become their {CODE}, and Ctrl / Alt / Shift become the ^ % +
-## prefixes. The on-screen modifiers are sticky: press one, then the key it
-## applies to. The Windows key cannot be sent by SendKeys and is ignored.
+## named keys become their {CODE}, and Ctrl / Alt / Shift / Win become the
+## ^ % + $ prefixes ($ is a name of ours: the helper presses Win, SendKeys
+## has none). The on-screen modifiers are sticky: press one, then the key
+## it applies to. The physical Win key is ignored, since Windows opens
+## Start on it and takes the focus away.
 ##
 ## Nothing reaches the Keys field until Send is pressed: the window keeps
 ## its own copy of the text (the field's text when it was opened plus what
@@ -15,8 +17,8 @@ class_name KeyCapture
 
 signal sent(text: String)
 
-## SendKeys reserves these; each is sent literally as {c}.
-const ESCAPED := "+^%~(){}[]"
+## SendKeys reserves these (and $ is our Win prefix); each is sent literally as {c}.
+const ESCAPED := "+^%~(){}[]$"
 
 ## Godot keycode -> SendKeys code for keys that are not printable characters.
 const NAMED := {
@@ -46,7 +48,7 @@ const MAIN_ROWS := [
 	[["Tab", KEY_TAB], ["q", KEY_Q], ["w", KEY_W], ["e", KEY_E], ["r", KEY_R], ["t", KEY_T], ["y", KEY_Y], ["u", KEY_U], ["i", KEY_I], ["o", KEY_O], ["p", KEY_P], ["[", KEY_BRACKETLEFT], ["]", KEY_BRACKETRIGHT], ["\\", KEY_BACKSLASH]],
 	[["Caps", KEY_CAPSLOCK], ["a", KEY_A], ["s", KEY_S], ["d", KEY_D], ["f", KEY_F], ["g", KEY_G], ["h", KEY_H], ["j", KEY_J], ["k", KEY_K], ["l", KEY_L], [";", KEY_SEMICOLON], ["'", KEY_APOSTROPHE], ["Enter", KEY_ENTER]],
 	[["Shift", KEY_SHIFT], ["z", KEY_Z], ["x", KEY_X], ["c", KEY_C], ["v", KEY_V], ["b", KEY_B], ["n", KEY_N], ["m", KEY_M], [",", KEY_COMMA], [".", KEY_PERIOD], ["/", KEY_SLASH], ["Shift", KEY_SHIFT]],
-	[["Ctrl", KEY_CTRL], ["Alt", KEY_ALT], ["Space", KEY_SPACE], ["Alt", KEY_ALT], ["Ctrl", KEY_CTRL]],
+	[["Ctrl", KEY_CTRL], ["Win", KEY_META], ["Alt", KEY_ALT], ["Space", KEY_SPACE], ["Alt", KEY_ALT], ["Ctrl", KEY_CTRL]],
 ]
 ## The navigation block: six rows like the main block, so its keys are the
 ## same height. Ins / Del sit level with the number and Tab rows, and the
@@ -64,7 +66,7 @@ const NAV_ROWS := [
 	[["←", KEY_LEFT], ["↓", KEY_DOWN], ["→", KEY_RIGHT]],
 ]
 ## Widths in key units for the wide keys (default 1).
-const WIDE := {"Backspace": 2.0, "Tab": 1.5, "\\": 1.5, "Caps": 1.75, "Enter": 2.25, "Shift": 2.5, "Ctrl": 1.5, "Alt": 1.5, "Space": 9.0}
+const WIDE := {"Backspace": 2.0, "Tab": 1.5, "\\": 1.5, "Caps": 1.75, "Enter": 2.25, "Shift": 2.5, "Ctrl": 1.5, "Win": 1.5, "Alt": 1.5, "Space": 7.5}
 ## Smallest key size (one unit); the board grows from there with the window.
 const MIN_UNIT := 24.0
 const GAP := 5.0
@@ -102,10 +104,10 @@ static func icon() -> Texture2D:
 	return _icon
 
 
-## The SendKeys text for one key press. `shift` / `ctrl` / `alt` add the
-## + ^ % prefixes; `unicode` (the typed character, if any) wins over the
+## The SendKeys text for one key press. `shift` / `ctrl` / `alt` / `win` add
+## the + ^ % $ prefixes; `unicode` (the typed character, if any) wins over the
 ## keycode for printable keys so the keyboard layout is respected.
-static func token_for(keycode: int, unicode: int, shift: bool, ctrl: bool, alt: bool) -> String:
+static func token_for(keycode: int, unicode: int, shift: bool, ctrl: bool, alt: bool, win: bool = false) -> String:
 	var base := ""
 	var prefix := ""
 	if keycode in NAMED:
@@ -128,11 +130,13 @@ static func token_for(keycode: int, unicode: int, shift: bool, ctrl: bool, alt: 
 	elif keycode == KEY_KP_PERIOD:
 		base = "."
 	else:
-		return ""  # a modifier on its own, the Windows key, or unknown
+		return ""  # a modifier on its own, or unknown
 	if ctrl:
 		prefix += "^"
 	if alt:
 		prefix += "%"
+	if win:
+		prefix += "$"
 	return prefix + base
 
 
@@ -145,11 +149,13 @@ var _tokens: Array[String] = []   # what was captured since, in order
 var _sticky_shift := false
 var _sticky_ctrl := false
 var _sticky_alt := false
+var _sticky_win := false
 var _preview: LineEdit
 var _count: Label
 var _shift_buttons: Array[Button] = []
 var _ctrl_buttons: Array[Button] = []
 var _alt_buttons: Array[Button] = []
+var _win_buttons: Array[Button] = []
 var _key_buttons: Dictionary = {}  # keycode -> Array[Button]
 var _all_keys: Array[Button] = []  # every key cap, for the font scaling
 
@@ -181,7 +187,7 @@ func _on_size_changed() -> void:
 func open(current: String) -> void:
 	_base = current
 	_tokens.clear()
-	_set_sticky(false, false, false)
+	_set_sticky(false, false, false, false)
 	_refresh_preview()
 	popup_centered()
 	grab_focus()
@@ -193,9 +199,9 @@ func _input(event: InputEvent) -> void:
 	if key == null or not key.pressed or key.echo:
 		return
 	get_viewport().set_input_as_handled()
-	if key.keycode in [KEY_SHIFT, KEY_CTRL, KEY_ALT, KEY_META]:
+	if key.keycode in [KEY_SHIFT, KEY_CTRL, KEY_ALT, KEY_META]:   # the physical Win key opens Start and takes the focus: the on-screen one is the way
 		return
-	var token := token_for(key.keycode, key.unicode, key.shift_pressed or _sticky_shift, key.ctrl_pressed or _sticky_ctrl, key.alt_pressed or _sticky_alt)
+	var token := token_for(key.keycode, key.unicode, key.shift_pressed or _sticky_shift, key.ctrl_pressed or _sticky_ctrl, key.alt_pressed or _sticky_alt, key.meta_pressed or _sticky_win)
 	if token.is_empty():
 		return
 	_flash(key.keycode)
@@ -204,7 +210,7 @@ func _input(event: InputEvent) -> void:
 
 func _append(token: String) -> void:
 	_tokens.append(token)
-	_set_sticky(false, false, false)
+	_set_sticky(false, false, false, false)
 	_refresh_preview()
 
 
@@ -284,7 +290,7 @@ func _build() -> void:
 	var help_row := HBoxContainer.new()
 	help_row.add_theme_constant_override("separation", 12)
 	var hint := Label.new()
-	hint.text = "Type or click the keys · on-screen Shift / Ctrl / Alt stick to the next key · Send fills the field · no Windows key"
+	hint.text = "Type or click the keys · on-screen Shift / Ctrl / Alt / Win stick to the next key · Send fills the field"
 	hint.modulate = Color(1, 1, 1, 0.55)
 	hint.add_theme_font_size_override("font_size", 12)
 	hint.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
@@ -394,29 +400,34 @@ func _key_button(label: String, keycode: int, key_scale: float = 1.0) -> Button:
 	b.clip_text = true
 	_span(b, float(WIDE.get(label, 1.0)) * key_scale)
 	_all_keys.append(b)
-	var is_modifier := keycode in [KEY_SHIFT, KEY_CTRL, KEY_ALT]
+	var is_modifier := keycode in [KEY_SHIFT, KEY_CTRL, KEY_ALT, KEY_META]
 	var is_special := label.length() > 1 or keycode in NAMED
 	match keycode:
 		KEY_SHIFT:
 			b.toggle_mode = true
 			b.tooltip_text = "Shift (+) for the next key"
-			b.toggled.connect(func(on: bool): _set_sticky(on, _sticky_ctrl, _sticky_alt))
+			b.toggled.connect(func(on: bool): _set_sticky(on, _sticky_ctrl, _sticky_alt, _sticky_win))
 			_shift_buttons.append(b)
 		KEY_CTRL:
 			b.toggle_mode = true
 			b.tooltip_text = "Ctrl (^) for the next key"
-			b.toggled.connect(func(on: bool): _set_sticky(_sticky_shift, on, _sticky_alt))
+			b.toggled.connect(func(on: bool): _set_sticky(_sticky_shift, on, _sticky_alt, _sticky_win))
 			_ctrl_buttons.append(b)
 		KEY_ALT:
 			b.toggle_mode = true
 			b.tooltip_text = "Alt (%) for the next key"
-			b.toggled.connect(func(on: bool): _set_sticky(_sticky_shift, _sticky_ctrl, on))
+			b.toggled.connect(func(on: bool): _set_sticky(_sticky_shift, _sticky_ctrl, on, _sticky_win))
 			_alt_buttons.append(b)
+		KEY_META:
+			b.toggle_mode = true
+			b.tooltip_text = "Win ($) for the next key"
+			b.toggled.connect(func(on: bool): _set_sticky(_sticky_shift, _sticky_ctrl, _sticky_alt, on))
+			_win_buttons.append(b)
 		_:
 			var plain := token_for(keycode, 0, false, false, false)
 			b.tooltip_text = "(space)" if plain == " " else plain
 			b.pressed.connect(func():
-				var token := token_for(keycode, 0, _sticky_shift, _sticky_ctrl, _sticky_alt)
+				var token := token_for(keycode, 0, _sticky_shift, _sticky_ctrl, _sticky_alt, _sticky_win)
 				if not token.is_empty():
 					_append(token))
 			if not _key_buttons.has(keycode):
@@ -433,16 +444,19 @@ func _key_button(label: String, keycode: int, key_scale: float = 1.0) -> Button:
 
 ## Sets the sticky modifiers and shows the state on their buttons (both
 ## Shift keys, both Ctrl keys, both Alt keys move together).
-func _set_sticky(shift: bool, ctrl: bool, alt: bool) -> void:
+func _set_sticky(shift: bool, ctrl: bool, alt: bool, win: bool) -> void:
 	_sticky_shift = shift
 	_sticky_ctrl = ctrl
 	_sticky_alt = alt
+	_sticky_win = win
 	for b in _shift_buttons:
 		b.set_pressed_no_signal(shift)
 	for b in _ctrl_buttons:
 		b.set_pressed_no_signal(ctrl)
 	for b in _alt_buttons:
 		b.set_pressed_no_signal(alt)
+	for b in _win_buttons:
+		b.set_pressed_no_signal(win)
 
 
 ## Lights the on-screen key(s) for a typed keycode up for a moment.

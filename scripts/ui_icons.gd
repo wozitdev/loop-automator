@@ -44,6 +44,13 @@ const LEFT_SVG := """<svg xmlns="http://www.w3.org/2000/svg" width="12" height="
 const RIGHT_SVG := """<svg xmlns="http://www.w3.org/2000/svg" width="12" height="16" viewBox="0 0 12 16">
 <path d="M2.5 2.5 L9.5 8 L2.5 13.5 Z" fill="#e6e6e6" stroke="#e6e6e6" stroke-width="1" stroke-linejoin="round"/>
 </svg>"""
+## Share: three dots joined by two links.
+const SHARE_SVG := """<svg xmlns="http://www.w3.org/2000/svg" width="14" height="16" viewBox="0 0 14 16">
+<path d="M3.6 8 L10.4 4.2 M3.6 8 L10.4 11.8" fill="none" stroke="#e6e6e6" stroke-width="1.4"/>
+<circle cx="11" cy="3.4" r="2.1" fill="#e6e6e6"/>
+<circle cx="3" cy="8" r="2.1" fill="#e6e6e6"/>
+<circle cx="11" cy="12.6" r="2.1" fill="#e6e6e6"/>
+</svg>"""
 const UP_SVG := """<svg xmlns="http://www.w3.org/2000/svg" width="14" height="16" viewBox="0 0 14 16">
 <path d="M2 11.5 L7 4.5 L12 11.5 Z" fill="#e6e6e6" stroke="#e6e6e6" stroke-width="1" stroke-linejoin="round"/>
 </svg>"""
@@ -121,6 +128,10 @@ static func left() -> Texture2D:
 
 static func right() -> Texture2D:
 	return _icon("right", RIGHT_SVG)
+
+
+static func share() -> Texture2D:
+	return _icon("share", SHARE_SVG)
 
 
 static func up() -> Texture2D:
