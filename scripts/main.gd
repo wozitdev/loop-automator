@@ -268,6 +268,9 @@ func _build_toolbar() -> Control:
 	# --- Playback ---------------------------------------------------------
 	play_btn = _icon_button(UiIconsT.play(), "", _on_play_pressed)
 	play_btn.text = _run_label()
+	# One width for "Run?", "Run!" and "Stop": the button (and the toolbar
+	# after it) no longer shifts when the mode changes or a run starts.
+	play_btn.custom_minimum_size = Vector2(_button_width(play_btn, ["Run?", "Run!", "Stop"]), 0)
 	hb.add_child(play_btn)
 
 	var backend_lbl := Label.new()
@@ -343,10 +346,11 @@ func _build_toolbar() -> Control:
 	_delay_pair = RangePair.new()
 	_delay_pair.build(hb, ProjectData.project.loop_delay_ms, ProjectData.project.loop_delay_ms_max, 0, 60000, func(l: int, h: int):
 		ProjectData.set_loop_delay(l, h))
+	_delay_pair.set_suffix("ms")
+	# Wide enough for the biggest value, 60000 ms, to show whole.
 	for sp in [_delay_pair.lo, _delay_pair.hi]:
 		sp.size_flags_horizontal = Control.SIZE_FILL
-		sp.custom_minimum_size = Vector2(96, 0)
-	_delay_pair.set_suffix("ms")
+		sp.custom_minimum_size = Vector2(_spin_box_width(sp, "60000 ms"), 0)
 	_delay_pair.single_tip = delay_tip
 	if not _delay_pair.ranged:
 		_delay_pair.lo.tooltip_text = delay_tip
@@ -2372,6 +2376,33 @@ func _option_button_width(btn: OptionButton, sample: String) -> float:
 	var arrow_w := btn.get_theme_icon("arrow").get_width() + btn.get_theme_constant("arrow_margin")
 	var margins := btn.get_theme_stylebox("normal").get_minimum_size().x
 	return ceilf(text_w + arrow_w + margins + 2.0 * btn.get_theme_constant("h_separation"))
+
+
+## The width `btn` needs to show the widest of `samples` in full: the
+## text, its icon (if any) with the gap after it, and the button's margins.
+func _button_width(btn: Button, samples: Array[String]) -> float:
+	var font := btn.get_theme_font("font")
+	var size := btn.get_theme_font_size("font_size")
+	var text_w := 0.0
+	for s in samples:
+		text_w = maxf(text_w, font.get_string_size(s, HORIZONTAL_ALIGNMENT_LEFT, -1, size).x)
+	var icon_w := 0.0
+	if btn.icon != null:
+		icon_w = btn.icon.get_width() + btn.get_theme_constant("h_separation")
+	var margins := btn.get_theme_stylebox("normal").get_minimum_size().x
+	return ceilf(text_w + icon_w + margins)
+
+
+## The width `sp` needs to show `sample` (the number and its suffix) in
+## full: the text, the field's margins and the up / down buttons beside it,
+## plus a little slack so the text never scrolls under the caret.
+func _spin_box_width(sp: SpinBox, sample: String) -> float:
+	var le := sp.get_line_edit()
+	var font := le.get_theme_font("font")
+	var text_w := font.get_string_size(sample, HORIZONTAL_ALIGNMENT_LEFT, -1, le.get_theme_font_size("font_size")).x
+	var margins := le.get_theme_stylebox("normal").get_minimum_size().x
+	var buttons := sp.get_theme_constant("buttons_width") + sp.get_theme_constant("field_and_buttons_separation")
+	return ceilf(text_w + margins + buttons + 4.0)
 
 
 ## An OptionButton for the editor rows. Expanding, it shares the input
