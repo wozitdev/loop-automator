@@ -1249,30 +1249,10 @@ func send_keys(text: String) -> void:
 	var clean := text.replace("\r", "").replace("\n", "")
 	if clean.is_empty():
 		return
-	for piece in _key_pieces(clean):
+	for piece in KeyStrokesT.pieces(clean, KEY_PIECE_BYTES):
 		_run_sync(PackedStringArray(["key", Marshalls.utf8_to_base64(piece)]), 30000)
 		if last_skipped:
 			return
-
-
-## `text` cut into pieces of at most KEY_PIECE_BYTES (UTF-8), each a whole
-## number of keystrokes (see KeyStrokes.split; the pieces joined are the
-## text again). A single keystroke bigger than that is a piece of its own.
-static func _key_pieces(text: String) -> PackedStringArray:
-	var pieces := PackedStringArray()
-	var piece := ""
-	var piece_bytes := 0
-	for stroke in KeyStrokesT.split(text):
-		var bytes := stroke.to_utf8_buffer().size()
-		if piece_bytes + bytes > KEY_PIECE_BYTES and not piece.is_empty():
-			pieces.append(piece)
-			piece = ""
-			piece_bytes = 0
-		piece += stroke
-		piece_bytes += bytes
-	if not piece.is_empty():
-		pieces.append(piece)
-	return pieces
 
 
 func hold_keys(mods: String, keys: PackedStringArray, lead: int, hold: int, gap: int, trail: int) -> void:

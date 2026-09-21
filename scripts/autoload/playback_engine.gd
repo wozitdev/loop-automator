@@ -475,7 +475,7 @@ func _execute_action(action: LoopActionT, layer_index: int, action_index: int) -
 			elif action.keys_paced:
 				await _type_paced(action)
 			else:
-				_type_plain(action)
+				await _type_plain(action)
 		LoopActionT.Type.WAIT:
 			var wait := action.roll_wait_ms()
 			emit_signal("status", "Wait: %d ms" % wait)
@@ -661,7 +661,11 @@ func _press_keys(action: LoopActionT) -> void:
 			return
 		_held_keys.append(press)
 	if not typed.is_empty():
-		backend.send_keys("".join(typed))
+		var gen_typed := _generation
+		for piece in KeyStrokesT.pieces("".join(typed), PLAIN_PIECE_BYTES):
+			if not is_running or gen_typed != _generation:
+				return
+			await _off_thread(backend.send_keys.bind(piece))
 		emit_signal("status", "Keys down: \"%s\" (\"%s\" cannot be held, typed instead)." % [action.keys, "".join(typed)])
 	if not hold:
 		if typed.is_empty():
@@ -807,13 +811,31 @@ const KEY_GROUP_MAX := 32
 ## How long a key SendKeys cannot send (see KeyStrokes.EXTRA) is held when
 ## the plain typing taps it.
 const EXTRA_TAP_MS := 30
+## The plain typing goes to the helper in pieces of at most this many
+## bytes of SendKeys text (cut between keystrokes), each on a worker
+## thread: a stop lands between pieces, so F8 ends a long text within a
+## moment rather than when SendKeys is done with all of it.
+const PLAIN_PIECE_BYTES := 256
+
+
+## Runs `work` (a backend call that blocks for as long as the input takes)
+## on a worker thread, letting frames - and a stop, F8 above all - through
+## meanwhile.
+func _off_thread(work: Callable) -> void:
+	var thread := Thread.new()
+	thread.start(work)
+	while thread.is_alive():
+		await get_tree().process_frame
+	thread.wait_to_finish()
 
 
 ## Types a Key action's text the plain way: SendKeys gets it as it is. A
 ## few keys SendKeys cannot send ({SUPER}, a lone {CTRL}, the $ Win prefix -
 ## see KeyStrokes.EXTRA), so a text with one is cut around those strokes: the
 ## stretches between them go to SendKeys, each such stroke (with its ^ + %
-## modifiers, if any) is one press by the helper, in order.
+## modifiers, if any) is one press by the helper, in order. Each stretch
+## goes in pieces (see PLAIN_PIECE_BYTES); a stop ends the typing between
+## them.
 func _type_plain(action: LoopActionT) -> void:
 	var runs: Array = []   # Strings for SendKeys, presses for the helper
 	var plain := ""
@@ -823,23 +845,22 @@ func _type_plain(action: LoopActionT) -> void:
 			plain += stroke
 			continue
 		if not plain.is_empty():
-			runs.append(plain)
+			runs.append_array(Array(KeyStrokesT.pieces(plain, PLAIN_PIECE_BYTES)))
 			plain = ""
 		for r in press["repeat"]:
 			runs.append(press)
-	if runs.is_empty():
-		# Nothing SendKeys cannot send: the text goes as written, untouched.
-		backend.send_keys(action.keys)
-		_report_skipped(action)
-		return
 	if not plain.is_empty():
-		runs.append(plain)
+		runs.append_array(Array(KeyStrokesT.pieces(plain, PLAIN_PIECE_BYTES)))
+	var gen := _generation
+	var b := backend
 	for run in runs:
+		if not is_running or gen != _generation:
+			return
 		if run is String:
-			backend.send_keys(run)
+			await _off_thread(b.send_keys.bind(run))
 		else:
-			backend.hold_keys(run["mods"], run["keys"], 0, EXTRA_TAP_MS, 0, 0)
-		if backend.last_skipped:
+			await _off_thread(b.hold_keys.bind(run["mods"], run["keys"], 0, EXTRA_TAP_MS, 0, 0))
+		if b.last_skipped:
 			_report_skipped(action)
 			return
 

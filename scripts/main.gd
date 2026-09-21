@@ -295,9 +295,9 @@ func _build_toolbar() -> Control:
 	# --- Playback ---------------------------------------------------------
 	play_btn = _icon_button(UiIconsT.play(), "", _on_play_pressed)
 	play_btn.text = _run_label()
-	# One width for "Run?", "Run!" and "Stop": the button (and the toolbar
+	# One width for "Run?" and "Run!": the button (and the toolbar
 	# after it) no longer shifts when the mode changes or a run starts.
-	play_btn.custom_minimum_size = Vector2(_button_width(play_btn, ["Run?", "Run!", "Stop"]), 0)
+	play_btn.custom_minimum_size = Vector2(_button_width(play_btn, ["Run?", "Run!"]), 0)
 	hb.add_child(play_btn)
 
 	var backend_lbl := Label.new()
@@ -637,7 +637,7 @@ func _connect_signals() -> void:
 		_stop_cooldown_token += 1
 		_stop_cooldown_active = false
 		play_btn.icon = UiIconsT.stop()
-		play_btn.text = "Stop"
+		play_btn.text = "Run!"
 		_refresh_edit_lock()
 		# ~Edit unchecked: this window gets out of the way for the run, as
 		# for a pick (F8, Esc and the button still stop it).
@@ -2205,8 +2205,9 @@ func _on_backend_selected(i: int) -> void:
 	_refresh_run_label()
 
 
-## "Run?" in Safe mode (nothing real happens), "Run!" in Live. Left alone
-## while a run is going or the button is counting down after one.
+## "Run?" while nothing runs; the button reads "Run!" (with the stop icon)
+## while the loop is going. Left alone during a run or while the button is
+## counting down after one.
 func _refresh_run_label() -> void:
 	if play_btn == null or Playback.is_running or _stop_cooldown_active:
 		return
@@ -2215,8 +2216,7 @@ func _refresh_run_label() -> void:
 
 
 func _run_label() -> String:
-	var live := Playback.backend != null and Playback.backend.is_real()
-	return "Run!" if live else "Run?"
+	return "Run?"
 
 
 func _refresh_edit_lock() -> void:

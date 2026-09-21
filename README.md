@@ -262,7 +262,8 @@ one). Both are saved with the loop.
      Flipping also selects that layer for editing.
    - Number keys **1–9** jump straight to a layer.
    - **Show All** (or `\`) toggles drawing every visible layer at once.
-5. Choose a **Mode** and press **Run?** (Safe) or **Run!** (Live), or **F5**.
+5. Choose a **Mode** and press **Run?** (or **F5**). The button reads **Run!**
+   while the loop runs; pressing it again (or F8 / Esc) stops it.
 
 > The status line lives in the **bottom bar**; the toolbar scrolls horizontally
 > if the window is too narrow to show every control.
