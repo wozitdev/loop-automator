@@ -47,10 +47,10 @@ func to_dict() -> Dictionary:
 
 static func from_dict(d: Dictionary) -> Self:
 	var p := Self.new()
-	p.name = String(d.get("name", "Untitled Loop"))
-	p.loop_delay_ms = int(d.get("loop_delay_ms", 250))
-	p.loop_delay_ms_max = int(d.get("loop_delay_ms_max", p.loop_delay_ms))
-	p.delay_after_each_action = bool(d.get("delay_after_each_action", false))
+	p.name = LoopActionT.read_string(d, "name", "Untitled Loop")
+	p.loop_delay_ms = maxi(0, LoopActionT.read_int(d, "loop_delay_ms", 250))
+	p.loop_delay_ms_max = maxi(0, LoopActionT.read_int(d, "loop_delay_ms_max", p.loop_delay_ms))
+	p.delay_after_each_action = LoopActionT.read_bool(d, "delay_after_each_action", false)
 	p.layers = []
 	# Skip (never crash on) entries that are not layer objects.
 	var layers: Variant = d.get("layers", [])
@@ -60,7 +60,7 @@ static func from_dict(d: Dictionary) -> Self:
 				p.layers.append(LoopLayerT.from_dict(ld))
 	if p.layers.is_empty():
 		p.layers.append(LoopLayerT.make("Layer 1", 0))
-	if int(d.get("version", 1)) < 2:
+	if LoopActionT.read_int(d, "version", 1) < 2:
 		# "$" used to be a plain character; it is the Win modifier now.
 		for layer in p.layers:
 			for a in layer.actions:

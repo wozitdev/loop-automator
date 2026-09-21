@@ -70,7 +70,24 @@ public class Rec {
     uint pid; GetWindowThreadProcessId(h, out pid);
     return pid == guard;
   }
-  static void Out(string s) { Console.Out.WriteLine(s); Console.Out.Flush(); }
+  // Lines go out through a queue and a thread of their own: a hook
+  // procedure runs inside the OS input path, and one that blocked on a
+  // full pipe (the parent not reading for a second) would be dropped by
+  // Windows - the recording would silently stop. Queued, it never waits.
+  static System.Collections.Generic.Queue<string> lines = new System.Collections.Generic.Queue<string>();
+  static void Out(string s) { lock (lines) { lines.Enqueue(s); Monitor.Pulse(lines); } }
+  static void Writer() {
+    while (true) {
+      string s;
+      lock (lines) { while (lines.Count == 0) Monitor.Wait(lines); s = lines.Dequeue(); }
+      try { Console.Out.WriteLine(s); Console.Out.Flush(); } catch { done = true; return; }
+    }
+  }
+  // Gives the writer a moment to send what is queued (the \"stop\" line
+  // above all) before the process ends.
+  static void Drain() {
+    for (int i = 0; i < 200; i++) { lock (lines) { if (lines.Count == 0) return; } Thread.Sleep(10); }
+  }
   static IntPtr OnMouse(int code, IntPtr w, IntPtr l) {
     if (code >= 0) {
       MsLL m = (MsLL)Marshal.PtrToStructure(l, typeof(MsLL));
@@ -111,6 +128,7 @@ public class Rec {
   }
   public static int Run(uint guardPid, bool anyInput) {
     guard = guardPid; any = anyInput;
+    Thread writer = new Thread(Writer); writer.IsBackground = true; writer.Start();
     Msg m;
     PeekMessage(out m, IntPtr.Zero, 0, 0, 0);  // gives this thread a message queue
     mouseProc = new HookProc(OnMouse); keyProc = new HookProc(OnKey);
@@ -121,6 +139,7 @@ public class Rec {
       Out(\"error could not hook the mouse and keyboard (\" + Marshal.GetLastWin32Error() + \")\");
       if (hMouse != IntPtr.Zero) UnhookWindowsHookEx(hMouse);
       if (hKey != IntPtr.Zero) UnhookWindowsHookEx(hKey);
+      Drain();
       return 1;
     }
     sw = System.Diagnostics.Stopwatch.StartNew();
@@ -143,6 +162,7 @@ public class Rec {
       UnhookWindowsHookEx(hMouse); UnhookWindowsHookEx(hKey);
       if (timer) timeEndPeriod(1);
     }
+    Drain();
     return 0;
   }
 }

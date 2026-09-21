@@ -62,10 +62,10 @@ func to_dict() -> Dictionary:
 
 static func from_dict(d: Dictionary) -> Self:
 	var l := Self.new()
-	l.name = clean_name(String(d.get("name", "Layer")))
-	l.color = Color.html(String(d.get("color", "4dd0e1")))
-	l.visible = bool(d.get("visible", true))
-	l.enabled = bool(d.get("enabled", true))
+	l.name = clean_name(LoopActionT.read_string(d, "name", "Layer"))
+	l.color = LoopActionT.read_color(d, "color", PALETTE[0])
+	l.visible = LoopActionT.read_bool(d, "visible", true)
+	l.enabled = LoopActionT.read_bool(d, "enabled", true)
 	l.actions = []
 	# Anything that is not an action object is skipped rather than raising a
 	# type error mid-load (the file may come from anywhere).

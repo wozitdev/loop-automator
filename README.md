@@ -167,7 +167,9 @@ layer 1, just broken out so you can view each layer's visuals separately.
   a few milliseconds. Tick **Ghost Cursor** too and the real cursor is hidden
   while it works: a ghost cursor (same shape) keeps following your hand and
   the real cursor reappears on it afterwards — so from where you sit the
-  cursor never jumps at all.
+  cursor never jumps at all. The real cursor is pinned to the action for its
+  duration; stopping the loop (F8) cuts a captured action short and gives
+  the mouse back at once.
 
 Every action stores screen coordinates, so the overlay can draw it at the right
 place over your other applications.
@@ -308,8 +310,11 @@ deleting it just tells you so.
 [examples/](examples/) for a starter loop. Before a file is imported you are
 shown what it holds — layers, actions, and the text every Key action types —
 and what a loop can do; nothing is loaded until you press **Import** (see
-[Responsible use](#responsible-use)). Layer names are kept to one line of
-printable text, whatever a file holds.
+[Responsible use](#responsible-use)). The file is read defensively: a value of
+the wrong kind falls back to its default, a setting outside its choices is
+corrected (an action type this build does not know is kept but switched
+off), an image is checked against its size limit before it is decoded, and
+layer names are kept to one line of printable text, whatever a file holds.
 
 ---
 

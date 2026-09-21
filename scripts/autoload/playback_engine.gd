@@ -77,6 +77,12 @@ var _stop_counts: Dictionary = {}
 var _held_buttons: Dictionary = {}
 var _held_keys: Array[Dictionary] = []
 
+# The worker thread of a captured action under way (see _execute_captured):
+# the helper runs the whole action as one command with the real cursor
+# pinned, so a stop ends that command (see _interrupt_helper) rather than
+# leaving the user without a mouse until the dwell is over.
+var _captured_thread: Thread = null
+
 # Lazily-created real backend used purely for reading screen pixels (so colour
 # sampling works even while the active playback backend is Preview).
 var _screen_sampler: InputBackendT
@@ -111,6 +117,7 @@ func _ready() -> void:
 
 func _exit_tree() -> void:
 	# Closing the app mid-run: nothing stays pressed, F8 is given back.
+	_interrupt_helper()
 	_release_held()
 	_stop_hotkey.stop()
 	# The backends end their helpers while the scripts are still loaded: a
@@ -120,6 +127,11 @@ func _exit_tree() -> void:
 	if _screen_sampler != null:
 		_screen_sampler.shutdown(true)
 	_sweep_retired(true)
+	# The thread of a captured action cut short above has nothing left to
+	# do; joined here so it is not destroyed mid-flight.
+	if _captured_thread != null:
+		_captured_thread.wait_to_finish()
+		_captured_thread = null
 
 
 func _process(_dt: float) -> void:
@@ -283,6 +295,7 @@ func stop(reason: String = "Stopped.") -> void:
 	is_running = false
 	last_stop_reason = reason
 	_generation += 1
+	_interrupt_helper()
 	_release_held()
 	_refresh_hotkey()
 	current_layer_index = -1
@@ -667,6 +680,14 @@ func _forget_held(press: Dictionary) -> void:
 		_held_keys.remove_at(i)
 
 
+## A captured action still running in the helper is cut short, so the
+## mouse is the user's again at once. Before _release_held: that call waits
+## for the helper, which would otherwise be the rest of the dwell.
+func _interrupt_helper() -> void:
+	if _captured_thread != null and _captured_thread.is_alive() and backend != null:
+		backend.interrupt()
+
+
 ## Lets go of every button and key a Down left pressed (keys in the reverse
 ## order they went down), so a stop never leaves something stuck.
 func _release_held() -> void:
@@ -703,18 +724,36 @@ func _execute_captured(action: LoopActionT) -> void:
 	var label := kind.to_upper() + " ↩"
 	_set_tracker(from, true, label)
 	var b := backend
+	var gen := _generation
 	var thread := Thread.new()
+	# The helper runs the whole action as one command, the real cursor
+	# pinned to its point the whole time. A stop meanwhile cuts the command
+	# short (see stop): the user has the mouse back at once, not when the
+	# dwell is over.
+	_captured_thread = thread
 	thread.start(func() -> Array:
 		return b.run_captured(kind, action.button, from, to, ms, action.ghost_cursor, path))
 	# The tracker walks the path while the helper moves the real cursor.
 	var started := Time.get_ticks_msec()
 	while thread.is_alive():
-		if ms > 0:
+		if ms > 0 and is_running and gen == _generation:
 			_set_tracker(Vector2i(MousePathT.at(path, float(Time.get_ticks_msec() - started) / float(ms)).round()), true, label)
 		await get_tree().process_frame
 	var result: Array = thread.wait_to_finish()
+	_captured_thread = null
 	if result.size() != 2:
-		if b.last_skipped:
+		if gen != _generation:
+			# Cut short: the helper was ended mid-action, so a button it had
+			# pressed (a click's, a drag's) is let go of here - off the main
+			# thread, since the first command after a kill starts a fresh
+			# helper (a second or so).
+			if kind != "move":
+				var release := Thread.new()
+				release.start(func(): b.release_button(action.button))
+				while release.is_alive():
+					await get_tree().process_frame
+				release.wait_to_finish()
+		elif b.last_skipped:
 			_report_skipped(action)
 		else:
 			emit_signal("status", "%s: could not capture the mouse position" % LoopActionT.type_name(action.type))
@@ -922,6 +961,16 @@ func _mouse_pos() -> Vector2i:
 ## Returns the hit, or (-1, -1) when not found or the run ended mid-read.
 func _detect_once(action: LoopActionT, gen: int) -> Vector2i:
 	var rect := action.roll_detect_rect(_mouse_pos())
+	# Only what is on a screen can be read: the part of the rect off every
+	# display (or a size no screen has - a file can say anything) is left
+	# out, rather than asked of the screen reader, which would try to make
+	# room for it. Nothing on screen at all is nothing to find.
+	var screens := _screen_bounds()
+	if screens.has_area():
+		rect = rect.intersection(screens)
+		if not rect.has_area():
+			print("%s detect: the rect is off every screen -> not found" % ("Image" if action.type == LoopActionT.Type.IMAGE_DETECT else "Pixel"))
+			return Vector2i(-1, -1)
 	detect_rect = rect
 	detect_rect_pinned = true
 	_set_tracker(rect.get_center(), true, "DETECT")
@@ -999,6 +1048,18 @@ func _find_image(action: LoopActionT, rect: Rect2i) -> Vector2i:
 			rect.position.x, rect.position.y, rect.size.x, rect.size.y, size.x, size.y, tolerance, mismatch,
 			", ignore colour" if action.ignore_colour else ""])
 	return hit
+
+
+## The rect every connected display lies in (screen coordinates), or an
+## empty rect where there is no display to ask (headless).
+static func _screen_bounds() -> Rect2i:
+	var count := DisplayServer.get_screen_count()
+	if count <= 0:
+		return Rect2i()
+	var bounds := Rect2i(DisplayServer.screen_get_position(0), DisplayServer.screen_get_size(0))
+	for screen in range(1, count):
+		bounds = bounds.merge(Rect2i(DisplayServer.screen_get_position(screen), DisplayServer.screen_get_size(screen)))
+	return bounds
 
 
 func _sleep_ms(ms: int) -> void:

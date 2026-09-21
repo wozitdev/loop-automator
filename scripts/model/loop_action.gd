@@ -184,6 +184,77 @@ var _image: Image = null
 var _image_texture: ImageTexture = null
 
 
+## Coordinates and times are kept to what the helper's [int] casts take (a
+## number past that fails the command anyway; a stray 1e30 in a file would
+## otherwise turn into INT64_MIN and be sent as such).
+const FIELD_MIN := -2147483648
+const FIELD_MAX := 2147483647
+
+
+## Field `key` of a loop-file dictionary as a whole number: the number as
+## written (a float rounded, a numeric string read), a boolean as 0 / 1, and
+## `default` for anything else - a JSON object, list, or word where a number
+## should be (int() of those is a script error that would abort the load).
+## Clamped to FIELD_MIN .. FIELD_MAX.
+static func read_int(d: Dictionary, key: String, default: int) -> int:
+	var v: Variant = d.get(key, default)
+	var n := default
+	match typeof(v):
+		TYPE_INT:
+			n = v
+		TYPE_FLOAT:
+			if is_finite(v):
+				n = int(clampf(v, FIELD_MIN, FIELD_MAX))
+		TYPE_BOOL:
+			n = 1 if v else 0
+		TYPE_STRING:
+			var s: String = v.strip_edges()
+			if s.is_valid_int():
+				n = int(s)
+			elif s.is_valid_float() and is_finite(float(s)):
+				n = int(clampf(float(s), FIELD_MIN, FIELD_MAX))
+	return clampi(n, FIELD_MIN, FIELD_MAX)
+
+
+## Field `key` as true / false: a boolean as written, a number as non-zero,
+## the words true / false (or 1 / 0), and `default` for anything else.
+static func read_bool(d: Dictionary, key: String, default: bool) -> bool:
+	var v: Variant = d.get(key, default)
+	match typeof(v):
+		TYPE_BOOL:
+			return v
+		TYPE_INT:
+			return v != 0
+		TYPE_FLOAT:
+			return is_finite(v) and v != 0.0
+		TYPE_STRING:
+			var s: String = v.strip_edges().to_lower()
+			if s == "true" or s == "1":
+				return true
+			if s == "false" or s == "0":
+				return false
+	return default
+
+
+## Field `key` as text: a string as written, a number or boolean spelled
+## out, and `default` for anything else (an object or a list is not text).
+static func read_string(d: Dictionary, key: String, default: String) -> String:
+	var v: Variant = d.get(key, default)
+	match typeof(v):
+		TYPE_STRING:
+			return v
+		TYPE_INT, TYPE_FLOAT, TYPE_BOOL:
+			return str(v)
+	return default
+
+
+## Field `key` as a colour, from the "rrggbb" / "rrggbbaa" form the files
+## use; `default` when it is not one.
+static func read_color(d: Dictionary, key: String, default: Color) -> Color:
+	var s := read_string(d, key, "")
+	return Color.html(s) if Color.html_is_valid(s) else default
+
+
 ## A random integer in [lo, hi] (either order); lo == hi is just that value.
 static func roll(lo: int, hi: int) -> int:
 	return randi_range(mini(lo, hi), maxi(lo, hi))
@@ -262,6 +333,13 @@ func set_image_png(png: PackedByteArray) -> bool:
 		# The PNG signature first, so a corrupt file is refused quietly.
 		if png.size() < 8 or png.slice(0, 8) != PackedByteArray([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]):
 			return false
+		# The size in the header, before anything is decoded: the decoder
+		# takes the header's word for the pixels to make room for, so a
+		# small file claiming a huge image would cost that much memory (a
+		# gigabyte for what Godot lets through) just to be refused below.
+		var declared := png_size(png)
+		if declared.x < 1 or declared.y < 1 or declared.x > IMAGE_MAX_SIDE or declared.y > IMAGE_MAX_SIDE:
+			return false
 		img = Image.new()
 		if img.load_png_from_buffer(png) != OK or img.is_empty() \
 				or img.get_width() > IMAGE_MAX_SIDE or img.get_height() > IMAGE_MAX_SIDE:
@@ -270,6 +348,18 @@ func set_image_png(png: PackedByteArray) -> bool:
 	_image = img
 	_image_texture = null
 	return true
+
+
+## The width and height a PNG's header declares (the IHDR chunk, which
+## always comes first, right after the signature), or (0, 0) when the
+## bytes do not start like a PNG.
+static func png_size(png: PackedByteArray) -> Vector2i:
+	# Signature (8) + chunk length (4) + "IHDR" (4) + width (4) + height (4).
+	if png.size() < 24 or png.slice(12, 16).get_string_from_ascii() != "IHDR":
+		return Vector2i.ZERO
+	var w := (png[16] << 24) | (png[17] << 16) | (png[18] << 8) | png[19]
+	var h := (png[20] << 24) | (png[21] << 16) | (png[22] << 8) | png[23]
+	return Vector2i(w, h)
 
 
 ## The decoded template (IMAGE_DETECT), or null without one.
@@ -546,73 +636,86 @@ func to_dict() -> Dictionary:
 	return d
 
 
+## Reads an action back from a loop file. Every field is read through the
+## read_* helpers, so a value of the wrong kind (a file from anywhere may
+## hold anything) falls back to its default instead of aborting the load,
+## and every choice is checked against the values it can take.
 static func from_dict(d: Dictionary) -> Self:
 	var a := Self.new()
-	a.type = int(d.get("type", Type.MOVE))
-	a.enabled = bool(d.get("enabled", true))
-	a.comment = String(d.get("comment", ""))
+	a.type = read_int(d, "type", Type.MOVE)
+	a.enabled = read_bool(d, "enabled", true)
+	# A type this build does not know (a newer file, or a made-up number)
+	# is kept as it is, but switched off: it must never run as something
+	# else, and it can be looked at and deleted.
+	if a.type < Type.MOVE or a.type > Type.SCROLL:
+		a.enabled = false
+	a.comment = read_string(d, "comment", "")
 	# A missing "<name>_max" (files from before ranges) means a fixed value.
-	a.x = int(d.get("x", 0))
-	a.x_max = int(d.get("x_max", a.x))
-	a.y = int(d.get("y", 0))
-	a.y_max = int(d.get("y_max", a.y))
-	a.x2 = int(d.get("x2", 0))
-	a.x2_max = int(d.get("x2_max", a.x2))
-	a.y2 = int(d.get("y2", 0))
-	a.y2_max = int(d.get("y2_max", a.y2))
-	a.w = int(d.get("w", 100))
-	a.w_max = int(d.get("w_max", a.w))
-	a.h = int(d.get("h", 60))
-	a.h_max = int(d.get("h_max", a.h))
-	a.button = int(d.get("button", BUTTON_LEFT))
+	a.x = read_int(d, "x", 0)
+	a.x_max = read_int(d, "x_max", a.x)
+	a.y = read_int(d, "y", 0)
+	a.y_max = read_int(d, "y_max", a.y)
+	a.x2 = read_int(d, "x2", 0)
+	a.x2_max = read_int(d, "x2_max", a.x2)
+	a.y2 = read_int(d, "y2", 0)
+	a.y2_max = read_int(d, "y2_max", a.y2)
+	a.w = read_int(d, "w", 100)
+	a.w_max = read_int(d, "w_max", a.w)
+	a.h = read_int(d, "h", 60)
+	a.h_max = read_int(d, "h_max", a.h)
+	a.button = read_int(d, "button", BUTTON_LEFT)
+	if a.button < BUTTON_LEFT or a.button > BUTTON_MIDDLE:
+		a.button = BUTTON_LEFT
 	# One line of SendKeys text; a file cannot smuggle line breaks into it.
-	a.keys = String(d.get("keys", "")).replace("\r", "").replace("\n", "")
-	a.wait_ms = int(d.get("wait_ms", 100))
-	a.wait_ms_max = int(d.get("wait_ms_max", a.wait_ms))
-	a.duration_ms = int(d.get("duration_ms", 0))
-	a.duration_ms_max = int(d.get("duration_ms_max", a.duration_ms))
-	a.color = Color.html(String(d.get("color", "ffffffff")))
-	a.tolerance = int(d.get("tolerance", 16))
-	a.tolerance_max = int(d.get("tolerance_max", a.tolerance))
+	a.keys = read_string(d, "keys", "").replace("\r", "").replace("\n", "")
+	a.wait_ms = read_int(d, "wait_ms", 100)
+	a.wait_ms_max = read_int(d, "wait_ms_max", a.wait_ms)
+	a.duration_ms = read_int(d, "duration_ms", 0)
+	a.duration_ms_max = read_int(d, "duration_ms_max", a.duration_ms)
+	a.color = read_color(d, "color", Color(1, 1, 1, 1))
+	a.tolerance = read_int(d, "tolerance", 16)
+	a.tolerance_max = read_int(d, "tolerance_max", a.tolerance)
 	# Files from before 0.9.6 hold one "on_fail" choice: Wait till found is
 	# ~Wait on (and it skipped on a timeout, so ~Skip stays on); Skip rest of
 	# layer, and the retired Continue / Stop loop, are ~Wait off.
-	var on_fail := int(d.get("on_fail", OnFail.SKIP_LAYER))
-	a.wait = bool(d.get("wait", on_fail == OnFail.WAIT_FOUND))
-	a.skip = bool(d.get("skip", true))
-	a.if_found = bool(d.get("if_found", false))
-	a.scroll_dir = int(d.get("scroll_dir", ScrollDir.DOWN))
+	var on_fail := read_int(d, "on_fail", OnFail.SKIP_LAYER)
+	a.wait = read_bool(d, "wait", on_fail == OnFail.WAIT_FOUND)
+	a.skip = read_bool(d, "skip", true)
+	a.if_found = read_bool(d, "if_found", false)
+	a.scroll_dir = read_int(d, "scroll_dir", ScrollDir.DOWN)
 	if a.scroll_dir < ScrollDir.UP or a.scroll_dir > ScrollDir.RIGHT:
 		a.scroll_dir = ScrollDir.DOWN
-	a.notches = maxi(1, int(d.get("notches", 3)))
-	a.notches_max = maxi(1, int(d.get("notches_max", a.notches)))
-	a.press_mode = int(d.get("press_mode", PressMode.TAP))
+	a.notches = maxi(1, read_int(d, "notches", 3))
+	a.notches_max = maxi(1, read_int(d, "notches_max", a.notches))
+	a.press_mode = read_int(d, "press_mode", PressMode.TAP)
 	if a.press_mode < PressMode.TAP or a.press_mode > PressMode.UP:
 		a.press_mode = PressMode.TAP
-	a.hold_ms = maxi(0, int(d.get("hold_ms", 500)))
-	a.hold_ms_max = maxi(0, int(d.get("hold_ms_max", a.hold_ms)))
-	a.stop_scope = int(d.get("stop_scope", StopScope.LOOP))
+	a.hold_ms = maxi(0, read_int(d, "hold_ms", 500))
+	a.hold_ms_max = maxi(0, read_int(d, "hold_ms_max", a.hold_ms))
+	a.stop_scope = read_int(d, "stop_scope", StopScope.LOOP)
+	if a.stop_scope < StopScope.LOOP or a.stop_scope > StopScope.LAYER:
+		a.stop_scope = StopScope.LOOP
 	# 1-based: the old 0 ("first pass") reads the same as 1 now.
-	a.stop_after = maxi(1, int(d.get("stop_after", 1)))
-	a.wait_timeout = bool(d.get("wait_timeout", false))
-	a.wait_timeout_ms = maxi(0, int(d.get("wait_timeout_ms", 5000)))
-	a.wait_timeout_ms_max = maxi(0, int(d.get("wait_timeout_ms_max", a.wait_timeout_ms)))
-	a.ignore_colour = bool(d.get("ignore_colour", false))
-	a.mismatch = int(d.get("mismatch", 0))
-	a.mismatch_max = int(d.get("mismatch_max", a.mismatch))
-	a.safe_continue = bool(d.get("safe_continue", true))
-	a.captures = bool(d.get("captures", false))
+	a.stop_after = maxi(1, read_int(d, "stop_after", 1))
+	a.wait_timeout = read_bool(d, "wait_timeout", false)
+	a.wait_timeout_ms = maxi(0, read_int(d, "wait_timeout_ms", 5000))
+	a.wait_timeout_ms_max = maxi(0, read_int(d, "wait_timeout_ms_max", a.wait_timeout_ms))
+	a.ignore_colour = read_bool(d, "ignore_colour", false)
+	a.mismatch = read_int(d, "mismatch", 0)
+	a.mismatch_max = read_int(d, "mismatch_max", a.mismatch)
+	a.safe_continue = read_bool(d, "safe_continue", true)
+	a.captures = read_bool(d, "captures", false)
 	# "lag_compensation" is the pre-release name of the same option.
-	a.ghost_cursor = bool(d.get("ghost_cursor", d.get("lag_compensation", false)))
-	a.capture_mode = int(d.get("capture_mode", CaptureMode.SAVE))
+	a.ghost_cursor = read_bool(d, "ghost_cursor", read_bool(d, "lag_compensation", false))
+	a.capture_mode = read_int(d, "capture_mode", CaptureMode.SAVE)
 	if a.capture_mode < CaptureMode.SAVE or a.capture_mode > CaptureMode.DETECT:
 		a.capture_mode = CaptureMode.SAVE
-	a.follow_cursor = bool(d.get("follow_cursor", false))
-	a.move_to = bool(d.get("move_to", true))
-	a.wiggle = bool(d.get("wiggle", false))
-	a.keys_paced = bool(d.get("keys_paced", false))
+	a.follow_cursor = read_bool(d, "follow_cursor", false)
+	a.move_to = read_bool(d, "move_to", true)
+	a.wiggle = read_bool(d, "wiggle", false)
+	a.keys_paced = read_bool(d, "keys_paced", false)
 	# A template that does not decode (or is too big) is dropped, not kept.
-	a.set_image_png(Marshalls.base64_to_raw(String(d.get("image", ""))))
+	a.set_image_png(Marshalls.base64_to_raw(read_string(d, "image", "")))
 	return a
 
 

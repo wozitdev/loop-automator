@@ -384,12 +384,20 @@ func create_loop(open_now: bool = true, source: LoopProjectT = null) -> int:
 	return id
 
 
+## The most a .loop file may be to be read at all: room for a few dozen
+## screen-sized templates, well short of what would stall the app.
+const LOOP_FILE_MAX_BYTES := 64 * 1024 * 1024
+
+
 ## The loop in a .loop file, or null if `path` is not a readable loop file.
 func _read_loop_file(path: String) -> LoopProjectT:
 	if not FileAccess.file_exists(path):
 		return null
 	var f := FileAccess.open(path, FileAccess.READ)
 	if f == null:
+		return null
+	if f.get_length() > LOOP_FILE_MAX_BYTES:
+		f.close()
 		return null
 	var text := f.get_as_text()
 	f.close()
@@ -625,22 +633,23 @@ func _load_or_init_store() -> void:
 		return
 	var data: Dictionary = parsed
 	loop_stack = []
-	for raw in data.get("loops", []):
+	var loops: Variant = data.get("loops", [])
+	for raw in (loops if typeof(loops) == TYPE_ARRAY else []):
 		if typeof(raw) != TYPE_DICTIONARY:
 			continue
 		var e: Dictionary = raw
-		var id := int(e.get("id", -1))
-		if id < 0:
+		var id := LoopActionT.read_int(e, "id", -1)
+		if id < 0 or _loop_index_from_id(id) >= 0:
 			continue
 		loop_stack.append({
 			"id": id,
-			"name": String(e.get("name", str(id))),
-			"file": _store_loop_file(id, String(e.get("file", ""))),
+			"name": LoopLayerT.clean_name(LoopActionT.read_string(e, "name", str(id))),
+			"file": _store_loop_file(id, LoopActionT.read_string(e, "file", "")),
 		})
-	_next_loop_id = maxi(1, int(data.get("next_loop_id", 1)))
+	_next_loop_id = maxi(1, LoopActionT.read_int(data, "next_loop_id", 1))
 	for e in loop_stack:
 		_next_loop_id = maxi(_next_loop_id, int(e.get("id", 0)) + 1)
-	active_loop_id = int(data.get("active_loop_id", -1))
+	active_loop_id = LoopActionT.read_int(data, "active_loop_id", -1)
 	if _loop_index_from_id(active_loop_id) < 0 and not loop_stack.is_empty():
 		active_loop_id = int(loop_stack[0].get("id", -1))
 

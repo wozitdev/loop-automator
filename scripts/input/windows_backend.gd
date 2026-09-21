@@ -40,6 +40,9 @@ var _warm_thread: Thread
 ## Set by shutdown(): no server is started any more, and a warm-up thread
 ## still at work ends the server itself when it is done (see _server_call).
 var _closing := false
+## Set by interrupt(): the empty answer the waiting call is about to get is
+## meant, not a fault, so it is not logged as one (see _server_call).
+var _cut_short := false
 
 const HELPER_SCRIPT := """param([Parameter(ValueFromRemainingArguments=$true)][string[]]$a)
 # 'guard <pid> <command...>': clicks and keys that would land on a window of
@@ -844,6 +847,22 @@ func settled() -> bool:
 	return _warm_thread == null and _server.is_empty()
 
 
+## Ends the server process outright, whatever it is doing: the thread
+## waiting on its answer sees it gone and returns "", and the next call
+## starts a fresh server. Nothing here touches `_server` itself (the
+## waiting thread holds the lock and cleans up once it notices).
+## A ghost cursor the killed helper had blanked is put back by the caller
+## that gets the empty answer (see run_captured).
+func interrupt() -> void:
+	var server := _server
+	if server.is_empty():
+		return
+	var pid: int = server["pid"]
+	if OS.is_process_running(pid):
+		_cut_short = true
+		OS.kill(pid)
+
+
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_PREDELETE:
 		# No instance method calls here: the script instance is already gone.
@@ -882,10 +901,15 @@ func _server_call(cmd: String, timeout_ms: int = SERVER_READ_TIMEOUT_MS) -> Dict
 		var io: FileAccess = _server["stdio"]
 		io.store_line(cmd)
 		var line := _server_read_line(timeout_ms)
+		# An empty answer is the interrupt this thread was waiting through
+		# (not a fault), or the helper stuck.
 		if line.is_empty():
-			push_warning("WindowsBackend: helper server did not answer %s; restarting it on the next call." % JSON.stringify(_loggable(cmd)))
+			if not _cut_short:
+				push_warning("WindowsBackend: helper server did not answer %s; restarting it on the next call." % JSON.stringify(_loggable(cmd)))
 			_stop_server()
 		result["line"] = line
+		# An interrupt that came after the answer had arrived is spent too.
+		_cut_short = false
 	if _closing:
 		_stop_server()   # shut down meanwhile: this thread ends the server
 	_server_mutex.unlock()
@@ -1122,7 +1146,9 @@ func run_captured(kind: String, button: int, from: Vector2i, to: Vector2i, ms: i
 	var saved := _parse_point(line, 0)
 	var restored := _parse_point(line, 2)
 	if saved == Vector2i(-1, -1) or restored == Vector2i(-1, -1):
-		push_warning("WindowsBackend: captured %s failed (output %s)." % [kind, JSON.stringify(line)])
+		# An empty answer is what an interrupt() leaves; anything else is a fault.
+		if not line.is_empty():
+			push_warning("WindowsBackend: captured %s failed (output %s)." % [kind, JSON.stringify(line)])
 		if ghost:
 			# The helper may have died with the system cursors blanked.
 			_run_sync(PackedStringArray(["cursors-restore"]))

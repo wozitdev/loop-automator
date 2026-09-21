@@ -30,6 +30,13 @@ func shutdown(_wait: bool = false) -> void:
 func settled() -> bool:
 	return true
 
+## Cuts short a command the backend is in the middle of on another thread
+## (a captured action runs for its whole dwell as one helper command, the
+## real cursor pinned meanwhile): the call waiting on it returns with
+## nothing, and the backend is usable again afterwards. Main thread.
+func interrupt() -> void:
+	pass
+
 func move_to(pos: Vector2i) -> void:
 	pass
 
