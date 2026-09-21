@@ -331,10 +331,14 @@ func stop(reason: String = "Stopped.") -> void:
 func _run_loop(gen: int) -> void:
 	var project := ProjectData.project
 	while is_running and gen == _generation:
-		# With the "~" in front of the delay, it is waited after every action;
-		# the pass then ends with the last action's wait, not a second one.
-		var delayed_after_last := false
+		# The loop delay leads every pass (the first one too). With the "~" in
+		# front of it, it leads every action instead: the first action's is the
+		# pass's, so no pass waits twice.
 		var ran := 0
+		if not project.delay_after_each_action:
+			await _wait_loop_delay(project, gen, "Loop delay")
+			if not is_running or gen != _generation:
+				break
 		for li in project.layers.size():
 			if not is_running or gen != _generation:
 				break
@@ -354,6 +358,10 @@ func _run_loop(gen: int) -> void:
 				_last_event = ""
 				emit_signal("action_executing", li, ai)
 				ran += 1
+				if project.delay_after_each_action:
+					await _wait_loop_delay(project, gen, "Action delay")
+					if not is_running or gen != _generation:
+						break
 				_note_user_motion()
 				var result := await _execute_action(action)
 				_note_loop_cursor(action)
@@ -364,10 +372,6 @@ func _run_loop(gen: int) -> void:
 					_last_event = _last_event.trim_suffix(".") + ", skipped the rest of \"%s\"." % layer.name
 					emit_signal("status", _last_event)
 					skip_layer = true
-				delayed_after_last = false
-				if project.delay_after_each_action and is_running and gen == _generation:
-					await _wait_loop_delay(project, gen, "Action delay")
-					delayed_after_last = true
 				if skip_layer:
 					break
 			if skip_layer:
@@ -379,8 +383,6 @@ func _run_loop(gen: int) -> void:
 			# so, rather than a loop that runs forever doing nothing.
 			stop("Stopped: the loop has no actions to run.")
 			return
-		if not delayed_after_last:
-			await _wait_loop_delay(project, gen, "Loop delay")
 		# One frame per pass whatever the delay: a pass with nothing to wait
 		# for (no actions, or instant ones with a 0 ms delay) would otherwise
 		# spin without ever letting a frame - or a stop - through.

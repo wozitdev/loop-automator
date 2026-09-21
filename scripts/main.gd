@@ -107,11 +107,15 @@ var _pick_active: bool = false
 var _pick_was_overlay_visible: bool = false
 var _pick_point_cb: Callable = Callable()
 var _pick_rect_cb: Callable = Callable()
-## The builder is moved off-screen for the duration of a pick (when enabled in
-## the toolbar) so the desktop underneath is visible; moved back when the pick
-## ends. Off-screen rather than minimised so it keeps keyboard focus: the pick
-## window must never be focused (see PickOverlay), and Esc arrives here.
+## The builder is got out of the way (~Edit unchecked) so the desktop it
+## covers is visible: minimised when a run or a recording starts - the
+## taskbar brings it back whenever the user wants it, and the end of the
+## run un-minimises it if it still is - or, for a pick, moved off-screen
+## (`_builder_parked`) and back when the pick ends. Off-screen rather than
+## minimised there so it keeps the keyboard focus: the pick window must
+## never be focused (see PickOverlay), and Esc arrives here.
 var _builder_hidden_for_pick: bool = false
+var _builder_parked: bool = false
 var _builder_prev_pos: Vector2i = Vector2i.ZERO
 var _builder_prev_mode: int = Window.MODE_WINDOWED
 ## A colour read is in flight after a pick: keep the builder out of the way
@@ -292,33 +296,6 @@ func _build_toolbar() -> Control:
 	var hb := HBoxContainer.new()
 	hb.add_theme_constant_override("separation", 6)
 
-	# --- Timing -----------------------------------------------------------
-	# The delay's label is a checkbox, "~Delay ms": checked, the delay is
-	# also waited after every action.
-	var delay_tip := "Pause after the loop's last action, before it starts over (ms). Saved with the loop."
-	delay_each_check = CheckBox.new()
-	delay_each_check.text = "~Delay"
-	delay_each_check.focus_mode = Control.FOCUS_NONE
-	delay_each_check.tooltip_text = "%s\nChecked: also wait it after every action." % delay_tip
-	delay_each_check.button_pressed = ProjectData.project.delay_after_each_action
-	delay_each_check.toggled.connect(func(v: bool): ProjectData.set_delay_after_each_action(v))
-	hb.add_child(delay_each_check)
-	# A RangePair like the editor fields: "~" expands it to a min - max pause.
-	# The controls sit in the toolbar row at a fixed width (no expand).
-	_delay_pair = RangePair.new()
-	_delay_pair.build(hb, ProjectData.project.loop_delay_ms, ProjectData.project.loop_delay_ms_max, 0, 60000, func(l: int, h: int):
-		ProjectData.set_loop_delay(l, h))
-	_delay_pair.set_suffix("ms")
-	# Wide enough for the biggest value, 60000 ms, to show whole.
-	for sp in [_delay_pair.lo, _delay_pair.hi]:
-		sp.size_flags_horizontal = Control.SIZE_FILL
-		sp.custom_minimum_size = Vector2(_spin_box_width(sp, "60000 ms"), 0)
-	_delay_pair.single_tip = delay_tip
-	if not _delay_pair.ranged:
-		_delay_pair.lo.tooltip_text = delay_tip
-
-	hb.add_child(_vsep())
-
 	# --- Playback ---------------------------------------------------------
 	play_btn = _icon_button(UiIconsT.play(), "", _on_play_pressed)
 	play_btn.text = _run_label()
@@ -382,6 +359,33 @@ func _build_toolbar() -> Control:
 	hb.add_child(duplicate_loop_btn)
 	delete_loop_btn = _icon_button(UiIconsT.trash(), "Delete this loop (its file too)", _confirm_delete_loop)
 	hb.add_child(delete_loop_btn)
+
+	hb.add_child(_vsep())
+
+	# --- Timing -----------------------------------------------------------
+	# The delay's label is a checkbox, "~Delay ms": checked, the delay is
+	# waited before every action instead of once a round.
+	var delay_tip := "Pause before each round of the loop (ms). Saved with the loop."
+	delay_each_check = CheckBox.new()
+	delay_each_check.text = "~Delay"
+	delay_each_check.focus_mode = Control.FOCUS_NONE
+	delay_each_check.tooltip_text = "%s\nChecked: wait it before every action instead." % delay_tip
+	delay_each_check.button_pressed = ProjectData.project.delay_after_each_action
+	delay_each_check.toggled.connect(func(v: bool): ProjectData.set_delay_after_each_action(v))
+	hb.add_child(delay_each_check)
+	# A RangePair like the editor fields: "~" expands it to a min - max pause.
+	# The controls sit in the toolbar row at a fixed width (no expand).
+	_delay_pair = RangePair.new()
+	_delay_pair.build(hb, ProjectData.project.loop_delay_ms, ProjectData.project.loop_delay_ms_max, 0, 60000, func(l: int, h: int):
+		ProjectData.set_loop_delay(l, h))
+	_delay_pair.set_suffix("ms")
+	# Wide enough for the biggest value, 60000 ms, to show whole.
+	for sp in [_delay_pair.lo, _delay_pair.hi]:
+		sp.size_flags_horizontal = Control.SIZE_FILL
+		sp.custom_minimum_size = Vector2(_spin_box_width(sp, "60000 ms"), 0)
+	_delay_pair.single_tip = delay_tip
+	if not _delay_pair.ranged:
+		_delay_pair.lo.tooltip_text = delay_tip
 
 	# --- Self-interaction toggles (right-aligned) ---------------------------
 	var spacer := Control.new()
@@ -639,8 +643,8 @@ func _connect_signals() -> void:
 		play_btn.icon = UiIconsT.stop()
 		play_btn.text = "Run!"
 		_refresh_edit_lock()
-		# ~Edit unchecked: this window gets out of the way for the run, as
-		# for a pick (F8, Esc and the button still stop it).
+		# ~Edit unchecked: this window is minimised for the run (the taskbar
+		# brings it back; F8 stops the loop from anywhere with ~F8 on).
 		_lower_builder())
 	Playback.playback_stopped.connect(func():
 		var was_real := Playback.backend != null and Playback.backend.is_real()
@@ -1729,18 +1733,27 @@ func _start_pick(kind: int, sample_colors: bool = false) -> void:
 		overlay.show_overlay()
 	status_label.text = "Pick on screen — left-click to set, right-click / Esc to cancel."
 	picker.begin_pick(kind, sample_colors)
-	_lower_builder()
+	_lower_builder(true)
 	if sample_colors:
 		_start_hover_sampling()
 
 
 ## Gets the builder out of the way (~Edit unchecked) so the desktop it was
-## covering is visible - for a pick, a recording, or a run. Put back by
+## covering is visible. For a run or a recording it is minimised: the
+## taskbar brings it back whenever the user wants it, and the end of the
+## run un-minimises it if it still is. With `park`, for a pick, it is moved
+## just off-screen instead, where it keeps the focus (Esc still reaches it)
+## and comes back when the pick ends. Put back by
 ## _restore_builder_after_pick.
-func _lower_builder() -> void:
+func _lower_builder(park: bool = false) -> void:
 	_refresh_stay_on_edit_check()
 	if _builder_hidden_for_pick:
-		return
+		# Minimised for a run and brought back by the user meanwhile: it is
+		# theirs again (a pick started from it may park it).
+		var win := get_window()
+		if _builder_parked or win.mode == Window.MODE_MINIMIZED:
+			return
+		_builder_hidden_for_pick = false
 	var lower := not stay_on_edit_check.button_pressed
 	if lower and stay_on_edit_check.disabled:
 		status_label.text += "  (Lowering the window is unavailable while embedded in the editor.)"
@@ -1749,14 +1762,13 @@ func _lower_builder() -> void:
 		_builder_hidden_for_pick = true
 		_builder_prev_mode = win.mode
 		_builder_prev_pos = win.position
-		if win.mode == Window.MODE_WINDOWED:
-			# Park it just past the right edge of the virtual desktop. It stays
-			# focused there, so Esc (handled in _input) keeps working.
+		# A maximised window cannot be moved aside: it is minimised for a
+		# pick as well (Esc is then unavailable; right-click still cancels).
+		_builder_parked = park and win.mode == Window.MODE_WINDOWED
+		if _builder_parked:
 			var desktop := OverlayT.virtual_desktop_rect()
 			win.position = Vector2i(desktop.end.x + 64, win.position.y)
 		else:
-			# A maximised window can't be moved; minimise instead (Esc is then
-			# unavailable, right-click still cancels).
 			win.mode = Window.MODE_MINIMIZED
 
 
@@ -1787,21 +1799,24 @@ func _refresh_stay_on_edit_check() -> void:
 	if embedded:
 		stay_on_edit_check.tooltip_text = "Unavailable while the game is embedded in the Godot editor (Game tab → turn off Embed Game on Next Play)."
 	else:
-		stay_on_edit_check.tooltip_text = "Unchecked: this window is moved out of the way while you pick on screen, record, or a loop runs.\nChecked: it stays where it is."
+		stay_on_edit_check.tooltip_text = "Unchecked: this window is minimised when a loop or a recording starts (the taskbar brings it back) and moved aside while you pick on screen.\nChecked: it stays where it is."
 
 
-## Bring the builder back (if it was moved away for the pick) and refocus it.
+## Brings the builder back (if it was got out of the way) and refocuses
+## it. One the user brought back themselves meanwhile is left as they
+## have it.
 func _restore_builder_after_pick() -> void:
 	var win := get_window()
 	if _builder_hidden_for_pick:
 		_builder_hidden_for_pick = false
-		# Both are put back, whatever happened meanwhile: a window parked
-		# off-screen that the user then minimised from the taskbar came back
-		# un-minimised but still off-screen, with no way to reach it.
 		if win.mode == Window.MODE_MINIMIZED:
 			win.mode = _builder_prev_mode
-		if _builder_prev_mode == Window.MODE_WINDOWED and win.mode == Window.MODE_WINDOWED:
+		# A parked window is put back by position too, whatever happened
+		# meanwhile: one the user minimised from the taskbar while parked
+		# came back un-minimised but still off-screen, unreachable.
+		if _builder_parked and win.mode == Window.MODE_WINDOWED:
 			win.position = _builder_prev_pos
+		_builder_parked = false
 	_keep_builder_on_screen()
 	win.grab_focus()
 

@@ -223,12 +223,12 @@ pair expanded.
 
 ### The loop delay
 
-**~Delay** in the toolbar is the pause after the loop's last action, before
-it starts over. It is also a checkbox: tick it and the same delay is waited
-after every action, a fresh random value each time when it is a range — a
-quick way to slow a whole loop down without adding a Delay after every step
-(the last action's wait then leads into the next round; there is no second
-one). Both are saved with the loop.
+**~Delay** in the toolbar is the pause before each round of the loop (the
+first one too, so a run begins with it). It is also a checkbox: tick it and
+the same delay is waited before every action instead, a fresh random value
+each time when it is a range — a quick way to slow a whole loop down without
+adding a Delay after every step (the first action's delay is the round's;
+no round waits twice). Both are saved with the loop.
 
 ---
 
@@ -246,8 +246,10 @@ one). Both are saved with the loop.
      **left-click** to set it (drag for a detection rect). **Right-click / Esc**
      cancels. This replaces the old "grab current mouse" approach, which captured
      the button's own position. While you pick, the builder window moves off-screen so
-     the desktop it was covering is visible, and comes back when the pick ends —
-     the same while a loop runs, so it never covers what the loop works on.
+     the desktop it was covering is visible, and comes back when the pick ends.
+     When a loop or a recording starts it is minimised instead, so it does not
+     cover what the loop works on — bring it back from the taskbar whenever you
+     like; it comes back by itself when the run ends if you have not.
      Tick **~Edit** (right end of the toolbar) to keep it put. (Lowering is
      unavailable while the game runs embedded in the Godot editor's Game tab;
      turn off *Embed Game on Next Play* there to try it from the editor.)

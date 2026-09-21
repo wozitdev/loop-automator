@@ -15,12 +15,12 @@ const LoopActionT := preload("res://scripts/model/loop_action.gd")
 const FILE_VERSION := 2
 
 var name: String = "Untitled Loop"
-## Pause inserted between full loop iterations: a random value from
+## Pause before each pass of the loop (the first one too): a random value from
 ## loop_delay_ms .. loop_delay_ms_max each time (equal ends = fixed).
 var loop_delay_ms: int = 250
 var loop_delay_ms_max: int = 250
-## Also wait a (freshly rolled) loop delay after every action, not only
-## before the loop starts over: the toolbar's "~Delay ms" checkbox.
+## Wait a (freshly rolled) loop delay before every action instead of once
+## a pass: the toolbar's "~Delay ms" checkbox.
 var delay_after_each_action: bool = false
 var layers: Array[LoopLayerT] = []
 
