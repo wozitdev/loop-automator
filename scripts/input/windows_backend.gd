@@ -527,7 +527,16 @@ switch ($cmd) {
     if (Guarded ([Win32In]::GetForegroundWindow())) { Write-Output 'skipped'; break }
     Add-Type -AssemblyName System.Windows.Forms
     $text = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([string]$a[1]))
-    [System.Windows.Forms.SendKeys]::SendWait($text)
+    # Text SendKeys cannot read (a stray brace, an unknown {keyword}) is
+    # refused whole, nothing typed. Its message quotes what it did not
+    # like ('Keyword \"PASSWORD\" is not valid.') and the answer ends up in
+    # Loop Automator's log, so the quoted part is left out of it.
+    try { [System.Windows.Forms.SendKeys]::SendWait($text) }
+    catch {
+      $why = $_.Exception.Message
+      if ($null -ne $_.Exception.InnerException) { $why = $_.Exception.InnerException.Message }
+      throw ('the text is not valid SendKeys syntax: ' + ($why -replace '\"[^\"]*\"', '\"...\"'))
+    }
   }
   'hold' {
     # hold <mods|-> <keys> <lead> <hold> <gap> <trail>: one keystroke with

@@ -188,6 +188,12 @@ var _image_texture: ImageTexture = null
 ## otherwise turn into INT64_MIN and be sent as such).
 const FIELD_MIN := -2147483648
 const FIELD_MAX := 2147483647
+## Screen geometry (a point, a rect's size) is kept well inside that: the
+## overlay and the detects add points and sizes together (Rect2i is 32-bit),
+## and a file saying 2147483647 for both would wrap. No screen is anywhere
+## near this many pixels.
+const COORD_MIN := -16777216
+const COORD_MAX := 16777216
 ## The most notches one Scroll turns (the editor's and the helper's limit;
 ## a file saying more would have the run turning the wheel for hours).
 const NOTCHES_MAX := 200
@@ -220,6 +226,33 @@ static func read_int(d: Dictionary, key: String, default: int) -> int:
 			elif s.is_valid_float() and is_finite(float(s)):
 				n = int(clampf(float(s), FIELD_MIN, FIELD_MAX))
 	return clampi(n, FIELD_MIN, FIELD_MAX)
+
+
+## Field `key` as a screen coordinate or size: read_int, kept to
+## COORD_MIN .. COORD_MAX.
+static func read_coord(d: Dictionary, key: String, default: int) -> int:
+	return clampi(read_int(d, key, default), COORD_MIN, COORD_MAX)
+
+
+## `raw` as one line of plain text: no control characters (line breaks,
+## tabs, …), no line / paragraph separators, and no bidi marks or overrides
+## - which can make text read in another order than it is typed or stored.
+## What a name, a comment or a Key's text looks like on screen is then what
+## it is. `max_chars` cuts it after that.
+static func plain_text(raw: String, max_chars: int) -> String:
+	var out := ""
+	for ch in raw.left(max_chars * 2):
+		var code := ch.unicode_at(0)
+		if code < 32 or (code >= 127 and code <= 159):
+			continue  # C0 / C1 control characters
+		if code == 0x2028 or code == 0x2029:
+			continue  # line / paragraph separators
+		if code == 0x200E or code == 0x200F or (code >= 0x202A and code <= 0x202E) or (code >= 0x2066 and code <= 0x2069):
+			continue  # bidi marks and overrides
+		out += ch
+		if out.length() >= max_chars:
+			break
+	return out
 
 
 ## Field `key` as true / false: a boolean as written, a number as non-zero,
@@ -515,7 +548,7 @@ func describe() -> String:
 			return "Scroll %s ×%s%s" % [scroll_dir_name(scroll_dir), range_text(notches, notches_max), over]
 		Type.KEY:
 			var press := press_text()
-			return "Key%s: \"%s\"" % [" " + press if not press.is_empty() else "", keys]
+			return "Key%s: \"%s\"" % [" " + press if not press.is_empty() else "", keys_shown()]
 		Type.WAIT:
 			return "Delay %s ms" % range_text(wait_ms, wait_ms_max)
 		Type.PIXEL_DETECT:
@@ -540,6 +573,14 @@ func describe() -> String:
 				return "Find %s in %s×%s @ cursor%s" % [what, range_text(w, w_max), range_text(h, h_max), detect_suffix()]
 			return "Find %s in [%s, %s, %s×%s]%s" % [what, xs, ys, range_text(w, w_max), range_text(h, h_max), detect_suffix()]
 	return "Action"
+
+
+## The Key's text as the list and the import question show it: in the order
+## it is typed. A bidi override in it (a file may hold anything) would show
+## the same characters in another order, and reading a loop's Key actions
+## is how a loop from someone else is checked before it runs.
+func keys_shown() -> String:
+	return plain_text(keys, KEYS_MAX_CHARS)
 
 
 ## What a detect does with its result, for the list: nothing for the
@@ -654,20 +695,20 @@ static func from_dict(d: Dictionary) -> Self:
 	# else, and it can be looked at and deleted.
 	if a.type < Type.MOVE or a.type > Type.SCROLL:
 		a.enabled = false
-	a.comment = read_string(d, "comment", "").left(COMMENT_MAX_CHARS)
+	a.comment = plain_text(read_string(d, "comment", ""), COMMENT_MAX_CHARS)
 	# A missing "<name>_max" (files from before ranges) means a fixed value.
-	a.x = read_int(d, "x", 0)
-	a.x_max = read_int(d, "x_max", a.x)
-	a.y = read_int(d, "y", 0)
-	a.y_max = read_int(d, "y_max", a.y)
-	a.x2 = read_int(d, "x2", 0)
-	a.x2_max = read_int(d, "x2_max", a.x2)
-	a.y2 = read_int(d, "y2", 0)
-	a.y2_max = read_int(d, "y2_max", a.y2)
-	a.w = read_int(d, "w", 100)
-	a.w_max = read_int(d, "w_max", a.w)
-	a.h = read_int(d, "h", 60)
-	a.h_max = read_int(d, "h_max", a.h)
+	a.x = read_coord(d, "x", 0)
+	a.x_max = read_coord(d, "x_max", a.x)
+	a.y = read_coord(d, "y", 0)
+	a.y_max = read_coord(d, "y_max", a.y)
+	a.x2 = read_coord(d, "x2", 0)
+	a.x2_max = read_coord(d, "x2_max", a.x2)
+	a.y2 = read_coord(d, "y2", 0)
+	a.y2_max = read_coord(d, "y2_max", a.y2)
+	a.w = read_coord(d, "w", 100)
+	a.w_max = read_coord(d, "w_max", a.w)
+	a.h = read_coord(d, "h", 60)
+	a.h_max = read_coord(d, "h_max", a.h)
 	a.button = read_int(d, "button", BUTTON_LEFT)
 	if a.button < BUTTON_LEFT or a.button > BUTTON_MIDDLE:
 		a.button = BUTTON_LEFT

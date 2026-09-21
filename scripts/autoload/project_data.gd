@@ -408,7 +408,7 @@ func peek_loop(path: String) -> Dictionary:
 		actions += layer.actions.size()
 		for a in layer.actions:
 			if a.type == LoopActionT.Type.KEY:
-				keys.append(a.keys)
+				keys.append(a.keys_shown())
 	return {"name": p.layers[0].name, "layers": p.layers.size(), "actions": actions, "keys": keys}
 
 

@@ -136,7 +136,9 @@ static func _items(events: Array) -> Array:
 				if e["horizontal"]:
 					dir = LoopActionT.ScrollDir.RIGHT if delta > 0 else LoopActionT.ScrollDir.LEFT
 				var n := maxi(1, absi(delta) / 120)
-				if not wheel.is_empty() and (wheel["dir"] != dir or t - wheel["t1"] > WHEEL_GAP_MS):
+				# (A Scroll turns NOTCHES_MAX at most: a longer run is two.)
+				if not wheel.is_empty() and (wheel["dir"] != dir or t - wheel["t1"] > WHEEL_GAP_MS \
+						or wheel["n"] + n > LoopActionT.NOTCHES_MAX):
 					items.append(_item("scroll", wheel["t0"], wheel["t1"], wheel))
 					wheel = {}
 				if wheel.is_empty():
@@ -304,7 +306,10 @@ static func _actions(items: Array) -> Array[LoopActionT]:
 		var t0: int = it["t0"]
 		var t1: int = it["t1"]
 		var gap := t0 - t_done
-		if it["kind"] == "key" and typing != null and gap < TYPING_GAP_MS:
+		# (A Key's text holds KEYS_MAX_CHARS at most: typing past that goes
+		# on in a Key action of its own rather than being cut on the next load.)
+		if it["kind"] == "key" and typing != null and gap < TYPING_GAP_MS \
+				and typing.keys.length() + String(it["text"]).length() <= LoopActionT.KEYS_MAX_CHARS:
 			typing.keys += it["text"]
 			t_done = maxi(t_done, t1)
 			continue
@@ -347,7 +352,7 @@ static func _actions(items: Array) -> Array[LoopActionT]:
 			"scroll":
 				a = LoopActionT.new_of_type(LoopActionT.Type.SCROLL)
 				a.scroll_dir = it["dir"]
-				a.notches = it["n"]
+				a.notches = mini(it["n"], LoopActionT.NOTCHES_MAX)
 				a.notches_max = a.notches
 				_over(a, t1 - t0 if it["n"] > 1 else 0)
 			"key":
