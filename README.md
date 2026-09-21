@@ -175,17 +175,19 @@ place over your other applications.
 ### Record
 
 **Rec** (far right of the actions row) turns what you do into actions.
-Press it: the builder moves out of the way (unless **~Edit** keeps it), the
-status line counts down from 3, and from then on every mouse move, click,
-drag, wheel turn and keystroke is recorded until you press **F8** (from any
-window, whether ~F8 is on or not; Esc or the button in the builder work
-too). The recording is added to the end of the layer whose actions are
-shown, written the way you would have: a run of motion is one Move over
-its time, a press that travels is a Drag, one held still is a Click hold,
-keystrokes close together are one Key action typed with ~Keys (Ctrl+C is
-`^c`, Shift and a letter its capital), a key held while other things
-happen is a Key down … up, and the pauses in between are Waits. Every
-number is exact — a TAS — and each is a range you can open with its `~`.
+Press it and confirm (the prompt reminds you that everything you type is
+kept as plain text): the builder moves out of the way (unless **~Edit**
+keeps it), the status line counts down from 3, and from then on every
+mouse move, click, drag, wheel turn and keystroke is recorded until you
+press **F8** (from any window, whether ~F8 is on or not; Esc or the button
+in the builder work too). The recording is added to the end of the layer
+whose actions are shown, written the way you would have: a run of motion is
+one Move over its time, a press that travels is a Drag, one held still is
+a Click hold, keystrokes close together are one Key action typed with
+~Keys (Ctrl+C is `^c`, Shift and a letter its capital), a key held while
+other things happen is a Key down … up, and the pauses in between are
+Waits. Every number is exact — a TAS — and each is a range you can open
+with its `~`.
 Windows only. What lands on Loop Automator itself (unless **~Self** is on)
 and input a program makes (a game re-centring the cursor) is left out;
 camera turns in a game that locks the cursor are not recorded faithfully.

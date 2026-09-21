@@ -27,6 +27,11 @@ var events: Array = []
 
 var _proc: Dictionary = {}
 var _pending := PackedByteArray()
+## What the helper wrote to stderr (PowerShell's own errors, an Add-Type that
+## does not compile): kept for `reason` when the helper dies before "ready",
+## and drained so a full pipe can never stall it.
+var _stderr_text := PackedByteArray()
+const STDERR_KEEP := 4096
 
 ## record <guard pid> [any]: hooks the mouse and keyboard, prints "ready",
 ## then a line per event until stdin closes / says 'quit' or F8 is pressed
@@ -173,6 +178,7 @@ func start(guard_pid: int, any_input: bool = false) -> void:
 		reason = "could not start PowerShell"
 		return
 	_pending = PackedByteArray()
+	_stderr_text = PackedByteArray()
 	state = State.STARTING
 
 
@@ -188,6 +194,13 @@ func poll() -> bool:
 		if chunk.size() == 0:
 			break
 		_pending.append_array(chunk)
+	var err: FileAccess = _proc["stderr"]
+	while true:
+		var chunk := err.get_buffer(4096)
+		if chunk.size() == 0:
+			break
+		if _stderr_text.size() < STDERR_KEEP:
+			_stderr_text.append_array(chunk)
 	var stopped := false
 	while true:
 		var nl := _pending.find(10)
@@ -209,7 +222,20 @@ func poll() -> bool:
 	if state == State.STARTING and not OS.is_process_running(_proc["pid"]):
 		state = State.UNAVAILABLE
 		reason = "the helper exited (exit code %d)" % OS.get_process_exit_code(_proc["pid"])
+		var said := _stderr_line()
+		if not said.is_empty():
+			reason += ": " + said
 	return stopped
+
+
+## The first line the helper wrote to stderr, at most 160 characters, or "".
+## PowerShell writes its errors there (several lines; the first names it).
+func _stderr_line() -> String:
+	for line in _stderr_text.get_string_from_utf8().split("\n"):
+		var s := line.strip_edges()
+		if not s.is_empty():
+			return s.left(160)
+	return ""
 
 
 ## One helper line as an event (see `events`), or {} for anything else.

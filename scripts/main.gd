@@ -589,7 +589,7 @@ func _build_action_panel() -> Control:
 	rec_btn.custom_minimum_size = Vector2(_button_width(rec_btn, ["Rec", "Stop"]), 0)
 	_set_rec_icon_color(REC_IDLE_COLOR)
 	if OS.get_name() == "Windows":
-		rec_btn.tooltip_text = "Record what you do with the mouse and keyboard into this layer, until you press F8."
+		rec_btn.tooltip_text = "Record what you do with the mouse and keyboard into this layer, until you press F8.\nEverything you type is kept in the loop as plain text - stop before typing a password."
 	else:
 		rec_btn.tooltip_text = "Recording works on Windows only."
 		rec_btn.disabled = true
@@ -1806,7 +1806,13 @@ func _on_rec_pressed() -> void:
 	if _recording:
 		_stop_recording("", true)
 	elif not Playback.is_running and not _pick_active and not _dialog_open():
-		_start_recording()
+		var layer := ProjectData.active_layer()
+		if layer == null:
+			return
+		# Asked first: the hooks see every window, and what is typed lands in
+		# the loop file readable - a password too.
+		_confirm("Record what you do with the mouse and keyboard into \"%s\" until you press F8?\nEverything you type is kept in the loop as plain text - stop before typing a password." % layer.name,
+			_start_recording, "Record")
 
 
 ## Rec: the builder moves out of the way, a short countdown on the status
