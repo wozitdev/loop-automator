@@ -15,7 +15,7 @@ enum Type {
 	KEY,           ## Send keys (SendKeys format on Windows backend)
 	WAIT,          ## Pause for wait_ms milliseconds
 	PIXEL_DETECT,  ## Look for an expected colour anywhere in a screen rect
-	CAPTURE,       ## Save the mouse position, or move back to the saved one
+	CAPTURE,       ## Move the mouse to where the user has it, or to the last detect's spot
 	STOP,          ## Stop the loop (or end this layer), now or after N passes
 	IMAGE_DETECT,  ## Look for a small screenshot anywhere in a screen rect
 	SCROLL,        ## Turn the mouse wheel where the cursor is
@@ -53,11 +53,12 @@ enum StopScope {
 	LAYER,  ## Skip the rest of this layer this pass
 }
 
-## What a CAPTURE action does with the saved mouse position.
+## Where a CAPTURE action moves the mouse. (Files from before 0.9.6 had a
+## Save / Load pair, values 0 and 1: the run now keeps the user's own mouse
+## position by itself, so both read as MOUSE.)
 enum CaptureMode {
-	SAVE,    ## Remember where the mouse is right now
-	LOAD,    ## Move the mouse back to the remembered position
-	DETECT,  ## Move the mouse to where the last detect found its target
+	MOUSE = 1,   ## To where the user's own mouse is (see PlaybackEngine)
+	DETECT = 2,  ## To where the last detect found its target
 }
 
 ## CLICK / KEY: how the press goes. TAP is the plain click or keystroke;
@@ -82,14 +83,14 @@ enum ScrollDir {
 var type: int = Type.MOVE
 var enabled: bool = true
 var comment: String = ""
-## MOVE / CLICK / DRAG: save the mouse position before the action runs and
+## MOVE / CLICK / DRAG: remember the mouse position before the action runs and
 ## move back to it afterwards, plus whatever the user moved the mouse
-## meanwhile (same saved slot a CAPTURE action uses).
+## meanwhile, so the user's own movement is never lost.
 var captures: bool = false
 ## With `captures`: hide the real cursor while it is off doing the action and
 ## show a ghost cursor that keeps following the user instead.
 var ghost_cursor: bool = false
-var capture_mode: int = CaptureMode.SAVE
+var capture_mode: int = CaptureMode.MOUSE
 ## PIXEL_DETECT / IMAGE_DETECT: centre the rect on the mouse (and keep it there as the mouse
 ## moves) instead of using the stored x / y.
 var follow_cursor: bool = false
@@ -481,7 +482,7 @@ static func new_of_type(t: int) -> Self:
 			a.tolerance = 16
 			a.tolerance_max = 16
 		Type.CAPTURE:
-			a.capture_mode = CaptureMode.SAVE
+			a.capture_mode = CaptureMode.MOUSE
 		Type.STOP:
 			a.stop_scope = StopScope.LOOP
 			a.stop_after = 1
@@ -526,10 +527,9 @@ func describe() -> String:
 				return "Detect %s in %s×%s @ cursor%s" % [color.to_html(false), ws, hs, detect_suffix()]
 			return "Detect %s in [%s, %s, %s×%s]%s" % [color.to_html(false), xs, ys, ws, hs, detect_suffix()]
 		Type.CAPTURE:
-			match capture_mode:
-				CaptureMode.LOAD: return "Capture: Load mouse position%s" % over
-				CaptureMode.DETECT: return "Capture: move to the last detect's spot%s" % over
-			return "Capture: Save mouse position"
+			if capture_mode == CaptureMode.DETECT:
+				return "Capture: move to the last detect's spot%s" % over
+			return "Capture: move to your mouse position%s" % over
 		Type.STOP:
 			var what := "loop" if stop_scope == StopScope.LOOP else "layer"
 			if stop_after > 1:
@@ -714,9 +714,11 @@ static func from_dict(d: Dictionary) -> Self:
 	a.captures = read_bool(d, "captures", false)
 	# "lag_compensation" is the pre-release name of the same option.
 	a.ghost_cursor = read_bool(d, "ghost_cursor", read_bool(d, "lag_compensation", false))
-	a.capture_mode = read_int(d, "capture_mode", CaptureMode.SAVE)
-	if a.capture_mode < CaptureMode.SAVE or a.capture_mode > CaptureMode.DETECT:
-		a.capture_mode = CaptureMode.SAVE
+	# 0 was Save (before 0.9.6): the user's mouse position is kept by the
+	# run itself now, so it reads as Mouse, as Load (1) does.
+	a.capture_mode = read_int(d, "capture_mode", CaptureMode.MOUSE)
+	if a.capture_mode != CaptureMode.DETECT:
+		a.capture_mode = CaptureMode.MOUSE
 	a.follow_cursor = read_bool(d, "follow_cursor", false)
 	a.move_to = read_bool(d, "move_to", true)
 	a.wiggle = read_bool(d, "wiggle", false)

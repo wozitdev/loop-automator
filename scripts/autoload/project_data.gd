@@ -283,25 +283,6 @@ func move_action(index: int, delta: int) -> void:
 	emit_signal("selection_changed")
 
 
-## Switches off one action anywhere in the project (used by playback when a
-## Capture Load has nothing to load) and refreshes the UI for it.
-func disable_action(layer_index: int, action_index: int) -> void:
-	if project == null or layer_index < 0 or layer_index >= project.layers.size():
-		return
-	var layer: LoopLayerT = project.layers[layer_index]
-	if action_index < 0 or action_index >= layer.actions.size():
-		return
-	var a: LoopActionT = layer.actions[action_index]
-	if not a.enabled:
-		return
-	a.enabled = false
-	_mark_pending()
-	emit_signal("actions_changed", layer_index)
-	emit_signal("action_modified", layer_index, action_index)
-	if layer_index == active_layer_index and action_index == selected_action_index:
-		emit_signal("selection_changed")
-
-
 func notify_action_modified() -> void:
 	_mark_pending()
 	emit_signal("action_modified", active_layer_index, selected_action_index)

@@ -56,10 +56,15 @@ var last_stop_reason: String = "Stopped."
 # Guard so a stop request issued mid-action breaks out cleanly.
 var _generation: int = 0
 
-# The one mouse position remembered by Capture (Save / Load) and by the
-# "Captures" option on mouse actions. Cleared whenever playback starts.
-var _saved_cursor: Vector2i = Vector2i.ZERO
-var _has_saved_cursor: bool = false
+# Where the user's own mouse is, kept apart from where the loop puts the
+# cursor: where it was when the run started, plus whatever the user has
+# moved it since (see _note_user_motion; a captured action folds in what
+# was moved while it ran). Capture Mouse's Mouse goes there. `_loop_cursor`
+# is where the loop last left the cursor (valid once `_loop_moved`), so the
+# user's movement since is what differs from it.
+var _user_cursor: Vector2i = Vector2i.ZERO
+var _loop_cursor: Vector2i = Vector2i.ZERO
+var _loop_moved: bool = false
 
 # Where the last Pixel / Image Detect found its target (an image's middle),
 # for Capture Mouse's Detect. Cleared whenever playback starts.
@@ -277,7 +282,8 @@ func start() -> void:
 		return
 	is_running = true
 	_generation += 1
-	_has_saved_cursor = false
+	_user_cursor = _mouse_pos()
+	_loop_moved = false
 	_has_last_hit = false
 	_sweep_retired()
 	_stop_counts.clear()
@@ -346,7 +352,9 @@ func _run_loop(gen: int) -> void:
 				current_action_index = ai
 				_last_event = ""
 				emit_signal("action_executing", li, ai)
-				var result := await _execute_action(action, li, ai)
+				_note_user_motion()
+				var result := await _execute_action(action)
+				_note_loop_cursor(action)
 				if result == LoopActionT.OnFail.STOP_LOOP:
 					stop("%s Loop stopped." % _last_event)
 					return
@@ -392,9 +400,7 @@ func _wait_loop_delay(project: LoopProjectT, gen: int, what: String) -> void:
 
 ## Runs one action. Returns LoopAction.OnFail.CONTINUE normally, or a
 ## different OnFail value to influence the loop (used by the detects).
-## `layer_index` / `action_index` locate the action in the project (a Capture
-## Load with nothing saved disables itself).
-func _execute_action(action: LoopActionT, layer_index: int, action_index: int) -> int:
+func _execute_action(action: LoopActionT) -> int:
 	# Captures goes with a plain click at a point (a held button put back
 	# where the cursor was would be a drag; a click at the cursor goes nowhere).
 	if action.captures and LoopActionT.supports_captures(action.type) \
@@ -555,20 +561,10 @@ func _execute_action(action: LoopActionT, layer_index: int, action_index: int) -
 				return LoopActionT.OnFail.CONTINUE
 		LoopActionT.Type.CAPTURE:
 			match action.capture_mode:
-				LoopActionT.CaptureMode.SAVE:
-					if _save_cursor():
-						emit_signal("status", "Capture: saved mouse position (%d, %d)" % [_saved_cursor.x, _saved_cursor.y])
-					else:
-						emit_signal("status", "Capture: could not read the mouse position")
-				LoopActionT.CaptureMode.LOAD:
-					if _has_saved_cursor:
-						await _travel(_mouse_pos(), _saved_cursor, action.roll_duration_ms(), action.wiggle, "CAPTURE LOAD")
-						emit_signal("status", "Capture: moved to saved position (%d, %d)" % [_saved_cursor.x, _saved_cursor.y])
-					else:
-						# Nothing to go back to: do nothing and switch the action off so
-						# it stops being attempted every iteration.
-						emit_signal("status", "Capture: nothing saved yet — action disabled.")
-						ProjectData.disable_action(layer_index, action_index)
+				LoopActionT.CaptureMode.MOUSE:
+					# Where the user's own mouse is (see _user_cursor).
+					await _travel(_mouse_pos(), _user_cursor, action.roll_duration_ms(), action.wiggle, "CAPTURE MOUSE")
+					emit_signal("status", "Capture: moved to your mouse position (%d, %d)" % [_user_cursor.x, _user_cursor.y])
 				LoopActionT.CaptureMode.DETECT:
 					# The last detect's spot. Nothing found yet is not a fault
 					# of the action (the detect may find next pass): carry on.
@@ -783,8 +779,9 @@ func _execute_captured(action: LoopActionT) -> void:
 		else:
 			emit_signal("status", "%s: could not capture the mouse position" % LoopActionT.type_name(action.type))
 		return
-	_saved_cursor = result[0]
-	_has_saved_cursor = true
+	# The cursor is back where it was plus what the user moved meanwhile:
+	# that movement is the user's (see _user_cursor).
+	_user_cursor += (result[1] as Vector2i) - (result[0] as Vector2i)
 	_set_tracker(result[1], true, "RESTORE")
 
 
@@ -814,8 +811,10 @@ const EXTRA_TAP_MS := 30
 ## The plain typing goes to the helper in pieces of at most this many
 ## bytes of SendKeys text (cut between keystrokes), each on a worker
 ## thread: a stop lands between pieces, so F8 ends a long text within a
-## moment rather than when SendKeys is done with all of it.
-const PLAIN_PIECE_BYTES := 256
+## moment rather than when SendKeys is done with all of it. SendKeys types
+## at some hundreds of characters a second at best, so the pieces are small
+## (a piece costs a helper round trip of a millisecond or so).
+const PLAIN_PIECE_BYTES := 24
 
 
 ## Runs `work` (a backend call that blocks for as long as the input takes)
@@ -966,16 +965,26 @@ func _travel(from: Vector2i, to: Vector2i, ms: int, wiggle: bool, label: String)
 		_set_tracker(to, true, label)
 
 
-## Remembers the current mouse position. Returns false (leaving any earlier
-## saved position alone) if the backend cannot read it.
-func _save_cursor() -> bool:
-	var pos := backend.get_cursor_pos()
-	if pos == Vector2i(-1, -1):
-		return false
-	_saved_cursor = pos
-	_has_saved_cursor = true
-	_set_tracker(pos, true, "CAPTURE SAVE")
-	return true
+## Before an action: whatever the cursor has moved since the loop last left
+## it is the user's own movement, and goes to `_user_cursor`. Until the loop
+## has moved the cursor at all (and in a Safe run, where it never does), the
+## user's mouse is simply where the cursor is.
+func _note_user_motion() -> void:
+	var now := _mouse_pos()
+	if _loop_moved:
+		_user_cursor += now - _loop_cursor
+		_loop_cursor = now
+	else:
+		_user_cursor = now
+
+
+## After an action that may have moved the real cursor: where it left it.
+func _note_loop_cursor(action: LoopActionT) -> void:
+	if not backend.is_real():
+		return
+	if LoopActionT.supports_captures(action.type) or action.type == LoopActionT.Type.CAPTURE:
+		_loop_cursor = _mouse_pos()
+		_loop_moved = true
 
 
 ## Most pixels a Pixel Detect scans per check. Bigger rects are sampled on a

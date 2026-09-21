@@ -149,16 +149,19 @@ layer 1, just broken out so you can view each layer's visuals separately.
 - **Stop** — stop the loop, or **This layer** to just end the current layer's
   pass, when reached. Set **after N passes** to stop only once it has been
   reached that many times (0 = the first time) — a run limiter.
-- **Capture Mouse** — **Save** remembers where the mouse is right now; **Load** moves
-  it back to the last saved position. There is one saved position per run (it is
-  cleared when you press Play). A Load that runs before anything was saved does
-  nothing and switches itself off. **Detect** moves the mouse to where the
-  last Pixel or Image Detect found its target (the middle of the image, or
-  the matching pixel) — so "find the buy button anywhere in the shop →
-  Capture Mouse: Detect → Click that does not move first" presses whichever one is
-  there, wherever it is. Load and Detect take a **Duration** (with
+- **Capture Mouse** — **Mouse** moves the cursor to where *your own* mouse is.
+  The run keeps that apart from where the loop puts the cursor: it is where the
+  mouse was when you pressed Run, plus whatever you have moved it since (the
+  loop's own moves do not count) — so a loop can click about and then give you
+  the cursor back where you had it, with no Save step. **Detect** moves the
+  mouse to where the last Pixel or Image Detect found its target (the middle
+  of the image, or the matching pixel) — so "find the buy button anywhere in
+  the shop → Capture Mouse: Detect → Click that does not move first" presses
+  whichever one is there, wherever it is. Both take a **Duration** (with
   `~Duration`'s wander) so the move looks like a hand's. Before any detect
-  has found anything, Detect does nothing and the layer carries on.
+  has found anything, Detect does nothing and the layer carries on. (A
+  **Save** or **Load** from a loop made before 0.9.6 reads as Mouse; a Save
+  at the top of a layer can simply be deleted.)
   Move, Click and Drag also have a **Captures** checkbox: the action saves the
   mouse position, runs, then moves the mouse back where it was — plus whatever
   you moved it meanwhile, so your own movement is never lost. Handy for

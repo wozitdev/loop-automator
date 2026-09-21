@@ -1390,21 +1390,17 @@ func _add_on_fail_field(a: LoopActionT) -> void:
 func _add_capture_mode_field(a: LoopActionT) -> void:
 	var row := _row("Mode")
 	var opt := _compact_option()
-	opt.add_item("Save", LoopActionT.CaptureMode.SAVE)
-	opt.add_item("Load", LoopActionT.CaptureMode.LOAD)
+	opt.add_item("Mouse", LoopActionT.CaptureMode.MOUSE)
 	opt.add_item("Detect", LoopActionT.CaptureMode.DETECT)
 	opt.select(opt.get_item_index(a.capture_mode))
 	opt.item_selected.connect(func(i):
 		a.capture_mode = opt.get_item_id(i)
-		_after_edit()
-		# Load and Detect travel: they have a Duration row.
-		_rebuild_editor.call_deferred())
+		_after_edit())
 	row.add_child(opt)
 	editor_box.add_child(row)
-	if a.capture_mode != LoopActionT.CaptureMode.SAVE:
-		_add_duration_field(a)
+	_add_duration_field(a)
 	var hint := Label.new()
-	hint.text = "Save remembers where the mouse is; Load moves it back there (a Load with nothing saved yet does nothing and disables itself). Detect moves it to where the last Pixel or Image Detect found its target."
+	hint.text = "Mouse moves the cursor to where your own mouse is: where it was when the run started, plus whatever you have moved it since (the loop's own moves do not count). Detect moves it to where the last Pixel or Image Detect found its target."
 	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	hint.modulate = Color(1, 1, 1, 0.7)
 	editor_box.add_child(hint)
