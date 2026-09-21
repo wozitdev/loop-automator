@@ -230,6 +230,21 @@ func add_action(type: int) -> void:
 	emit_signal("selection_changed")
 
 
+## Puts `actions` on the end of the active layer (a recording) and selects
+## the first of them.
+func append_actions(actions: Array) -> void:
+	var layer := active_layer()
+	if layer == null or actions.is_empty():
+		return
+	var first := layer.actions.size()
+	for a in actions:
+		layer.actions.append(a)
+	selected_action_index = first
+	_mark_pending()
+	emit_signal("actions_changed", active_layer_index)
+	emit_signal("selection_changed")
+
+
 func remove_action(index: int) -> void:
 	var layer := active_layer()
 	if layer == null or index < 0 or index >= layer.actions.size():

@@ -172,6 +172,24 @@ layer 1, just broken out so you can view each layer's visuals separately.
 Every action stores screen coordinates, so the overlay can draw it at the right
 place over your other applications.
 
+### Record
+
+**Rec** (at the end of the actions row) turns what you do into actions.
+Press it: the builder moves out of the way (unless **~Edit** keeps it), the
+status line counts down from 3, and from then on every mouse move, click,
+drag, wheel turn and keystroke is recorded until you press **F8** (from any
+window, whether ~F8 is on or not; Esc or the button in the builder work
+too). The recording is added to the end of the layer whose actions are
+shown, written the way you would have: a run of motion is one Move over
+its time, a press that travels is a Drag, one held still is a Click hold,
+keystrokes close together are one Key action typed with ~Keys (Ctrl+C is
+`^c`, Shift and a letter its capital), a key held while other things
+happen is a Key down … up, and the pauses in between are Waits. Every
+number is exact — a TAS — and each is a range you can open with its `~`.
+Windows only. What lands on Loop Automator itself, and input a program
+makes (a game re-centring the cursor), is left out; camera turns in a game
+that locks the cursor are not recorded faithfully.
+
 ### Ranges: random values
 
 **Every number can be a min – max range**: X / Y, X2 / Y2, width / height,
@@ -348,11 +366,13 @@ scripts/
     loop_layer.gd          # a layer of actions (+ JSON)
     loop_project.gd        # the whole loop (+ JSON)
     layer_names.gd         # random Bible names for a new loop's first layer
+    recording.gd           # a recording (hook events) as a layer's actions
   input/
     input_backend.gd       # backend interface
     preview_backend.gd     # safe, no-OS backend
     windows_backend.gd     # experimental real Windows input
     stop_hotkey.gd         # system-wide F8 (a real loop, or ~F8)
+    recorder.gd            # Rec: the mouse / keyboard hook helper
 ```
 
 ## Notes / limitations
@@ -385,7 +405,7 @@ scripts/
 
 Everything that touches the OS goes through small PowerShell scripts the app
 writes itself (`input_helper.ps1`, `overlay_helper.ps1`,
-`overlay_watchdog.ps1`, `stop_hotkey.ps1`). They live in the local profile,
+`overlay_watchdog.ps1`, `stop_hotkey.ps1`, `record_helper.ps1`). They live in the local profile,
 `%LOCALAPPDATA%\Godot\app_userdata\Loop Automator\`, and are rewritten from
 the built-in text immediately before every launch, so what runs is always the
 copy this build generated — editing them has no effect. `powershell.exe` is
@@ -449,6 +469,11 @@ you ever run it Live. The app keeps you in control either way: it starts in
 Safe, switches back to Safe whenever a Live run stops, locks the
 editor while a loop runs Live, and **F8 stops a Live loop from any
 window**.
+
+**Record keeps everything you type.** While **Rec** is on, keystrokes go
+into the loop file as Key text, exactly as typed — so stop the recording
+before you type a password, or delete that Key action afterwards. The
+recording helper only runs between Rec and F8 and is ended with it.
 
 ## License
 

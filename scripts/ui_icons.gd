@@ -95,6 +95,11 @@ const EYE_OFF_SVG := """<svg xmlns="http://www.w3.org/2000/svg" width="16" heigh
 <path d="M2.5 14 L13.5 2" fill="none" stroke="#e08080" stroke-width="1.8" stroke-linecap="round"/>
 </svg>"""
 
+## Record: a red dot.
+const RECORD_SVG := """<svg xmlns="http://www.w3.org/2000/svg" width="14" height="16" viewBox="0 0 14 16">
+<circle cx="7" cy="8" r="4.5" fill="#e05050"/>
+</svg>"""
+
 static var _cache: Dictionary = {}
 
 
@@ -148,6 +153,10 @@ static func plus() -> Texture2D:
 
 static func target() -> Texture2D:
 	return _icon("target", TARGET_SVG)
+
+
+static func record() -> Texture2D:
+	return _icon("record", RECORD_SVG)
 
 
 static func dropper() -> Texture2D:

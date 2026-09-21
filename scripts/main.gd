@@ -12,6 +12,18 @@ const UiIconsT := preload("res://scripts/ui_icons.gd")
 ## script import order (the global `class_name` registry may lag on first import).
 const LoopActionT := preload("res://scripts/model/loop_action.gd")
 const LoopLayerT := preload("res://scripts/model/loop_layer.gd")
+const RecorderT := preload("res://scripts/input/recorder.gd")
+const RecordingT := preload("res://scripts/model/recording.gd")
+
+## Record (the Rec button): what the user does is recorded by a helper
+## with system-wide hooks (see Recorder) until F8, then turned into actions
+## (see Recording) and appended to the layer whose actions are shown.
+var rec_btn: Button
+var _recorder := RecorderT.new()
+var _recording: bool = false
+## Bumped when a recording starts or stops, so a countdown still running
+## for an earlier one does nothing.
+var _record_gen: int = 0
 
 # --- top-level UI refs ----------------------------------------------------
 var status_label: Label
@@ -555,6 +567,16 @@ func _build_action_panel() -> Control:
 	var delete_btn := _icon_button(UiIconsT.trash(), "Delete the selected action", _confirm_delete_action)
 	delete_btn.text = "Delete"
 	btns.add_child(delete_btn)
+	# Rec: what you do next becomes actions of this layer, until F8.
+	rec_btn = _icon_button(UiIconsT.record(), "", _on_rec_pressed)
+	rec_btn.text = "Rec"
+	rec_btn.custom_minimum_size = Vector2(_button_width(rec_btn, ["Rec", "Stop"]), 0)
+	if OS.get_name() == "Windows":
+		rec_btn.tooltip_text = "Record what you do with the mouse and keyboard into this layer, until you press F8."
+	else:
+		rec_btn.tooltip_text = "Recording works on Windows only."
+		rec_btn.disabled = true
+	btns.add_child(rec_btn)
 	vb.add_child(btns)
 
 	return panel
@@ -605,7 +627,9 @@ func _connect_signals() -> void:
 	# The global F8 while idle (~F8): a start, as the Run button (a pick in
 	# progress keeps the screen; the button's own cooldown after a stop holds).
 	Playback.hotkey_pressed.connect(func():
-		if not _pick_active and not _dialog_open():
+		if _recording:
+			_stop_recording()
+		elif not _pick_active and not _dialog_open():
 			_on_play_pressed())
 	_refresh_overlay_label()
 	_refresh_loop_stack_ui()
@@ -1669,7 +1693,15 @@ func _start_pick(kind: int, sample_colors: bool = false) -> void:
 		overlay.show_overlay()
 	status_label.text = "Pick on screen — left-click to set, right-click / Esc to cancel."
 	picker.begin_pick(kind, sample_colors)
-	# Get the builder out of the way so the desktop it was covering is visible.
+	_lower_builder()
+	if sample_colors:
+		_start_hover_sampling()
+
+
+## Gets the builder out of the way (~Edit unchecked) so the desktop it was
+## covering is visible - for a pick, or a recording. Put back by
+## _restore_builder_after_pick.
+func _lower_builder() -> void:
 	_refresh_stay_on_edit_check()
 	var lower := not stay_on_edit_check.button_pressed
 	if lower and stay_on_edit_check.disabled:
@@ -1688,8 +1720,6 @@ func _start_pick(kind: int, sample_colors: bool = false) -> void:
 			# A maximised window can't be moved; minimise instead (Esc is then
 			# unavailable, right-click still cancels).
 			win.mode = Window.MODE_MINIMIZED
-	if sample_colors:
-		_start_hover_sampling()
 
 
 func _finish_pick() -> void:
@@ -1732,6 +1762,58 @@ func _restore_builder_after_pick() -> void:
 		else:
 			win.position = _builder_prev_pos
 	win.grab_focus()
+
+
+# ======================================================================
+#  Record
+# ======================================================================
+func _on_rec_pressed() -> void:
+	if _recording:
+		_stop_recording()
+	elif not Playback.is_running and not _pick_active and not _dialog_open():
+		_start_recording()
+
+
+## Rec: the builder moves out of the way, a short countdown on the status
+## line, then the hooks are on until F8 (or the button, or Esc here).
+func _start_recording() -> void:
+	if ProjectData.active_layer() == null:
+		return
+	_commit_pending_edits()
+	_recording = true
+	_record_gen += 1
+	var gen := _record_gen
+	rec_btn.text = "Stop"
+	_lower_builder()
+	for n in [3, 2, 1]:
+		status_label.text = "Recording in %d… (F8 stops it)" % n
+		await get_tree().create_timer(1.0).timeout
+		if gen != _record_gen:
+			return
+	_recorder.start(OS.get_process_id())
+	status_label.text = "Recording… press F8 to stop."
+
+
+## Ends the recording; the events become actions on the end of the active
+## layer. `reason` (a helper failure) is what the status line says instead.
+func _stop_recording(reason: String = "") -> void:
+	if not _recording:
+		return
+	_recording = false
+	_record_gen += 1
+	rec_btn.text = "Rec"
+	var events := _recorder.stop()
+	_restore_builder_after_pick()
+	if not reason.is_empty():
+		status_label.text = reason
+		return
+	var actions := RecordingT.to_actions(events)
+	var layer_name := ProjectData.active_layer().name if ProjectData.active_layer() != null else ""
+	if actions.is_empty():
+		status_label.text = "Recorded nothing."
+		return
+	ProjectData.append_actions(actions)
+	status_label.text = "Recorded %d action%s into \"%s\"." % [actions.size(), "" if actions.size() == 1 else "s", layer_name]
 
 
 func _on_point_picked(g: Vector2i) -> void:
@@ -1845,6 +1927,11 @@ func _stop_hover_sampling() -> void:
 
 
 func _process(_dt: float) -> void:
+	if _recording and _recorder.state != RecorderT.State.OFF:
+		if _recorder.poll():
+			_stop_recording()
+		elif _recorder.state == RecorderT.State.UNAVAILABLE:
+			_stop_recording("Recording failed: %s." % _recorder.reason)
 	if _hover_thread != null:
 		if _hover_thread.is_alive():
 			return
@@ -1873,6 +1960,8 @@ func _exit_tree() -> void:
 	if _hover_thread != null:
 		_hover_thread.wait_to_finish()
 		_hover_thread = null
+	# Closing mid-recording: the hooks go with the helper.
+	_recorder.stop()
 
 
 # ------------------------------------------------------- UI preferences
@@ -1968,7 +2057,7 @@ func _active_loop_number() -> int:
 
 
 func _on_play_pressed() -> void:
-	if _stop_cooldown_active:
+	if _stop_cooldown_active or _recording:
 		return
 	_commit_pending_edits()
 	Playback.toggle()
@@ -2374,6 +2463,15 @@ func _input(event: InputEvent) -> void:
 	if _pick_active:
 		if event.keycode == KEY_ESCAPE:
 			picker.cancel_pick()
+			get_viewport().set_input_as_handled()
+		return
+
+	# While recording, this window's F8 and Esc end it (the hooks never
+	# record keys that land on Loop Automator itself). Nothing else here
+	# should fire meanwhile.
+	if _recording:
+		if event.keycode == KEY_F8 or event.keycode == KEY_ESCAPE:
+			_stop_recording()
 			get_viewport().set_input_as_handled()
 		return
 
