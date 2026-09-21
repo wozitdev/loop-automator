@@ -191,7 +191,7 @@ func _draw_layer(li: int, layer: LoopLayerT, offset: Vector2) -> void:
 			continue
 		var is_current := (Playback.current_layer_index == li and Playback.current_action_index == ai)
 		var is_selected := (li == ProjectData.active_layer_index and ai == ProjectData.selected_action_index)
-		var positioned := LoopActionT.has_position(action.type)
+		var positioned := action.positioned()
 		var p := action.overlay_point(_mouse)
 		# Where the chips of the position-less actions that follow hang from.
 		# A detect's inside is left clear so the target stays visible:
@@ -211,9 +211,10 @@ func _draw_layer(li: int, layer: LoopLayerT, offset: Vector2) -> void:
 			d.a = 0.5
 			draw_dashed_line(prev_point, local, d, 1.5, 6.0)
 
-		# Per-type visual guide. A point whose X / Y is a range is drawn at the
+		# Per-type visual guide (a Click that does not move to its point has
+		# none: it is a chip below). A point whose X / Y is a range is drawn at the
 		# middle of the area it can land in, with that area boxed.
-		match action.type:
+		match action.type if positioned else -1:
 			LoopActionT.Type.PIXEL_DETECT, LoopActionT.Type.IMAGE_DETECT:
 				_draw_detect_guide(action, _detect_rect(action, li, ai), offset, col, is_selected)
 			LoopActionT.Type.MOVE:
@@ -225,9 +226,6 @@ func _draw_layer(li: int, layer: LoopLayerT, offset: Vector2) -> void:
 				# A hold / down / up says so beside the point.
 				if action.press_mode != LoopActionT.PressMode.TAP:
 					_draw_tag(local + Vector2(26, 4), col, action.press_text().to_upper(), false)
-			LoopActionT.Type.SCROLL:
-				_draw_range_box(action.point_a_extent(), offset, col)
-				_draw_scroll_guide(local, col, action, is_selected)
 			LoopActionT.Type.DRAG:
 				var b_extent := action.point_b_extent()
 				_draw_range_box(action.point_a_extent(), offset, col)
@@ -262,9 +260,16 @@ func _draw_layer(li: int, layer: LoopLayerT, offset: Vector2) -> void:
 				if action.press_mode != LoopActionT.PressMode.TAP:
 					text = "KEY %s  %s" % [action.press_text().to_upper(), ktxt]
 			elif action.type == LoopActionT.Type.WAIT:
-				text = "WAIT  %s ms" % LoopActionT.range_text(action.wait_ms, action.wait_ms_max)
+				text = "DELAY  %s ms" % LoopActionT.range_text(action.wait_ms, action.wait_ms_max)
+			elif action.type == LoopActionT.Type.CLICK:
+				# No move to its point: a press wherever the cursor is at the time.
+				var press := action.press_text().to_upper()
+				text = "%s %s  AT CURSOR" % [LoopActionT.button_name(action.button).to_upper(), press if not press.is_empty() else "CLICK"]
+			elif action.type == LoopActionT.Type.SCROLL:
+				# The wheel turns wherever the cursor is at the time.
+				text = "SCROLL %s  ×%s" % [LoopActionT.scroll_dir_name(action.scroll_dir).to_upper(), LoopActionT.range_text(action.notches, action.notches_max)]
 			elif action.type == LoopActionT.Type.CAPTURE:
-				text = "CAPTURE  " + ("SAVE" if action.capture_mode == LoopActionT.CaptureMode.SAVE else "LOAD")
+				text = "CAPTURE  " + ("DETECT" if action.capture_mode == LoopActionT.CaptureMode.DETECT else "MOUSE")
 			elif action.type == LoopActionT.Type.STOP:
 				text = ("STOP LOOP" if action.stop_scope == LoopActionT.StopScope.LOOP else "STOP LAYER")
 				# While running, show which pass it is on out of its limit;
@@ -401,25 +406,6 @@ func _draw_click_guide(p: Vector2, col: Color, button: int, selected: bool) -> v
 	draw_circle(p, 3.5, col)
 	# Button chip (first letter of Left/Right/Middle), below-right of the point.
 	_draw_badge(p + Vector2(13, 13), LoopActionT.button_name(button).substr(0, 1), col)
-	if selected:
-		_selection_ring(p, 20.0)
-
-
-## SCROLL: a wheel (a ring with a notch) and an arrow the way it turns, with
-## the notch count on a chip.
-func _draw_scroll_guide(p: Vector2, col: Color, action: LoopActionT, selected: bool) -> void:
-	draw_arc(p, 7.0, 0, TAU, 24, col, 2.0)
-	draw_line(p + Vector2(0, -3), p + Vector2(0, 3), col, 2.0)
-	var dir := Vector2.DOWN
-	match action.scroll_dir:
-		LoopActionT.ScrollDir.UP: dir = Vector2.UP
-		LoopActionT.ScrollDir.LEFT: dir = Vector2.LEFT
-		LoopActionT.ScrollDir.RIGHT: dir = Vector2.RIGHT
-	var from := p + dir * 11.0
-	var to := p + dir * 26.0
-	draw_line(from, to, col, 2.0)
-	_draw_arrow_head(from, to, col)
-	_draw_tag(p + Vector2(14, 10), col, "×" + LoopActionT.range_text(action.notches, action.notches_max), false)
 	if selected:
 		_selection_ring(p, 20.0)
 

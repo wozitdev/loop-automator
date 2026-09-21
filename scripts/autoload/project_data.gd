@@ -37,6 +37,11 @@ var selected_action_index: int = -1
 var overlay_layer_index: int = 0
 var overlay_show_all: bool = false
 
+## Solo: while set, this layer alone runs and every other layer is treated
+## as off - without any layer's Enabled setting changing (nothing is saved).
+## The layer itself, not its index, so moving layers about keeps it.
+var solo_layer: LoopLayerT = null
+
 var current_path: String = ""
 var _next_loop_id: int = 1
 var _session_projects_by_id: Dictionary = {}
@@ -96,9 +101,31 @@ func add_layer() -> void:
 	emit_signal("selection_changed")
 
 
+## Solo `index` (-1: nobody). One layer at a time; the layer list and the
+## run follow through layer_runs.
+func set_solo(index: int) -> void:
+	var l: LoopLayerT = project.layers[index] if index >= 0 and index < project.layers.size() else null
+	if l == solo_layer:
+		return
+	solo_layer = l
+	emit_signal("layers_changed")
+
+
+## Whether layer `index` takes part in a run: the solo layer alone while one
+## is set, otherwise whatever its Enabled says.
+func layer_runs(index: int) -> bool:
+	if index < 0 or index >= project.layers.size():
+		return false
+	if solo_layer != null:
+		return project.layers[index] == solo_layer
+	return project.layers[index].enabled
+
+
 func remove_layer(index: int) -> void:
 	if project.layers.size() <= 1:
 		return
+	if project.layers[index] == solo_layer:
+		solo_layer = null
 	project.layers.remove_at(index)
 	active_layer_index = clampi(active_layer_index, 0, project.layers.size() - 1)
 	selected_action_index = -1
@@ -203,6 +230,21 @@ func add_action(type: int) -> void:
 	emit_signal("selection_changed")
 
 
+## Puts `actions` on the end of the active layer (a recording) and selects
+## the first of them.
+func append_actions(actions: Array) -> void:
+	var layer := active_layer()
+	if layer == null or actions.is_empty():
+		return
+	var first := layer.actions.size()
+	for a in actions:
+		layer.actions.append(a)
+	selected_action_index = first
+	_mark_pending()
+	emit_signal("actions_changed", active_layer_index)
+	emit_signal("selection_changed")
+
+
 func remove_action(index: int) -> void:
 	var layer := active_layer()
 	if layer == null or index < 0 or index >= layer.actions.size():
@@ -239,25 +281,6 @@ func move_action(index: int, delta: int) -> void:
 	_mark_pending()
 	emit_signal("actions_changed", active_layer_index)
 	emit_signal("selection_changed")
-
-
-## Switches off one action anywhere in the project (used by playback when a
-## Capture Load has nothing to load) and refreshes the UI for it.
-func disable_action(layer_index: int, action_index: int) -> void:
-	if project == null or layer_index < 0 or layer_index >= project.layers.size():
-		return
-	var layer: LoopLayerT = project.layers[layer_index]
-	if action_index < 0 or action_index >= layer.actions.size():
-		return
-	var a: LoopActionT = layer.actions[action_index]
-	if not a.enabled:
-		return
-	a.enabled = false
-	_mark_pending()
-	emit_signal("actions_changed", layer_index)
-	emit_signal("action_modified", layer_index, action_index)
-	if layer_index == active_layer_index and action_index == selected_action_index:
-		emit_signal("selection_changed")
 
 
 func notify_action_modified() -> void:
@@ -342,12 +365,26 @@ func create_loop(open_now: bool = true, source: LoopProjectT = null) -> int:
 	return id
 
 
+## The most a .loop file may be to be read at all: room for a few dozen
+## screen-sized templates, well short of what would stall the app.
+const LOOP_FILE_MAX_BYTES := 64 * 1024 * 1024
+
+
 ## The loop in a .loop file, or null if `path` is not a readable loop file.
 func _read_loop_file(path: String) -> LoopProjectT:
 	if not FileAccess.file_exists(path):
 		return null
 	var f := FileAccess.open(path, FileAccess.READ)
 	if f == null:
+		return null
+	return _read_loop(f)
+
+
+## The loop in the open file `f` (closed here), or null if its contents are
+## not a loop (or it is too big to read).
+func _read_loop(f: FileAccess) -> LoopProjectT:
+	if f.get_length() > LOOP_FILE_MAX_BYTES:
+		f.close()
 		return null
 	var text := f.get_as_text()
 	f.close()
@@ -371,7 +408,7 @@ func peek_loop(path: String) -> Dictionary:
 		actions += layer.actions.size()
 		for a in layer.actions:
 			if a.type == LoopActionT.Type.KEY:
-				keys.append(a.keys)
+				keys.append(a.keys_shown())
 	return {"name": p.layers[0].name, "layers": p.layers.size(), "actions": actions, "keys": keys}
 
 
@@ -543,6 +580,7 @@ func _open_project_for_id(loop_id: int) -> void:
 		_pending_by_id[key] = bool(_pending_by_id.get(key, false))
 	project = _session_projects_by_id[key]
 	_sync_loop_name()
+	solo_layer = null
 	active_layer_index = 0
 	selected_action_index = -1
 	overlay_layer_index = 0
@@ -582,22 +620,23 @@ func _load_or_init_store() -> void:
 		return
 	var data: Dictionary = parsed
 	loop_stack = []
-	for raw in data.get("loops", []):
+	var loops: Variant = data.get("loops", [])
+	for raw in (loops if typeof(loops) == TYPE_ARRAY else []):
 		if typeof(raw) != TYPE_DICTIONARY:
 			continue
 		var e: Dictionary = raw
-		var id := int(e.get("id", -1))
-		if id < 0:
+		var id := LoopActionT.read_int(e, "id", -1)
+		if id < 0 or _loop_index_from_id(id) >= 0:
 			continue
 		loop_stack.append({
 			"id": id,
-			"name": String(e.get("name", str(id))),
-			"file": _store_loop_file(id, String(e.get("file", ""))),
+			"name": LoopLayerT.clean_name(LoopActionT.read_string(e, "name", str(id))),
+			"file": _store_loop_file(id, LoopActionT.read_string(e, "file", "")),
 		})
-	_next_loop_id = maxi(1, int(data.get("next_loop_id", 1)))
+	_next_loop_id = maxi(1, LoopActionT.read_int(data, "next_loop_id", 1))
 	for e in loop_stack:
 		_next_loop_id = maxi(_next_loop_id, int(e.get("id", 0)) + 1)
-	active_loop_id = int(data.get("active_loop_id", -1))
+	active_loop_id = LoopActionT.read_int(data, "active_loop_id", -1)
 	if _loop_index_from_id(active_loop_id) < 0 and not loop_stack.is_empty():
 		active_loop_id = int(loop_stack[0].get("id", -1))
 
@@ -609,11 +648,7 @@ func _save_store_index() -> void:
 		"active_loop_id": active_loop_id,
 		"loops": loop_stack,
 	}
-	var f := FileAccess.open(STORE_INDEX_PATH, FileAccess.WRITE)
-	if f == null:
-		return
-	f.store_string(JSON.stringify(payload, "\t"))
-	f.close()
+	_write_text_file(STORE_INDEX_PATH, JSON.stringify(payload, "\t"))
 
 
 func _loop_index_from_id(loop_id: int) -> int:
@@ -640,16 +675,28 @@ static func _store_loop_file(loop_id: int, raw: String) -> String:
 	return "%s/%d.loop" % [STORE_LOOPS_DIR, loop_id]
 
 
+## The loop in a store file. A file that is there but is not a loop (cut
+## short by a crash while it was written, edited by hand, too big) is not
+## thrown away: it is moved aside as "<name>.broken" - the next Save would
+## otherwise write over it - and the loop opens empty. One that cannot be
+## opened at all (held by another program) is left where it is.
 func _read_project_file(path: String, fallback_name: String) -> LoopProjectT:
 	if FileAccess.file_exists(path):
+		var abs := ProjectSettings.globalize_path(path)
 		var f := FileAccess.open(path, FileAccess.READ)
-		if f != null:
-			var text := f.get_as_text()
-			f.close()
-			var loaded := LoopProjectT.from_json(text)
-			if loaded.name.strip_edges().is_empty():
-				loaded.name = fallback_name
-			return loaded
+		if f == null:
+			push_warning("ProjectData: could not open %s (error %d)." % [abs, FileAccess.get_open_error()])
+		else:
+			var loaded := _read_loop(f)
+			if loaded != null:
+				if loaded.name.strip_edges().is_empty():
+					loaded.name = fallback_name
+				return loaded
+			var aside := path + ".broken"
+			if DirAccess.rename_absolute(abs, ProjectSettings.globalize_path(aside)) == OK:
+				push_warning("ProjectData: %s is not a readable loop file; kept as %s." % [abs, aside.get_file()])
+			else:
+				push_warning("ProjectData: %s is not a readable loop file." % abs)
 	# Never saved: an empty loop that keeps the name it was given (the loop is
 	# named after its first layer, so that is where the name goes).
 	var p := LoopProjectT.make_default()
@@ -660,9 +707,28 @@ func _read_project_file(path: String, fallback_name: String) -> LoopProjectT:
 
 
 func _write_project_file(path: String, value: LoopProjectT) -> Error:
-	var f := FileAccess.open(path, FileAccess.WRITE)
+	return _write_text_file(path, value.to_json())
+
+
+## Writes `text` to `path` by way of a file beside it that is renamed into
+## place once it is whole, so a crash (or the power going) mid-write leaves
+## what was there (a loop, the store index) as it was, never a file cut
+## short.
+static func _write_text_file(path: String, text: String) -> Error:
+	var tmp := path + ".tmp"
+	var f := FileAccess.open(tmp, FileAccess.WRITE)
 	if f == null:
 		return FileAccess.get_open_error()
-	f.store_string(value.to_json())
+	f.store_string(text)
+	var err := f.get_error()
 	f.close()
-	return OK
+	var abs_tmp := ProjectSettings.globalize_path(tmp)
+	if err != OK:
+		DirAccess.remove_absolute(abs_tmp)
+		return err
+	# (On Windows the rename removes the old file first; if it then failed,
+	# the whole new file is still there as .tmp, so that is left alone.)
+	err = DirAccess.rename_absolute(abs_tmp, ProjectSettings.globalize_path(path))
+	if err != OK:
+		push_warning("ProjectData: could not put %s in place (error %d); what was written is in %s." % [path.get_file(), err, abs_tmp])
+	return err

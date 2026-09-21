@@ -40,9 +40,9 @@ Prefer running from source? Open the folder in Godot 4.7 and press **F5** — se
 
 | Concept    | Meaning |
 |------------|---------|
-| **Project / Loop** | The full automation. Runs forever, top to bottom, then repeats. |
+| **Project / Loop** | The full automation. Runs forever, top to bottom, then repeats (one with nothing to run stops after a pass). |
 | **Layer**  | A named group of actions. *All enabled layers run every iteration.* Layers exist purely to organise a loop into flip-through "screens" with their own colour + overlay view. |
-| **Action** | One step: Move, Click, Drag, Scroll, Key, Wait, Pixel Detect, Image Detect, Capture Mouse, or Stop. |
+| **Action** | One step: Move, Click, Drag, Scroll, Key, Delay, Pixel Detect, Image Detect, Capture Mouse, or Stop. |
 
 So a loop with `Layer 1` and `Layer 2` runs **Layer 1's actions, then Layer 2's
 actions, then repeats** — exactly as described: layer 2 runs in the same loop as
@@ -55,18 +55,27 @@ layer 1, just broken out so you can view each layer's visuals separately.
 - **Move** — move the cursor to `(x, y)`; with a duration the cursor travels
   there over that time instead of jumping (`~Duration` adds a little
   hand-like wander on the way; start and end stay exact).
-- **Click** — move to `(x, y)` and click Left / Right / Middle. The press
-  dropdown beside the button makes it a **Hold** (the button stays down for
-  **Hold** time, then is let go), a **Down** (pressed and left that way for
-  the actions after it — drag around a detect, hold a mouse button while a
-  key is tapped) or an **Up**. Stopping the loop lets go of anything still
-  held. **Captures** goes with a plain click.
-- **Drag** — press at A, move to B over the duration, release.
-- **Scroll** — move to `(x, y)` and turn the mouse wheel Up / Down / Left /
-  Right by a number of **Notches** (a range, like every number), one wheel
-  click at a time - spread over the **Duration** if it has one (`~Duration`
-  makes the gaps uneven, like a hand's). The program under the point gets
-  them.
+- **Click** — go to `(x, y)` and click Left / Right / Middle. With a
+  **Duration** the cursor travels there over that time first, like a Move
+  (`~Duration` adds the hand-like wander), so a human click is one action.
+  Untick **Move to the point first** and the click happens wherever the
+  cursor is right now, with no move at all — a release after a long hold,
+  a press after a Capture Mouse. The press dropdown beside the button makes
+  it a **Hold** (the button stays down for **Hold** time, then is let go), a
+  **Down** (pressed and left that way for the actions after it — drag
+  around a detect, hold a mouse button while a key is tapped) or an **Up**
+  (which unticks the move for you: letting go is done in place). Stopping
+  the loop lets go of anything still held. **Captures** goes with a plain
+  click at a point, and is greyed out otherwise.
+- **Drag** — press at A, move to B over the duration, release. The travel
+  (a Drag's, a Move's, a Click's) is sent as real mouse motion, so a game
+  that reads the mouse directly — turning its camera on a right-drag — gets
+  it too.
+- **Scroll** — turn the mouse wheel Up / Down / Left / Right by a number of
+  **Notches** (a range, like every number), one wheel click at a time -
+  spread over the **Duration** if it has one (`~Duration` makes the gaps
+  uneven, like a hand's). It happens wherever the cursor is: the program
+  under it gets the notches, so put a Move before it if it matters where.
 - **Key** — send keystrokes. In Live mode this uses the
   [`SendKeys`](https://learn.microsoft.com/dotnet/api/system.windows.forms.sendkeys)
   format, e.g. `abc`, `{ENTER}`, `^c` (Ctrl+C), `%{F4}` (Alt+F4). You can
@@ -95,7 +104,7 @@ layer 1, just broken out so you can view each layer's visuals separately.
   together; `(wa)` is `w` and `a`. A key that cannot be held (a name the
   keyboard has no key for) is typed once instead. Stopping the loop lets go
   of everything still held.
-- **Wait** — pause N milliseconds.
+- **Delay** — pause N milliseconds.
 - **Pixel Detect** — look for an expected colour (± tolerance) anywhere in a screen rect.
   The whole rect is scanned (the centre first). **Sample & place** centres the
   rect on the point you click and reads its colour; **Just sample** reads the
@@ -103,18 +112,20 @@ layer 1, just broken out so you can view each layer's visuals separately.
   picking, a swatch next to the cursor previews the colour under it. Tick
   **Follow Cursor** and the rect is centred on the mouse instead of X / Y — it
   moves with the mouse on the overlay and is scanned wherever the mouse is when
-  the action runs. The condition reads as a sentence: **If** *not found*,
-  **Then** **Skip rest of layer** — or **Wait till found**, which re-checks the same
-  spot on an interval until the colour appears (tick **~Timeout** to give
-  up after a while and skip the rest of the layer instead). Flip *not found*
-  to *found* and the same detect works the other way round: skip the rest
-  of the layer while the colour is there, or **Wait till gone**. That is
-  the "else" half of a condition — one layer guarded by *not found*, the
-  next by *found* — and a way to wait for a loading screen or a popup to
-  go away. With the **~If** box checked (the default) a Safe run carries
-  on regardless, so the whole loop can be walked through. With **~Self** on,
-  a detect may match on Loop Automator's own window; off (default) it ignores it. The overlay is
-  never read.
+  the action runs. The condition is **If** *not found* (flip it to *found*
+  and the same detect works the other way round: the "else" half of a
+  condition — one layer guarded by *not found*, the next by *found*). Two
+  boxes say what happens while it holds, and they are independent:
+  **~Delay** keeps checking the same spot every so often until the colour
+  appears (or goes), with **~Timeout** to give up after a while; **Skip rest
+  of layer** (on by default) does that — at once, or still after the
+  wait. So one detect can wait for a popup and skip the layer if it never
+  shows, wait and carry on either way, skip at once, or, with both boxes
+  off, just look — which is how a Capture Mouse set to *Detect* gets its
+  spot. With the **~If** box checked (the default) a Safe run carries on
+  regardless, so the whole loop can be walked through. With **~Self** on,
+  a detect may match on Loop Automator's own window; off (default) it
+  ignores it. The overlay is never read.
 - **Image Detect** — look for a small screenshot anywhere in a screen rect: every
   pixel of it within ± tolerance of the screen, at any offset the image fits.
   **Just sample** grabs the area you drag over as the image and leaves the
@@ -132,16 +143,23 @@ layer 1, just broken out so you can view each layer's visuals separately.
   rect takes to scan). Check **~Mismatch** to compare by light and dark
   only, so the image is still found when it is tinted differently (hovered,
   pressed, another theme). Rect,
-  **Follow Cursor**, **If** *not found* / *found*, **Wait till found** /
-  **gone**, **~Timeout** and **~Self** work as for Pixel Detect. The scan runs in the helper, so a whole screen is
-  checked in a few tens of milliseconds.
+  **Follow Cursor**, **If** *not found* / *found*, **~Delay**, **~Timeout**,
+  **Skip rest of layer** and **~Self** work as for Pixel Detect. The scan runs in the
+  helper, so a whole screen is checked in a few tens of milliseconds.
 - **Stop** — stop the loop, or **This layer** to just end the current layer's
   pass, when reached. Set **after N passes** to stop only once it has been
   reached that many times (0 = the first time) — a run limiter.
-- **Capture Mouse** — **Save** remembers where the mouse is right now; **Load** moves
-  it back to the last saved position. There is one saved position per run (it is
-  cleared when you press Play). A Load that runs before anything was saved does
-  nothing and switches itself off.
+- **Capture Mouse** — **Mouse** moves the cursor to where *your own* mouse is.
+  The run keeps that apart from where the loop puts the cursor: it is where the
+  mouse was when you pressed Run, plus whatever you have moved it since (the
+  loop's own moves do not count) — so a loop can click about and then give you
+  the cursor back where you had it, with no Save step. **Detect** moves the
+  mouse to where the last Pixel or Image Detect found its target (the middle
+  of the image, or the matching pixel) — so "find the buy button anywhere in
+  the shop → Capture Mouse: Detect → Click that does not move first" presses
+  whichever one is there, wherever it is. Both take a **Duration** (with
+  `~Duration`'s wander) so the move looks like a hand's. Before any detect
+  has found anything, Detect does nothing and the layer carries on.
   Move, Click and Drag also have a **Captures** checkbox: the action saves the
   mouse position, runs, then moves the mouse back where it was — plus whatever
   you moved it meanwhile, so your own movement is never lost. Handy for
@@ -150,10 +168,32 @@ layer 1, just broken out so you can view each layer's visuals separately.
   a few milliseconds. Tick **Ghost Cursor** too and the real cursor is hidden
   while it works: a ghost cursor (same shape) keeps following your hand and
   the real cursor reappears on it afterwards — so from where you sit the
-  cursor never jumps at all.
+  cursor never jumps at all. The real cursor is pinned to the action for its
+  duration; stopping the loop (F8) cuts a captured action short and gives
+  the mouse back at once.
 
 Every action stores screen coordinates, so the overlay can draw it at the right
 place over your other applications.
+
+### Record
+
+**Rec** (far right of the actions row) turns what you do into actions.
+Press it and confirm (the prompt reminds you that everything you type is
+kept as plain text): the builder moves out of the way (unless **~Edit**
+keeps it), the status line counts down from 3, and from then on every
+mouse move, click, drag, wheel turn and keystroke is recorded until you
+press **F8** (from any window, whether ~F8 is on or not; Esc or the button
+in the builder work too). The recording is added to the end of the layer
+whose actions are shown, written the way you would have: a run of motion is
+one Move over its time, a press that travels is a Drag, one held still is
+a Click hold, keystrokes close together are one Key action typed with
+~Keys (Ctrl+C is `^c`, Shift and a letter its capital), a key held while
+other things happen is a Key down … up, and the pauses in between are
+Delays. Every number is exact — a TAS — and each is a range you can open
+with its `~`.
+Windows only. What lands on Loop Automator itself (unless **~Self** is on)
+and input a program makes (a game re-centring the cursor) is left out;
+camera turns in a game that locks the cursor are not recorded faithfully.
 
 ### Ranges: random values
 
@@ -170,9 +210,11 @@ pair expanded.
 
 - **Pick on screen** keeps a range's *width* and re-centres it on the point
   you click: a 20-pixel jitter stays a 20-pixel jitter around the new spot
-  (a fixed point simply moves). A dragged **rect** is exact: fixed position
-  and size. **Sample & place** fixes the rect's position so the sampled pixel
-  is inside every size the range allows.
+  (a fixed point simply moves). **Pick area** next to it is the quick way to
+  a spread: drag a box, and the point's X and Y become that box — the click
+  lands anywhere inside it, a fresh spot each time. A detect's **Pick Area**
+  is exact: the dragged rect is its fixed position and size. **Sample & place** fixes the
+  rect's position so the sampled pixel is inside every size the range allows.
 - The action list and the overlay show ranges as `min–max`; on the overlay a
   point with a range is drawn at the middle of a dashed box covering where
   it can land, and a Pixel Detect frames the extent every possible rect
@@ -181,12 +223,12 @@ pair expanded.
 
 ### The loop delay
 
-**~Delay** in the toolbar is the pause after the loop's last action, before
-it starts over. It is also a checkbox: tick it and the same delay is waited
-after every action, a fresh random value each time when it is a range — a
-quick way to slow a whole loop down without adding a Wait after every step
-(the last action's wait then leads into the next round; there is no second
-one). Both are saved with the loop.
+**~Delay** in the toolbar is the pause before each round of the loop (the
+first one too, so a run begins with it). It is also a checkbox: tick it and
+the same delay is waited before every action instead, a fresh random value
+each time when it is a range — a quick way to slow a whole loop down without
+adding a Delay after every step (the first action's delay is the round's;
+no round waits twice). Both are saved with the loop.
 
 ---
 
@@ -194,15 +236,21 @@ one). Both are saved with the loop.
 
 1. Run the [downloaded binary](#download), or open the folder in Godot 4.7 and
    press **Run** (F5).
-2. Pick a **layer** on the left (add / reorder / rename / duplicate / remove / recolour).
+2. Pick a **layer** on the left (add / duplicate / reorder / rename / remove /
+   recolour). **Solo** beside *Enabled* runs that layer on its own: the other
+   layers are treated as off for as long as it is ticked, and nothing about
+   them changes — untick it and they are back as they were.
 3. Add **actions** in the middle column, edit them on the right.
    - Use the **🎯 Pick on screen** buttons to place a point/rect *interactively*:
      the overlay takes over the screen, you move the mouse to the real target and
      **left-click** to set it (drag for a detection rect). **Right-click / Esc**
      cancels. This replaces the old "grab current mouse" approach, which captured
      the button's own position. While you pick, the builder window moves off-screen so
-     the desktop it was covering is visible, and comes back when the pick ends —
-     tick **~Edit** (right end of the toolbar) to keep it put. (Lowering is
+     the desktop it was covering is visible, and comes back when the pick ends.
+     When a loop or a recording starts it is minimised instead, so it does not
+     cover what the loop works on — bring it back from the taskbar whenever you
+     like; it comes back by itself when the run ends if you have not.
+     Tick **~Edit** (right end of the toolbar) to keep it put. (Lowering is
      unavailable while the game runs embedded in the Godot editor's Game tab;
      turn off *Embed Game on Next Play* there to try it from the editor.)
    - **~Self** (next to ~Edit, off by default) decides whether a running
@@ -217,7 +265,8 @@ one). Both are saved with the loop.
      Flipping also selects that layer for editing.
    - Number keys **1–9** jump straight to a layer.
    - **Show All** (or `\`) toggles drawing every visible layer at once.
-5. Choose a **Mode** and press **Run?** (Safe) or **Run!** (Live), or **F5**.
+5. Choose a **Mode** and press **Run?** (or **F5**). The button reads **Run!**
+   while the loop runs; pressing it again (or F8 / Esc) stops it.
 
 > The status line lives in the **bottom bar**; the toolbar scrolls horizontally
 > if the window is too narrow to show every control.
@@ -265,8 +314,11 @@ deleting it just tells you so.
 [examples/](examples/) for a starter loop. Before a file is imported you are
 shown what it holds — layers, actions, and the text every Key action types —
 and what a loop can do; nothing is loaded until you press **Import** (see
-[Responsible use](#responsible-use)). Layer names are kept to one line of
-printable text, whatever a file holds.
+[Responsible use](#responsible-use)). The file is read defensively: a value of
+the wrong kind falls back to its default, a setting outside its choices is
+corrected (an action type this build does not know is kept but switched
+off), an image is checked against its size limit before it is decoded, and
+layer names are kept to one line of printable text, whatever a file holds.
 
 ---
 
@@ -326,11 +378,13 @@ scripts/
     loop_layer.gd          # a layer of actions (+ JSON)
     loop_project.gd        # the whole loop (+ JSON)
     layer_names.gd         # random Bible names for a new loop's first layer
+    recording.gd           # a recording (input events) as a layer's actions
   input/
     input_backend.gd       # backend interface
     preview_backend.gd     # safe, no-OS backend
     windows_backend.gd     # experimental real Windows input
     stop_hotkey.gd         # system-wide F8 (a real loop, or ~F8)
+    recorder.gd            # Rec: the mouse / keyboard listener helper
 ```
 
 ## Notes / limitations
@@ -363,13 +417,16 @@ scripts/
 
 Everything that touches the OS goes through small PowerShell scripts the app
 writes itself (`input_helper.ps1`, `overlay_helper.ps1`,
-`overlay_watchdog.ps1`, `stop_hotkey.ps1`). They live in the local profile,
+`overlay_watchdog.ps1`, `stop_hotkey.ps1`, `record_helper.ps1`). They live in the local profile,
 `%LOCALAPPDATA%\Godot\app_userdata\Loop Automator\`, and are rewritten from
 the built-in text immediately before every launch, so what runs is always the
 copy this build generated — editing them has no effect. `powershell.exe` is
 always started by its full `System32` path. Action data never becomes script
 text: the helpers take numbers, and the Key text travels base64-encoded as a
-single argument.
+single argument (a long text in pieces, cut between keystrokes). Loop files
+and the store index are written to a file beside them and renamed into place,
+so a crash mid-save never leaves a loop cut short; a store file that will not
+read is kept as `<name>.loop.broken` rather than written over.
 
 ---
 
@@ -427,6 +484,13 @@ you ever run it Live. The app keeps you in control either way: it starts in
 Safe, switches back to Safe whenever a Live run stops, locks the
 editor while a loop runs Live, and **F8 stops a Live loop from any
 window**.
+
+**Record keeps everything you type.** While **Rec** is on, keystrokes go
+into the loop file as Key text, exactly as typed — so stop the recording
+before you type a password, or delete that Key action afterwards. The
+recording helper only runs between Rec and F8 and is ended with it, and it
+listens through Windows Raw Input (the way games and macro tools do), not a
+keyboard hook - the thing a keylogger installs.
 
 ## License
 

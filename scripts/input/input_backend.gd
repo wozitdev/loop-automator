@@ -30,6 +30,13 @@ func shutdown(_wait: bool = false) -> void:
 func settled() -> bool:
 	return true
 
+## Cuts short a command the backend is in the middle of on another thread
+## (a captured action runs for its whole dwell as one helper command, the
+## real cursor pinned meanwhile): the call waiting on it returns with
+## nothing, and the backend is usable again afterwards. Main thread.
+func interrupt() -> void:
+	pass
+
 func move_to(pos: Vector2i) -> void:
 	pass
 
@@ -52,6 +59,17 @@ func click(button: int, pos: Vector2i) -> void:
 func release_button(_button: int) -> void:
 	pass
 
+## Presses (`pressed`) or lets go of `button` where the cursor is, without
+## moving it: a Click's Down / Hold / Up with ~Move off. Unlike
+## release_button this is an input action, so the ~Self guard applies.
+func button_here(_button: int, _pressed: bool) -> void:
+	pass
+
+## Clicks `button` where the cursor is, without moving it (~Move off).
+func click_here(button: int) -> void:
+	button_here(button, true)
+	button_here(button, false)
+
 func send_keys(_text: String) -> void:
 	pass
 
@@ -71,12 +89,12 @@ func press_keys(_mods: String, _keys: PackedStringArray, _pressed: bool) -> void
 	pass
 
 
-## Moves the cursor to `pos` and turns the mouse wheel `notches` clicks in
-## `dir` (a LoopAction.ScrollDir), one wheel event per notch, spread over
-## `ms` (a moment apart at least; `uneven` varies the gaps like a hand).
-## Blocks for the whole scroll (callers run it off the main thread).
-func scroll(pos: Vector2i, _dir: int, _notches: int, _ms: int = 0, _uneven: bool = false) -> void:
-	move_to(pos)
+## Turns the mouse wheel `notches` clicks in `dir` (a LoopAction.ScrollDir)
+## where the cursor is, one wheel event per notch, spread over `ms` (a
+## moment apart at least; `uneven` varies the gaps like a hand). Blocks for
+## the whole scroll (callers run it off the main thread).
+func scroll(_dir: int, _notches: int, _ms: int = 0, _uneven: bool = false) -> void:
+	pass
 
 ## Returns the colour of a single screen pixel, or a transparent colour
 ## if the backend cannot read the screen.

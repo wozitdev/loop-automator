@@ -116,6 +116,27 @@ static func parse(stroke: String) -> Dictionary:
 	return {"mods": mods, "keys": keys, "repeat": repeat}
 
 
+## `text` cut into pieces of at most `max_bytes` (UTF-8), each a whole
+## number of keystrokes (see split; the pieces joined are the text again),
+## so a piece can be sent - or stopped after - on its own. A single
+## keystroke bigger than that is a piece of its own.
+static func pieces(text: String, max_bytes: int) -> PackedStringArray:
+	var out := PackedStringArray()
+	var piece := ""
+	var piece_bytes := 0
+	for stroke in split(text):
+		var bytes := stroke.to_utf8_buffer().size()
+		if piece_bytes + bytes > max_bytes and not piece.is_empty():
+			out.append(piece)
+			piece = ""
+			piece_bytes = 0
+		piece += stroke
+		piece_bytes += bytes
+	if not piece.is_empty():
+		out.append(piece)
+	return out
+
+
 ## Whether `press` (a parse result) has a key SendKeys cannot type (see
 ## EXTRA) or the Win modifier, so the stroke must go through the helper
 ## even where the rest of the text is left to SendKeys.

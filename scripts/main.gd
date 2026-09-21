@@ -12,6 +12,32 @@ const UiIconsT := preload("res://scripts/ui_icons.gd")
 ## script import order (the global `class_name` registry may lag on first import).
 const LoopActionT := preload("res://scripts/model/loop_action.gd")
 const LoopLayerT := preload("res://scripts/model/loop_layer.gd")
+const RecorderT := preload("res://scripts/input/recorder.gd")
+const RecordingT := preload("res://scripts/model/recording.gd")
+
+## Record (the Rec button): what the user does is recorded by a helper
+## that listens system-wide (see Recorder) until F8, then turned into actions
+## (see Recording) and appended to the layer whose actions are shown.
+var rec_btn: Button
+var _recorder := RecorderT.new()
+var _recording: bool = false
+## Bumped when a recording starts or stops, so a countdown still running
+## for an earlier one does nothing.
+var _record_gen: int = 0
+## The Rec dot: grey until pressed, then red with a slow breath while the
+## recording is on.
+const REC_IDLE_COLOR := Color(0.5, 0.5, 0.5)
+const REC_ON_COLOR := Color(0.86, 0.22, 0.22)
+const REC_ON_BRIGHT_COLOR := Color(1.0, 0.4, 0.4)
+const REC_BREATH_SEC := 1.1
+var _rec_pulse: Tween
+## True while the recording keeps what lands on Loop Automator itself (~Self
+## on): the click or Esc that ends it is then trimmed off the end.
+var _record_unguarded: bool = false
+## True once the countdown is over and the helper listens: what it saw
+## before that (it is started first, so its start-up hides in the countdown)
+## is not part of the recording.
+var _record_armed: bool = false
 
 # --- top-level UI refs ----------------------------------------------------
 var status_label: Label
@@ -51,6 +77,7 @@ const SETTINGS_PATH := "user://settings.cfg"
 var layer_list: ItemList
 var layer_visible_check: CheckBox
 var layer_enabled_check: CheckBox
+var layer_solo_check: CheckBox
 var layer_color_btn: ColorPickerButton
 
 # --- action panel ---------------------------------------------------------
@@ -80,11 +107,15 @@ var _pick_active: bool = false
 var _pick_was_overlay_visible: bool = false
 var _pick_point_cb: Callable = Callable()
 var _pick_rect_cb: Callable = Callable()
-## The builder is moved off-screen for the duration of a pick (when enabled in
-## the toolbar) so the desktop underneath is visible; moved back when the pick
-## ends. Off-screen rather than minimised so it keeps keyboard focus: the pick
-## window must never be focused (see PickOverlay), and Esc arrives here.
+## The builder is got out of the way (~Edit unchecked) so the desktop it
+## covers is visible: minimised when a run or a recording starts - the
+## taskbar brings it back whenever the user wants it, and the end of the
+## run un-minimises it if it still is - or, for a pick, moved off-screen
+## (`_builder_parked`) and back when the pick ends. Off-screen rather than
+## minimised there so it keeps the keyboard focus: the pick window must
+## never be focused (see PickOverlay), and Esc arrives here.
 var _builder_hidden_for_pick: bool = false
+var _builder_parked: bool = false
 var _builder_prev_pos: Vector2i = Vector2i.ZERO
 var _builder_prev_mode: int = Window.MODE_WINDOWED
 ## A colour read is in flight after a pick: keep the builder out of the way
@@ -268,9 +299,9 @@ func _build_toolbar() -> Control:
 	# --- Playback ---------------------------------------------------------
 	play_btn = _icon_button(UiIconsT.play(), "", _on_play_pressed)
 	play_btn.text = _run_label()
-	# One width for "Run?", "Run!" and "Stop": the button (and the toolbar
+	# One width for "Run?" and "Run!": the button (and the toolbar
 	# after it) no longer shifts when the mode changes or a run starts.
-	play_btn.custom_minimum_size = Vector2(_button_width(play_btn, ["Run?", "Run!", "Stop"]), 0)
+	play_btn.custom_minimum_size = Vector2(_button_width(play_btn, ["Run?", "Run!"]), 0)
 	hb.add_child(play_btn)
 
 	var backend_lbl := Label.new()
@@ -323,6 +354,7 @@ func _build_toolbar() -> Control:
 		else:
 			_on_export())
 	hb.add_child(share_btn)
+	# Duplicate sits right before Delete, as every Duplicate does.
 	duplicate_loop_btn = _icon_button(UiIconsT.copy(), "Duplicate this loop", _on_duplicate_loop)
 	hb.add_child(duplicate_loop_btn)
 	delete_loop_btn = _icon_button(UiIconsT.trash(), "Delete this loop (its file too)", _confirm_delete_loop)
@@ -332,12 +364,12 @@ func _build_toolbar() -> Control:
 
 	# --- Timing -----------------------------------------------------------
 	# The delay's label is a checkbox, "~Delay ms": checked, the delay is
-	# also waited after every action.
-	var delay_tip := "Pause after the loop's last action, before it starts over (ms). Saved with the loop."
+	# waited before every action instead of once a round.
+	var delay_tip := "Pause before each round of the loop (ms). Saved with the loop."
 	delay_each_check = CheckBox.new()
 	delay_each_check.text = "~Delay"
 	delay_each_check.focus_mode = Control.FOCUS_NONE
-	delay_each_check.tooltip_text = "%s\nChecked: also wait it after every action." % delay_tip
+	delay_each_check.tooltip_text = "%s\nChecked: wait it before every action instead." % delay_tip
 	delay_each_check.button_pressed = ProjectData.project.delay_after_each_action
 	delay_each_check.toggled.connect(func(v: bool): ProjectData.set_delay_after_each_action(v))
 	hb.add_child(delay_each_check)
@@ -360,11 +392,12 @@ func _build_toolbar() -> Control:
 	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	hb.add_child(spacer)
 	# ~Edit: unchecked = the builder is moved out of the way while you pick on
-	# screen (the stored setting keeps the "lower on edit" sense).
+	# screen, record, or a loop runs (the stored setting keeps the "lower on
+	# edit" sense).
 	stay_on_edit_check = CheckBox.new()
 	stay_on_edit_check.text = "~Edit"
 	stay_on_edit_check.focus_mode = Control.FOCUS_NONE
-	stay_on_edit_check.button_pressed = not _load_setting("lower_on_edit", true)
+	stay_on_edit_check.button_pressed = not _load_bool_setting("lower_on_edit", true)
 	stay_on_edit_check.toggled.connect(func(v): _save_setting("lower_on_edit", not v))
 	hb.add_child(stay_on_edit_check)
 	# Embedding is only reported once the window has been parented, so check
@@ -375,8 +408,8 @@ func _build_toolbar() -> Control:
 	feedback_check = CheckBox.new()
 	feedback_check.text = "~Self"
 	feedback_check.focus_mode = Control.FOCUS_NONE
-	feedback_check.tooltip_text = "Checked: a running loop may interact with Loop Automator itself (clicks and keys can land on this window, like a feedback loop).\nUnchecked: clicks and keys that would land on Loop Automator are skipped, so the loop cannot affect the app running it."
-	feedback_check.button_pressed = _load_setting("feedback", false)
+	feedback_check.tooltip_text = "Checked: a running loop may interact with Loop Automator itself (clicks and keys can land on this window, like a feedback loop), and Rec records what you do on it.\nUnchecked: clicks and keys that would land on Loop Automator are skipped, so the loop cannot affect the app running it, and Rec leaves them out."
+	feedback_check.button_pressed = _load_bool_setting("feedback", false)
 	Playback.set_feedback(feedback_check.button_pressed)
 	feedback_check.toggled.connect(func(v):
 		_save_setting("feedback", v)
@@ -388,8 +421,8 @@ func _build_toolbar() -> Control:
 	hotkey_check = CheckBox.new()
 	hotkey_check.text = "~F8"
 	hotkey_check.focus_mode = Control.FOCUS_NONE
-	hotkey_check.tooltip_text = "Checked: F8 starts and stops the loop from any window while Loop Automator is open (other programs do not get F8 meanwhile).\nUnchecked: F8 only works while this window has the focus."
-	hotkey_check.button_pressed = _load_setting("global_hotkey", true)
+	hotkey_check.tooltip_text = "Checked: F8 starts and stops the loop from any window while Loop Automator is open (other programs do not get F8 meanwhile), and this window moves out of the way while a loop runs.\nUnchecked: F8 only works while this window has the focus."
+	hotkey_check.button_pressed = _load_bool_setting("global_hotkey", true)
 	Playback.set_global_hotkey(hotkey_check.button_pressed)
 	hotkey_check.toggled.connect(func(v):
 		_save_setting("global_hotkey", v)
@@ -482,13 +515,25 @@ func _build_layer_panel() -> Control:
 		ProjectData.emit_signal("overlay_view_changed"))
 	vb.add_child(layer_visible_check)
 
+	# Enabled and Solo side by side. Solo runs this layer alone: the others
+	# are treated as off without their Enabled changing (nothing is saved),
+	# and Enabled is greyed out meanwhile since it has no say.
+	var run_row := HBoxContainer.new()
 	layer_enabled_check = CheckBox.new()
 	layer_enabled_check.text = "Enabled (runs in loop)"
 	layer_enabled_check.toggled.connect(func(v):
 		var l := ProjectData.active_layer()
 		if l: l.enabled = v
 		ProjectData.emit_signal("layers_changed"))
-	vb.add_child(layer_enabled_check)
+	run_row.add_child(layer_enabled_check)
+	layer_solo_check = CheckBox.new()
+	layer_solo_check.text = "Solo"
+	layer_solo_check.focus_mode = Control.FOCUS_NONE
+	layer_solo_check.tooltip_text = "Run only this layer; the other layers' settings are not changed."
+	layer_solo_check.toggled.connect(func(v):
+		ProjectData.set_solo(ProjectData.active_layer_index if v else -1))
+	run_row.add_child(layer_solo_check)
+	vb.add_child(run_row)
 
 	var color_row := HBoxContainer.new()
 	var cl := Label.new()
@@ -534,14 +579,29 @@ func _build_action_panel() -> Control:
 		pm.add_item(LoopActionT.type_name(t), t)
 	pm.id_pressed.connect(func(id): ProjectData.add_action(id))
 	btns.add_child(add_btn)
+	btns.add_child(_icon_button(UiIconsT.up(), "Move the selected action up", func(): ProjectData.move_action(ProjectData.selected_action_index, -1)))
+	btns.add_child(_icon_button(UiIconsT.down(), "Move the selected action down", func(): ProjectData.move_action(ProjectData.selected_action_index, 1)))
 	var dup_btn := _icon_button(UiIconsT.copy(), "Duplicate the selected action", func(): ProjectData.duplicate_action(ProjectData.selected_action_index))
 	dup_btn.text = "Duplicate"
 	btns.add_child(dup_btn)
-	btns.add_child(_icon_button(UiIconsT.up(), "Move the selected action up", func(): ProjectData.move_action(ProjectData.selected_action_index, -1)))
-	btns.add_child(_icon_button(UiIconsT.down(), "Move the selected action down", func(): ProjectData.move_action(ProjectData.selected_action_index, 1)))
 	var delete_btn := _icon_button(UiIconsT.trash(), "Delete the selected action", _confirm_delete_action)
 	delete_btn.text = "Delete"
 	btns.add_child(delete_btn)
+	# Rec at the far right: what you do next becomes actions of this layer,
+	# until F8.
+	var spacer := Control.new()
+	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	btns.add_child(spacer)
+	rec_btn = _icon_button(UiIconsT.record(), "", _on_rec_pressed)
+	rec_btn.text = "Rec"
+	rec_btn.custom_minimum_size = Vector2(_button_width(rec_btn, ["Rec", "Stop"]), 0)
+	_set_rec_icon_color(REC_IDLE_COLOR)
+	if OS.get_name() == "Windows":
+		rec_btn.tooltip_text = "Record what you do with the mouse and keyboard into this layer, until you press F8.\nEverything you type is kept in the loop as plain text - stop before typing a password."
+	else:
+		rec_btn.tooltip_text = "Recording works on Windows only."
+		rec_btn.disabled = true
+	btns.add_child(rec_btn)
 	vb.add_child(btns)
 
 	return panel
@@ -565,6 +625,7 @@ func _build_editor_panel() -> Control:
 # ======================================================================
 func _connect_signals() -> void:
 	ProjectData.layers_changed.connect(_refresh_layers)
+	ProjectData.layers_changed.connect(_refresh_layer_props)
 	ProjectData.layers_changed.connect(_refresh_actions)
 	ProjectData.layers_changed.connect(_refresh_overlay_label)
 	ProjectData.actions_changed.connect(func(_i): _refresh_actions())
@@ -580,18 +641,24 @@ func _connect_signals() -> void:
 		_stop_cooldown_token += 1
 		_stop_cooldown_active = false
 		play_btn.icon = UiIconsT.stop()
-		play_btn.text = "Stop"
-		_refresh_edit_lock())
+		play_btn.text = "Run!"
+		_refresh_edit_lock()
+		# ~Edit unchecked: this window is minimised for the run (the taskbar
+		# brings it back; F8 stops the loop from anywhere with ~F8 on).
+		_lower_builder())
 	Playback.playback_stopped.connect(func():
 		var was_real := Playback.backend != null and Playback.backend.is_real()
 		if was_real:
 			_switch_to_safe_backend_if_needed()
+		_restore_builder_after_pick()
 		await _animate_stop_feedback(was_real))
 	Playback.action_executing.connect(_on_action_executing)
 	# The global F8 while idle (~F8): a start, as the Run button (a pick in
 	# progress keeps the screen; the button's own cooldown after a stop holds).
 	Playback.hotkey_pressed.connect(func():
-		if not _pick_active and not _dialog_open():
+		if _recording:
+			_stop_recording()
+		elif not _pick_active and not _dialog_open():
 			_on_play_pressed())
 	_refresh_overlay_label()
 	_refresh_loop_stack_ui()
@@ -649,13 +716,20 @@ func _refresh_running_marks() -> void:
 # ======================================================================
 func _refresh_layers() -> void:
 	layer_list.clear()
+	var solo := ProjectData.solo_layer != null
 	for i in ProjectData.project.layers.size():
 		var l: LoopLayerT = ProjectData.project.layers[i]
-		# Two marks in front of the name: runs / does not run, drawn / not
-		# drawn on the overlay (the same check and cross as the action list).
-		layer_list.add_item(l.name, UiIconsT.layer_marks(l.enabled, l.visible))
+		# Two marks in front of the name: runs / does not run (Solo counts),
+		# drawn / not drawn on the overlay (the same check and cross as the
+		# action list).
+		var runs := ProjectData.layer_runs(i)
+		layer_list.add_item(l.name, UiIconsT.layer_marks(runs, l.visible))
 		layer_list.set_item_custom_fg_color(i, l.color)
-		var tip := "Runs in the loop" if l.enabled else "Does not run (off)"
+		var tip := "Runs in the loop"
+		if not runs:
+			tip = "Does not run (another layer is solo)" if solo else "Does not run (off)"
+		elif solo:
+			tip = "Runs alone (solo)"
 		tip += ", drawn on the overlay" if l.visible else ", not drawn on the overlay"
 		layer_list.set_item_tooltip(i, tip)
 	_refresh_layers_selection()
@@ -674,6 +748,9 @@ func _refresh_layer_props() -> void:
 		return
 	layer_visible_check.set_pressed_no_signal(l.visible)
 	layer_enabled_check.set_pressed_no_signal(l.enabled)
+	# Enabled has no say while a layer is solo.
+	layer_enabled_check.disabled = ProjectData.solo_layer != null
+	layer_solo_check.set_pressed_no_signal(ProjectData.solo_layer == l)
 	layer_color_btn.color = l.color
 
 
@@ -781,25 +858,32 @@ func _rebuild_editor() -> void:
 			_add_duration_field(a)
 			_add_captures_field(a)
 		LoopActionT.Type.CLICK:
-			_add_point_fields(a, false)
+			# The button and how it is pressed first, then whether the click goes
+			# to its point; the point and duration rows are greyed out when it
+			# does not. Captures goes with a plain click at a point (see
+			# Playback._execute_action): greyed out otherwise, not hidden.
 			_add_button_field(a)
 			_add_hold_field(a)
-			# Captures goes with a plain click (see Playback._execute_action).
-			if a.press_mode == LoopActionT.PressMode.TAP:
-				_add_captures_field(a)
+			_add_move_to_field(a)
+			var rows := _add_point_fields(a, false)
+			rows.append(_add_duration_field(a))
+			for r in rows:
+				_set_controls_locked(r, not a.move_to)
+			var captures := _add_captures_field(a)
+			if a.press_mode != LoopActionT.PressMode.TAP or not a.move_to:
+				_set_controls_locked(captures, true)
 		LoopActionT.Type.DRAG:
-			_add_point_fields(a, true)
 			_add_button_field(a)
+			_add_point_fields(a, true)
 			_add_duration_field(a)
 			_add_captures_field(a)
 		LoopActionT.Type.SCROLL:
-			_add_point_fields(a, false)
 			_add_scroll_fields(a)
 			_add_duration_field(a, "How long the scroll takes: the notches are spread over it (0 = as fast as a wheel goes).\nChecked: the gaps between notches vary a little, like a hand's.")
 		LoopActionT.Type.KEY:
 			_add_keys_field(a)
 		LoopActionT.Type.WAIT:
-			_add_range_field("Wait", a.wait_ms, a.wait_ms_max, 0, 600000, func(lo: int, hi: int):
+			_add_range_field("Delay", a.wait_ms, a.wait_ms_max, 0, 600000, func(lo: int, hi: int):
 				a.wait_ms = lo
 				a.wait_ms_max = hi, "ms")
 		LoopActionT.Type.PIXEL_DETECT:
@@ -842,22 +926,32 @@ static func _recentre_range(lo: int, hi: int, centre: int) -> Vector2i:
 	return Vector2i(new_lo, new_lo + span)
 
 
-func _add_point_fields(a: LoopActionT, second: bool) -> void:
+## A point's X / Y ranges with two picks under them: "Pick" keeps the range's
+## width and re-centres it on the point clicked; "Pick area" is a dragged
+## box, and the ranges become that box (the click can land anywhere in it),
+## which is how a loop gets its random spread without typing numbers.
+## Returns the rows it added (a Click greys them out with "Move to the
+## point first" off).
+func _add_point_fields(a: LoopActionT, second: bool) -> Array:
+	var rows: Array = []
 	editor_box.add_child(_section_label("Point" + (" A" if second else "")))
-	_add_range_field("X", a.x, a.x_max, -20000, 20000, func(lo: int, hi: int):
+	rows.append(_add_range_field("X", a.x, a.x_max, -20000, 20000, func(lo: int, hi: int):
 		a.x = lo
-		a.x_max = hi)
-	_add_range_field("Y", a.y, a.y_max, -20000, 20000, func(lo: int, hi: int):
+		a.x_max = hi).lo.get_parent())
+	rows.append(_add_range_field("Y", a.y, a.y_max, -20000, 20000, func(lo: int, hi: int):
 		a.y = lo
-		a.y_max = hi)
-	editor_box.add_child(_grab_button(UiIconsT.target(), "Pick on screen", func():
-		_begin_point_pick(func(g: Vector2i):
-			var rx := _recentre_range(a.x, a.x_max, g.x)
-			var ry := _recentre_range(a.y, a.y_max, g.y)
-			a.x = rx.x
-			a.x_max = rx.y
-			a.y = ry.x
-			a.y_max = ry.y)))
+		a.y_max = hi).lo.get_parent())
+	rows.append(_add_point_picks(a, "", func(g: Vector2i):
+		var rx := _recentre_range(a.x, a.x_max, g.x)
+		var ry := _recentre_range(a.y, a.y_max, g.y)
+		a.x = rx.x
+		a.x_max = rx.y
+		a.y = ry.x
+		a.y_max = ry.y, func(r: Rect2i):
+		a.x = r.position.x
+		a.x_max = maxi(a.x, r.end.x - 1)
+		a.y = r.position.y
+		a.y_max = maxi(a.y, r.end.y - 1)))
 	if second:
 		editor_box.add_child(_section_label("Point B"))
 		_add_range_field("X2", a.x2, a.x2_max, -20000, 20000, func(lo: int, hi: int):
@@ -866,14 +960,33 @@ func _add_point_fields(a: LoopActionT, second: bool) -> void:
 		_add_range_field("Y2", a.y2, a.y2_max, -20000, 20000, func(lo: int, hi: int):
 			a.y2 = lo
 			a.y2_max = hi)
-		editor_box.add_child(_grab_button(UiIconsT.target(), "Pick B on screen", func():
-			_begin_point_pick(func(g: Vector2i):
-				var rx := _recentre_range(a.x2, a.x2_max, g.x)
-				var ry := _recentre_range(a.y2, a.y2_max, g.y)
-				a.x2 = rx.x
-				a.x2_max = rx.y
-				a.y2 = ry.x
-				a.y2_max = ry.y)))
+		_add_point_picks(a, " B", func(g: Vector2i):
+			var rx := _recentre_range(a.x2, a.x2_max, g.x)
+			var ry := _recentre_range(a.y2, a.y2_max, g.y)
+			a.x2 = rx.x
+			a.x2_max = rx.y
+			a.y2 = ry.x
+			a.y2_max = ry.y, func(r: Rect2i):
+			a.x2 = r.position.x
+			a.x2_max = maxi(a.x2, r.end.x - 1)
+			a.y2 = r.position.y
+			a.y2_max = maxi(a.y2, r.end.y - 1))
+	return rows
+
+
+## The two pick buttons of a point, side by side: a point pick (`on_point`)
+## and an area pick (`on_rect`). `which` names the point ("", " B").
+## Returns the row.
+func _add_point_picks(_a: LoopActionT, which: String, on_point: Callable, on_rect: Callable) -> HBoxContainer:
+	var row := HBoxContainer.new()
+	var point := _grab_button(UiIconsT.target(), "Pick%s on screen" % which, func(): _begin_point_pick(on_point))
+	point.tooltip_text = "Click where it should land (a range keeps its size and moves there)."
+	row.add_child(point)
+	var area := _grab_button(UiIconsT.target(), "Pick%s area" % which, func(): _begin_rect_pick(on_rect))
+	area.tooltip_text = "Drag a box; it lands anywhere inside it."
+	row.add_child(area)
+	editor_box.add_child(row)
+	return row
 
 
 func _add_rect_fields(a: LoopActionT) -> void:
@@ -895,7 +1008,9 @@ func _add_rect_fields(a: LoopActionT) -> void:
 	_add_range_field("Height", a.h, a.h_max, 1, 20000, func(lo: int, hi: int):
 		a.h = lo
 		a.h_max = hi)
-	editor_box.add_child(_grab_button(UiIconsT.target(), "Pick detection rect on screen", func():
+	# The pick and Follow Cursor side by side.
+	var row := HBoxContainer.new()
+	row.add_child(_grab_button(UiIconsT.target(), "Pick Area", func():
 		_begin_rect_pick(func(r: Rect2i):
 			# A dragged rect is exact: fixed position and size.
 			a.x = r.position.x
@@ -915,7 +1030,8 @@ func _add_rect_fields(a: LoopActionT) -> void:
 		a.follow_cursor = v
 		set_xy_editable.call(not v)
 		_after_edit())
-	editor_box.add_child(follow)
+	row.add_child(follow)
+	editor_box.add_child(row)
 
 
 func _add_button_field(a: LoopActionT) -> void:
@@ -936,7 +1052,9 @@ func _add_button_field(a: LoopActionT) -> void:
 
 ## The press dropdown of a Click or Key: `tap` is what the plain press is
 ## called there ("Click" / "Tap"), then Hold, Down and Up. Changing it
-## rebuilds the editor, since Hold has a row of its own.
+## rebuilds the editor, since Hold has a row of its own. A Click switched
+## to Up loses its ~Move: letting go is done where the cursor is (a move
+## first would drag whatever is held); it can be ticked back.
 func _press_mode_option(a: LoopActionT, tap: String) -> OptionButton:
 	var opt := _compact_option(false)
 	opt.add_item(tap, LoopActionT.PressMode.TAP)
@@ -947,9 +1065,28 @@ func _press_mode_option(a: LoopActionT, tap: String) -> OptionButton:
 	opt.select(opt.get_item_index(a.press_mode))
 	opt.item_selected.connect(func(i):
 		a.press_mode = opt.get_item_id(i)
+		if a.type == LoopActionT.Type.CLICK and a.press_mode == LoopActionT.PressMode.UP:
+			a.move_to = false
 		_after_edit()
 		_rebuild_editor.call_deferred())
 	return opt
+
+
+## A Click's "Move to the point first" box, under its button row: checked
+## (the default) the click goes to X / Y first; unchecked it presses
+## wherever the cursor is, and the point and duration rows under it are
+## greyed out (the editor is rebuilt for that).
+func _add_move_to_field(a: LoopActionT) -> void:
+	var cb := CheckBox.new()
+	cb.text = "Move to the point first"
+	cb.tooltip_text = "Unchecked: the click happens wherever the cursor is, with no move."
+	cb.focus_mode = Control.FOCUS_NONE
+	cb.button_pressed = a.move_to
+	cb.toggled.connect(func(v: bool):
+		a.move_to = v
+		_after_edit()
+		_rebuild_editor.call_deferred())
+	editor_box.add_child(cb)
 
 
 ## A Scroll's direction and how many notches of the wheel.
@@ -967,8 +1104,8 @@ func _add_scroll_fields(a: LoopActionT) -> void:
 	row.add_child(opt)
 	editor_box.add_child(row)
 	var nrow := _row("Notches")
-	nrow.tooltip_text = "How many clicks of the wheel (the program under the point gets them)."
-	_add_range_field_in(nrow, a.notches, a.notches_max, 1, 200, func(lo: int, hi: int):
+	nrow.tooltip_text = "How many clicks of the wheel (the program under the cursor gets them)."
+	_add_range_field_in(nrow, a.notches, a.notches_max, 1, LoopActionT.NOTCHES_MAX, func(lo: int, hi: int):
 		a.notches = lo
 		a.notches_max = hi)
 
@@ -995,6 +1132,7 @@ func _add_keys_field(a: LoopActionT) -> void:
 	row.add_child(_press_mode_option(a, "Tap"))
 	var le := LineEdit.new()
 	le.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	le.max_length = LoopActionT.KEYS_MAX_CHARS
 	le.text = a.keys
 	le.placeholder_text = "e.g. abc, {ENTER}, ^c"
 	le.text_changed.connect(func(t: String):
@@ -1036,7 +1174,8 @@ func _open_key_capture(le: LineEdit, a: LoopActionT) -> void:
 		# The window is resizable; the size it was last closed at is kept.
 		var saved: Variant = _load_setting("key_capture_size", Vector2i.ZERO)
 		if saved is Vector2i and saved.x >= _key_capture.min_size.x and saved.y >= _key_capture.min_size.y:
-			_key_capture.size = saved
+			# No bigger than the screen it opens on: the file is the user's to edit.
+			_key_capture.size = saved.min(DisplayServer.screen_get_size(DisplayServer.window_get_current_screen()))
 		_key_capture.visibility_changed.connect(func():
 			if not _key_capture.visible:
 				_save_setting("key_capture_size", _key_capture.size))
@@ -1184,13 +1323,15 @@ func _show_image_preview(a: LoopActionT) -> void:
 	_image_preview.popup_centered()
 
 
-## A detect's condition, read as a sentence over two rows: "~If [not found /
-## found]", "Then [Skip rest of layer / Wait till found (gone)]". The "~If"
-## checkbox is the Safe walk-through.
+## A detect's condition over four rows: "~If [not found / found]" (the "~If"
+## checkbox is the Safe walk-through), "~Wait [check every … ms]" (re-check
+## until it clears), its "~Timeout [… ms]", and "~Skip" (skip the rest of
+## the layer while it holds). Wait and Skip are independent: one detect can
+## wait and then skip, wait and carry on, skip at once, or just look.
 func _add_on_fail_field(a: LoopActionT) -> void:
 	var target := "image" if a.type == LoopActionT.Type.IMAGE_DETECT else "colour"
 	var row := _row_toggle("If", a.safe_continue,
-		"What happens when the %s is not there — or, with \"found\", when it is.\nChecked: in Safe mode nothing is skipped or waited for, so you can walk through the whole loop; Live keeps to the choice." % target,
+		"The condition: the %s is not there — or, with \"found\", it is.\nChecked: in Safe mode nothing is skipped or waited for, so you can walk through the whole loop; Live keeps to the choice." % target,
 		func(v: bool):
 			a.safe_continue = v
 			_after_edit())
@@ -1200,59 +1341,70 @@ func _add_on_fail_field(a: LoopActionT) -> void:
 	when.add_item("not found", 0)
 	when.add_item("found", 1)
 	when.select(1 if a.if_found else 0)
-	row.add_child(when)
-	editor_box.add_child(row)
-	# Stopping the loop is the Stop action's job now, not a Pixel Detect's.
-	var then_row := _row("Then")
-	var opt := _compact_option()
-	opt.add_item("Skip rest of layer", LoopActionT.OnFail.SKIP_LAYER)
-	opt.add_item("Wait till gone" if a.if_found else "Wait till found", LoopActionT.OnFail.WAIT_FOUND)
-	opt.select(maxi(0, opt.get_item_index(a.on_fail)))
-	opt.item_selected.connect(func(i):
-		a.on_fail = opt.get_item_id(i)
-		_after_edit()
-		# Show or hide the re-check interval for "Wait till found".
-		_rebuild_editor.call_deferred())
 	when.item_selected.connect(func(i):
 		a.if_found = i == 1
-		opt.set_item_text(opt.get_item_index(LoopActionT.OnFail.WAIT_FOUND), "Wait till gone" if a.if_found else "Wait till found")
+		_after_edit()
+		# The Delay / Skip tooltips read "appears" / "goes" from this.
+		_rebuild_editor.call_deferred())
+	row.add_child(when)
+	editor_box.add_child(row)
+	# ~Wait: re-check the same spot on this interval until the condition
+	# clears (F8 / Esc / a Stop action still end the loop). The interval and
+	# the timeout are greyed out while it is off.
+	var wrow := _row_toggle("Delay", a.wait,
+		"Checked: keep checking this spot every so often until the %s %s." % [target, "goes" if a.if_found else "appears"],
+		func(v: bool):
+			a.wait = v
+			_after_edit())
+	var wpair := _add_range_field_in(wrow, a.wait_ms, a.wait_ms_max, 0, 600000, func(lo: int, hi: int):
+		a.wait_ms = lo
+		a.wait_ms_max = hi, "ms")
+	wpair.set_editable(a.wait)
+	# ~Timeout: give up waiting after this long (a range, like every number);
+	# ~Skip then decides what happens.
+	var trow := _row_toggle("Timeout", a.wait_timeout,
+		"Checked: stop waiting after this long.",
+		func(v: bool):
+			a.wait_timeout = v
+			_after_edit())
+	var tpair := _add_range_field_in(trow, a.wait_timeout_ms, a.wait_timeout_ms_max, 0, 3600000, func(lo: int, hi: int):
+		a.wait_timeout_ms = lo
+		a.wait_timeout_ms_max = hi, "ms")
+	var timeout_check := trow.get_child(0) as CheckBox
+	timeout_check.disabled = not a.wait
+	tpair.set_editable(a.wait and a.wait_timeout)
+	(wrow.get_child(0) as CheckBox).toggled.connect(func(v: bool):
+		wpair.set_editable(v)
+		timeout_check.disabled = not v
+		tpair.set_editable(v and a.wait_timeout))
+	timeout_check.toggled.connect(func(v: bool): tpair.set_editable(a.wait and v))
+	# Skip: skip the rest of the layer while the condition holds (at once,
+	# or still after the wait). Off, the layer carries on either way.
+	var skip := CheckBox.new()
+	skip.text = "Skip rest of layer"
+	skip.tooltip_text = "Checked: skip the rest of the layer while the %s is %s.\nUnchecked: carry on either way." % [target, "there" if a.if_found else "not there"]
+	skip.focus_mode = Control.FOCUS_NONE
+	skip.button_pressed = a.skip
+	skip.toggled.connect(func(v: bool):
+		a.skip = v
 		_after_edit())
-	then_row.add_child(opt)
-	editor_box.add_child(then_row)
-	if a.on_fail == LoopActionT.OnFail.WAIT_FOUND:
-		# "Wait till found / gone" re-checks the same spot on this interval
-		# until the colour appears / goes (F8 / Esc / a Stop action still
-		# ends the loop).
-		_add_range_field("Check every", a.wait_ms, a.wait_ms_max, 0, 600000, func(lo: int, hi: int):
-			a.wait_ms = lo
-			a.wait_ms_max = hi, "ms")
-		# ~Timeout: give up after this long (a range, like every number) and
-		# skip the rest of the layer. The range is greyed out while unchecked.
-		var trow := _row_toggle("Timeout", a.wait_timeout,
-			"Checked: stop waiting after this long and skip the rest of the layer.",
-			func(v: bool):
-				a.wait_timeout = v
-				_after_edit())
-		var tpair := _add_range_field_in(trow, a.wait_timeout_ms, a.wait_timeout_ms_max, 0, 3600000, func(lo: int, hi: int):
-			a.wait_timeout_ms = lo
-			a.wait_timeout_ms_max = hi, "ms")
-		tpair.set_editable(a.wait_timeout)
-		(trow.get_child(0) as CheckBox).toggled.connect(func(v: bool): tpair.set_editable(v))
+	editor_box.add_child(skip)
 
 
 func _add_capture_mode_field(a: LoopActionT) -> void:
 	var row := _row("Mode")
 	var opt := _compact_option()
-	opt.add_item("Save", LoopActionT.CaptureMode.SAVE)
-	opt.add_item("Load", LoopActionT.CaptureMode.LOAD)
-	opt.select(a.capture_mode)
+	opt.add_item("Mouse", LoopActionT.CaptureMode.MOUSE)
+	opt.add_item("Detect", LoopActionT.CaptureMode.DETECT)
+	opt.select(opt.get_item_index(a.capture_mode))
 	opt.item_selected.connect(func(i):
 		a.capture_mode = opt.get_item_id(i)
 		_after_edit())
 	row.add_child(opt)
 	editor_box.add_child(row)
+	_add_duration_field(a)
 	var hint := Label.new()
-	hint.text = "Save remembers where the mouse is; Load moves it back there. A Load with nothing saved yet does nothing and disables itself."
+	hint.text = "Mouse moves the cursor to where your own mouse is: where it was when the run started, plus whatever you have moved it since (the loop's own moves do not count). Detect moves it to where the last Pixel or Image Detect found its target."
 	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	hint.modulate = Color(1, 1, 1, 0.7)
 	editor_box.add_child(hint)
@@ -1295,7 +1447,8 @@ func _add_stop_field(a: LoopActionT) -> void:
 	editor_box.add_child(hint)
 
 
-func _add_captures_field(a: LoopActionT) -> void:
+## Returns the row (a Click greys it out when Captures does not apply).
+func _add_captures_field(a: LoopActionT) -> HBoxContainer:
 	var row := HBoxContainer.new()
 	var cb := CheckBox.new()
 	cb.text = "Captures"
@@ -1316,6 +1469,7 @@ func _add_captures_field(a: LoopActionT) -> void:
 		ghost.disabled = not v
 		_after_edit())
 	editor_box.add_child(row)
+	return row
 
 
 func _add_comment_field(a: LoopActionT) -> void:
@@ -1323,6 +1477,7 @@ func _add_comment_field(a: LoopActionT) -> void:
 	var row := _row("Comment")
 	var le := LineEdit.new()
 	le.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	le.max_length = LoopActionT.COMMENT_MAX_CHARS
 	le.text = a.comment
 	le.text_changed.connect(func(t):
 		a.comment = t
@@ -1497,7 +1652,7 @@ func _add_image_tolerance_fields(a: LoopActionT) -> void:
 ## A Move / Drag's duration: how long the travel takes. Its label is a
 ## checkbox, "~Duration (ms)": checked, the cursor wanders a
 ## little on the way, like a hand, without moving where it starts or lands.
-func _add_duration_field(a: LoopActionT, tip: String = "How long the cursor takes to get there.\nChecked: it wanders a little on the way, like a hand would; where it starts and lands stays exact.") -> void:
+func _add_duration_field(a: LoopActionT, tip: String = "How long the cursor takes to get there.\nChecked: it wanders a little on the way, like a hand would; where it starts and lands stays exact.") -> HBoxContainer:
 	var row := _row_toggle("Duration", a.wiggle, tip,
 		func(v: bool):
 			a.wiggle = v
@@ -1505,6 +1660,7 @@ func _add_duration_field(a: LoopActionT, tip: String = "How long the cursor take
 	_add_range_field_in(row, a.duration_ms, a.duration_ms_max, 0, 60000, func(lo: int, hi: int):
 		a.duration_ms = lo
 		a.duration_ms_max = hi, "ms")
+	return row
 
 
 # ======================================================================
@@ -1577,8 +1733,27 @@ func _start_pick(kind: int, sample_colors: bool = false) -> void:
 		overlay.show_overlay()
 	status_label.text = "Pick on screen — left-click to set, right-click / Esc to cancel."
 	picker.begin_pick(kind, sample_colors)
-	# Get the builder out of the way so the desktop it was covering is visible.
+	_lower_builder(true)
+	if sample_colors:
+		_start_hover_sampling()
+
+
+## Gets the builder out of the way (~Edit unchecked) so the desktop it was
+## covering is visible. For a run or a recording it is minimised: the
+## taskbar brings it back whenever the user wants it, and the end of the
+## run un-minimises it if it still is. With `park`, for a pick, it is moved
+## just off-screen instead, where it keeps the focus (Esc still reaches it)
+## and comes back when the pick ends. Put back by
+## _restore_builder_after_pick.
+func _lower_builder(park: bool = false) -> void:
 	_refresh_stay_on_edit_check()
+	if _builder_hidden_for_pick:
+		# Minimised for a run and brought back by the user meanwhile: it is
+		# theirs again (a pick started from it may park it).
+		var win := get_window()
+		if _builder_parked or win.mode == Window.MODE_MINIMIZED:
+			return
+		_builder_hidden_for_pick = false
 	var lower := not stay_on_edit_check.button_pressed
 	if lower and stay_on_edit_check.disabled:
 		status_label.text += "  (Lowering the window is unavailable while embedded in the editor.)"
@@ -1587,17 +1762,14 @@ func _start_pick(kind: int, sample_colors: bool = false) -> void:
 		_builder_hidden_for_pick = true
 		_builder_prev_mode = win.mode
 		_builder_prev_pos = win.position
-		if win.mode == Window.MODE_WINDOWED:
-			# Park it just past the right edge of the virtual desktop. It stays
-			# focused there, so Esc (handled in _input) keeps working.
+		# A maximised window cannot be moved aside: it is minimised for a
+		# pick as well (Esc is then unavailable; right-click still cancels).
+		_builder_parked = park and win.mode == Window.MODE_WINDOWED
+		if _builder_parked:
 			var desktop := OverlayT.virtual_desktop_rect()
 			win.position = Vector2i(desktop.end.x + 64, win.position.y)
 		else:
-			# A maximised window can't be moved; minimise instead (Esc is then
-			# unavailable, right-click still cancels).
 			win.mode = Window.MODE_MINIMIZED
-	if sample_colors:
-		_start_hover_sampling()
 
 
 func _finish_pick() -> void:
@@ -1615,7 +1787,7 @@ func _finish_pick() -> void:
 		_restore_builder_after_pick()
 
 
-## Lowering the builder for a pick (~Edit unchecked) can't work while the game
+## Lowering the builder (~Edit unchecked) can't work while the game
 ## runs embedded in the editor's Game tab: moving the (child) window just
 ## blanks that panel, and the editor keeps covering the desktop anyway. Grey
 ## the option out in that case.
@@ -1627,19 +1799,156 @@ func _refresh_stay_on_edit_check() -> void:
 	if embedded:
 		stay_on_edit_check.tooltip_text = "Unavailable while the game is embedded in the Godot editor (Game tab → turn off Embed Game on Next Play)."
 	else:
-		stay_on_edit_check.tooltip_text = "Unchecked: this window is moved out of the way while you pick on screen.\nChecked: it stays where it is."
+		stay_on_edit_check.tooltip_text = "Unchecked: this window is minimised when a loop or a recording starts (the taskbar brings it back) and moved aside while you pick on screen.\nChecked: it stays where it is."
 
 
-## Bring the builder back (if it was moved away for the pick) and refocus it.
+## Brings the builder back (if it was got out of the way) and refocuses
+## it. One the user brought back themselves meanwhile is left as they
+## have it.
 func _restore_builder_after_pick() -> void:
 	var win := get_window()
 	if _builder_hidden_for_pick:
 		_builder_hidden_for_pick = false
 		if win.mode == Window.MODE_MINIMIZED:
 			win.mode = _builder_prev_mode
-		else:
+		# A parked window is put back by position too, whatever happened
+		# meanwhile: one the user minimised from the taskbar while parked
+		# came back un-minimised but still off-screen, unreachable.
+		if _builder_parked and win.mode == Window.MODE_WINDOWED:
 			win.position = _builder_prev_pos
+		_builder_parked = false
+	_keep_builder_on_screen()
 	win.grab_focus()
+
+
+## A windowed builder that is off every display (parked there and never
+## brought back, or the display it was on is gone) is centred on the
+## primary one: an off-screen window cannot be reached to fix it.
+func _keep_builder_on_screen() -> void:
+	var win := get_window()
+	if win.mode != Window.MODE_WINDOWED or _builder_hidden_for_pick:
+		return
+	var desktop := OverlayT.virtual_desktop_rect()
+	var shown := Rect2i(win.position, win.size).intersection(desktop)
+	if shown.size.x >= 64 and shown.size.y >= 64:
+		return
+	var usable := DisplayServer.screen_get_usable_rect(DisplayServer.get_primary_screen())
+	win.position = usable.position + (usable.size - win.size) / 2
+
+
+# ======================================================================
+#  Record
+# ======================================================================
+func _on_rec_pressed() -> void:
+	if _recording:
+		_stop_recording("", true)
+	elif not Playback.is_running and not _pick_active and not _dialog_open():
+		var layer := ProjectData.active_layer()
+		if layer == null:
+			return
+		# Asked first: the helper sees every window, and what is typed lands in
+		# the loop file readable - a password too.
+		_confirm("Record what you do with the mouse and keyboard into \"%s\" until you press F8?\nEverything you type is kept in the loop as plain text - stop before typing a password." % layer.name,
+			_start_recording, "Record")
+
+
+## Rec: the builder moves out of the way, a short countdown on the status
+## line, then the recording is on until F8 (or the button, or Esc here).
+func _start_recording() -> void:
+	if ProjectData.active_layer() == null:
+		return
+	_commit_pending_edits()
+	_recording = true
+	_record_armed = false
+	_record_gen += 1
+	var gen := _record_gen
+	rec_btn.text = "Stop"
+	_lower_builder()
+	# The helper is started before the countdown: it takes a second or two
+	# to come up (PowerShell compiles it), which the countdown hides - so the
+	# first click after "Recording…" is not lost to a helper not yet in. What
+	# it sees meanwhile is dropped below.
+	# ~Self on: what lands on Loop Automator itself is recorded too.
+	_record_unguarded = feedback_check.button_pressed
+	_recorder.start(0 if _record_unguarded else OS.get_process_id())
+	for n in [3, 2, 1]:
+		status_label.text = "Recording in %d… (F8 stops it)" % n
+		await get_tree().create_timer(1.0).timeout
+		if gen != _record_gen:
+			return
+	# Still coming up (a slow machine): say so rather than record nothing.
+	# A helper that fails meanwhile ends the recording from _process.
+	while _recorder.state == RecorderT.State.STARTING:
+		status_label.text = "Starting the recorder…"
+		await get_tree().process_frame
+		if gen != _record_gen:
+			return
+	_recorder.events.clear()
+	_record_armed = true
+	# The dot goes red now, not at the button: red means it is recording.
+	_start_rec_pulse()
+	if _recorder.f8_taken and not Playback.global_hotkey_armed():
+		# Another program holds F8 as its hotkey, so its press never reaches
+		# the recorder (with ~F8 on, the run's helper holds it and ends the
+		# recording itself).
+		status_label.text = "Recording… F8 is taken by another program: stop with the button or Esc here."
+	else:
+		status_label.text = "Recording… press F8 to stop."
+
+
+## Ends the recording; the events become actions on the end of the active
+## layer. `reason` (a helper failure) is what the status line says instead.
+## `from_builder`: the button or Esc here ended it - with ~Self on that
+## gesture was recorded too, so it is trimmed off the end.
+func _stop_recording(reason: String = "", from_builder: bool = false) -> void:
+	if not _recording:
+		return
+	_recording = false
+	_record_gen += 1
+	rec_btn.text = "Rec"
+	_stop_rec_pulse()
+	var events := _recorder.stop()
+	if not _record_armed:
+		events = []   # ended during the countdown: nothing was being recorded yet
+	elif from_builder and _record_unguarded:
+		events = RecordingT.without_stop_gesture(events)
+	_restore_builder_after_pick()
+	if not reason.is_empty():
+		status_label.text = reason
+		return
+	var actions := RecordingT.to_actions(events)
+	var layer_name := ProjectData.active_layer().name if ProjectData.active_layer() != null else ""
+	if actions.is_empty():
+		status_label.text = "Recorded nothing."
+		return
+	ProjectData.append_actions(actions)
+	status_label.text = "Recorded %d action%s into \"%s\"." % [actions.size(), "" if actions.size() == 1 else "s", layer_name]
+	if _recorder.limit_reached:
+		status_label.text += " The recording limit was reached, so it ended there."
+
+
+## The Rec dot goes red and breathes slowly (a shade brighter and back)
+## while the recording is on: lit, not flashing.
+func _start_rec_pulse() -> void:
+	_stop_rec_pulse()
+	_set_rec_icon_color(REC_ON_COLOR)
+	_rec_pulse = create_tween().set_loops()
+	_rec_pulse.tween_method(_set_rec_icon_color, REC_ON_COLOR, REC_ON_BRIGHT_COLOR, REC_BREATH_SEC).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+	_rec_pulse.tween_method(_set_rec_icon_color, REC_ON_BRIGHT_COLOR, REC_ON_COLOR, REC_BREATH_SEC).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+
+
+func _stop_rec_pulse() -> void:
+	if _rec_pulse != null and _rec_pulse.is_valid():
+		_rec_pulse.kill()
+	_rec_pulse = null
+	_set_rec_icon_color(REC_IDLE_COLOR)
+
+
+## The dot is a white circle tinted through the button's icon colours, in
+## every state (hovered, pressed) alike.
+func _set_rec_icon_color(c: Color) -> void:
+	for name in ["icon_normal_color", "icon_hover_color", "icon_pressed_color", "icon_hover_pressed_color", "icon_focus_color", "icon_disabled_color"]:
+		rec_btn.add_theme_color_override(name, c)
 
 
 func _on_point_picked(g: Vector2i) -> void:
@@ -1753,6 +2062,11 @@ func _stop_hover_sampling() -> void:
 
 
 func _process(_dt: float) -> void:
+	if _recording and _recorder.state != RecorderT.State.OFF:
+		if _recorder.poll():
+			_stop_recording()
+		elif _recorder.state == RecorderT.State.UNAVAILABLE:
+			_stop_recording("Recording failed: %s." % _recorder.reason)
 	if _hover_thread != null:
 		if _hover_thread.is_alive():
 			return
@@ -1781,6 +2095,8 @@ func _exit_tree() -> void:
 	if _hover_thread != null:
 		_hover_thread.wait_to_finish()
 		_hover_thread = null
+	# Closing mid-recording: the listening goes with the helper.
+	_recorder.stop()
 
 
 # ------------------------------------------------------- UI preferences
@@ -1789,6 +2105,13 @@ func _load_setting(key: String, default: Variant) -> Variant:
 	if cfg.load(SETTINGS_PATH) != OK:
 		return default
 	return cfg.get_value("ui", key, default)
+
+
+## A yes / no setting. The file is the user's to edit, so a value that is
+## not one (a word, a number) is the default, not a type error at start-up.
+func _load_bool_setting(key: String, default: bool) -> bool:
+	var v: Variant = _load_setting(key, default)
+	return v if v is bool else default
 
 
 func _save_setting(key: String, value: Variant) -> void:
@@ -1876,7 +2199,7 @@ func _active_loop_number() -> int:
 
 
 func _on_play_pressed() -> void:
-	if _stop_cooldown_active:
+	if _stop_cooldown_active or _recording:
 		return
 	_commit_pending_edits()
 	Playback.toggle()
@@ -1912,8 +2235,9 @@ func _on_backend_selected(i: int) -> void:
 	_refresh_run_label()
 
 
-## "Run?" in Safe mode (nothing real happens), "Run!" in Live. Left alone
-## while a run is going or the button is counting down after one.
+## "Run?" while nothing runs; the button reads "Run!" (with the stop icon)
+## while the loop is going. Left alone during a run or while the button is
+## counting down after one.
 func _refresh_run_label() -> void:
 	if play_btn == null or Playback.is_running or _stop_cooldown_active:
 		return
@@ -1922,8 +2246,7 @@ func _refresh_run_label() -> void:
 
 
 func _run_label() -> String:
-	var live := Playback.backend != null and Playback.backend.is_real()
-	return "Run!" if live else "Run?"
+	return "Run?"
 
 
 func _refresh_edit_lock() -> void:
@@ -1937,6 +2260,7 @@ func _refresh_edit_lock() -> void:
 		_ui_root.modulate = tint
 		if not locked:
 			_refresh_loop_nav()   # the unlock enabled the ◀ ▶ buttons too
+			_refresh_layer_props()   # and Enabled, which Solo may keep greyed
 	if play_btn != null:
 		# Keep this as the only clickable control in lock mode.
 		play_btn.disabled = _stop_cooldown_active
@@ -2281,6 +2605,15 @@ func _input(event: InputEvent) -> void:
 	if _pick_active:
 		if event.keycode == KEY_ESCAPE:
 			picker.cancel_pick()
+			get_viewport().set_input_as_handled()
+		return
+
+	# While recording, this window's F8 and Esc end it (the helper leaves
+	# out keys that land on Loop Automator itself, unless ~Self; an Esc
+	# recorded that way is trimmed). Nothing else here should fire meanwhile.
+	if _recording:
+		if event.keycode == KEY_F8 or event.keycode == KEY_ESCAPE:
+			_stop_recording("", event.keycode == KEY_ESCAPE)
 			get_viewport().set_input_as_handled()
 		return
 

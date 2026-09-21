@@ -15,12 +15,12 @@ const LoopActionT := preload("res://scripts/model/loop_action.gd")
 const FILE_VERSION := 2
 
 var name: String = "Untitled Loop"
-## Pause inserted between full loop iterations: a random value from
+## Pause before each pass of the loop (the first one too): a random value from
 ## loop_delay_ms .. loop_delay_ms_max each time (equal ends = fixed).
 var loop_delay_ms: int = 250
 var loop_delay_ms_max: int = 250
-## Also wait a (freshly rolled) loop delay after every action, not only
-## before the loop starts over: the toolbar's "~Delay ms" checkbox.
+## Wait a (freshly rolled) loop delay before every action instead of once
+## a pass: the toolbar's "~Delay ms" checkbox.
 var delay_after_each_action: bool = false
 var layers: Array[LoopLayerT] = []
 
@@ -47,10 +47,10 @@ func to_dict() -> Dictionary:
 
 static func from_dict(d: Dictionary) -> Self:
 	var p := Self.new()
-	p.name = String(d.get("name", "Untitled Loop"))
-	p.loop_delay_ms = int(d.get("loop_delay_ms", 250))
-	p.loop_delay_ms_max = int(d.get("loop_delay_ms_max", p.loop_delay_ms))
-	p.delay_after_each_action = bool(d.get("delay_after_each_action", false))
+	p.name = LoopLayerT.clean_name(LoopActionT.read_string(d, "name", "Untitled Loop"))
+	p.loop_delay_ms = maxi(0, LoopActionT.read_int(d, "loop_delay_ms", 250))
+	p.loop_delay_ms_max = maxi(0, LoopActionT.read_int(d, "loop_delay_ms_max", p.loop_delay_ms))
+	p.delay_after_each_action = LoopActionT.read_bool(d, "delay_after_each_action", false)
 	p.layers = []
 	# Skip (never crash on) entries that are not layer objects.
 	var layers: Variant = d.get("layers", [])
@@ -60,7 +60,7 @@ static func from_dict(d: Dictionary) -> Self:
 				p.layers.append(LoopLayerT.from_dict(ld))
 	if p.layers.is_empty():
 		p.layers.append(LoopLayerT.make("Layer 1", 0))
-	if int(d.get("version", 1)) < 2:
+	if LoopActionT.read_int(d, "version", 1) < 2:
 		# "$" used to be a plain character; it is the Win modifier now.
 		for layer in p.layers:
 			for a in layer.actions:
@@ -71,13 +71,6 @@ static func from_dict(d: Dictionary) -> Self:
 
 func to_json() -> String:
 	return JSON.stringify(to_dict(), "\t")
-
-
-static func from_json(text: String) -> Self:
-	var data: Variant = JSON.parse_string(text)
-	if typeof(data) != TYPE_DICTIONARY:
-		return Self.make_default()
-	return Self.from_dict(data)
 
 
 ## The pause to insert after this iteration: random within the range.

@@ -90,7 +90,17 @@ function Describe($w) {
   $c = New-Object System.Text.StringBuilder 256; [Win32Watch]::GetClassNameW($w, $c, 256) | Out-Null
   return ('[{0}]' -f $c.ToString())
 }
-function Log($msg) { Add-Content -LiteralPath $LogPath -Value ('{0} {1}' -f (Get-Date -Format 'HH:mm:ss.fff'), $msg) }
+$script:logged = 0
+function Log($msg) {
+  # The cap holds while this watchdog runs too (a desktop where windows keep
+  # changing places above the overlay writes a line a second): every 200
+  # lines the size is checked and the log moved aside as at the start.
+  $script:logged++
+  if (($script:logged % 200) -eq 0 -and (Test-Path -LiteralPath $LogPath) -and (Get-Item -LiteralPath $LogPath).Length -gt 262144) {
+    Move-Item -LiteralPath $LogPath -Destination ($LogPath + '.1') -Force
+  }
+  Add-Content -LiteralPath $LogPath -Value ('{0} {1}' -f (Get-Date -Format 'HH:mm:ss.fff'), $msg)
+}
 Log ('watchdog start hwnd=' + $Hwnd)
 $lastAbove = [IntPtr]::Zero
 $lastLost = ''
