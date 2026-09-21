@@ -5,8 +5,14 @@ class_name PreviewBackend
 ## Use this while you build and test a loop.
 
 var virtual_cursor: Vector2i = Vector2i.ZERO
-## Set by interrupt(): a captured action's dwell under way ends now.
+## Set by interrupt(): a captured action's dwell under way ends now - or
+## one about to start (the worker thread not yet running) does not start.
+## `_cut_short_at` is when: a flag nobody consumed (the dwell had just
+## ended) is forgotten after CUT_SHORT_MS rather than cutting a later run's
+## action short, as the real backend does.
 var _cut_short := false
+var _cut_short_at: int = 0
+const CUT_SHORT_MS := 2000
 
 func backend_name() -> String:
 	return "Preview (no OS input)"
@@ -41,15 +47,22 @@ func run_captured(kind: String, _button: int, from: Vector2i, to: Vector2i, ms: 
 	var saved := virtual_cursor
 	virtual_cursor = to if kind == "drag" else from
 	# The dwell is waited in slices so a stop (or a quit, which joins this
-	# thread) is not held up for the rest of it.
-	_cut_short = false
-	var until := Time.get_ticks_msec() + ms
+	# thread) is not held up for the rest of it. An interrupt from before
+	# this thread got going counts (the flag is consumed at the end, not
+	# cleared here); a stale one is forgotten.
+	var now := Time.get_ticks_msec()
+	if _cut_short and now - _cut_short_at > CUT_SHORT_MS:
+		_cut_short = false
+	var until := now + ms
 	while Time.get_ticks_msec() < until and not _cut_short:
 		OS.delay_msec(mini(10, maxi(1, until - Time.get_ticks_msec())))
 	virtual_cursor = saved
+	var cut := _cut_short
+	_cut_short = false
 	# Cut short is no result, as for the real backend.
-	return [] if _cut_short else [saved, saved]
+	return [] if cut else [saved, saved]
 
 
 func interrupt() -> void:
+	_cut_short_at = Time.get_ticks_msec()
 	_cut_short = true

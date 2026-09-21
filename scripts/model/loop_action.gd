@@ -163,7 +163,7 @@ var tolerance_max: int = 16
 var if_found: bool = false
 ## PIXEL_DETECT / IMAGE_DETECT: in Safe mode a colour or image that is not
 ## found changes nothing (no skip, no stop), so a whole loop can be walked
-## through; Live keeps to `on_fail`.
+## through; Live keeps to ~Wait and Skip rest of layer.
 var safe_continue: bool = true
 ## IMAGE_DETECT: the template to look for, as PNG bytes (the form it is
 ## stored and sent to the screen reader in); empty until one is captured.
@@ -204,7 +204,7 @@ const COMMENT_MAX_CHARS := 2000
 
 
 ## Field `key` of a loop-file dictionary as a whole number: the number as
-## written (a float rounded, a numeric string read), a boolean as 0 / 1, and
+## written (a float cut to its whole part, a numeric string read), a boolean as 0 / 1, and
 ## `default` for anything else - a JSON object, list, or word where a number
 ## should be (int() of those is a script error that would abort the load).
 ## Clamped to FIELD_MIN .. FIELD_MAX.

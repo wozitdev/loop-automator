@@ -59,7 +59,7 @@ var _closing := false
 ## Set by interrupt(): the empty answer the waiting call is about to get is
 ## meant, not a fault, so it is not logged as one - or, with no call
 ## waiting, the next command from a worker thread is the one meant and is
-## dropped (see _server_call). `_cut_short_at` is when: a flag nobody
+## dropped (see _server_call and _run_sync). `_cut_short_at` is when: a flag nobody
 ## consumed (the thread had just finished) is forgotten after CUT_SHORT_MS
 ## rather than swallowing a command of a later run.
 var _cut_short := false
@@ -1036,9 +1036,12 @@ func _server_ready() -> bool:
 	_server_pending = PackedByteArray()
 	var hello := _server_read_line(SERVER_START_TIMEOUT_MS)
 	if hello != "ready":
-		push_warning("WindowsBackend: read server did not come up (got %s); using one-shot reads." % JSON.stringify(hello))
+		# An interrupt() while it was coming up is not the helper's fault (see
+		# _run_sync): no hold-off, or the next ten seconds go one-shot.
+		if not _cut_short:
+			push_warning("WindowsBackend: read server did not come up (got %s); using one-shot reads." % JSON.stringify(hello))
+			_server_failed_at = Time.get_ticks_msec()
 		_stop_server()
-		_server_failed_at = Time.get_ticks_msec()
 		return false
 	_server_failed_at = -1
 	return true
@@ -1147,6 +1150,13 @@ func _run_sync(extra: PackedStringArray, timeout_ms: int = SERVER_READ_TIMEOUT_M
 			return ""
 		if line == "ok":
 			line = ""
+	elif _cut_short and OS.get_thread_caller_id() != OS.get_main_thread_id():
+		# The interrupt landed while the server was coming up for this very
+		# command (a captured action right after Run, or after the last stop
+		# ended the server): the command is the one meant, and it is not run
+		# on a one-shot process, where nothing could cut it short.
+		_cut_short = false
+		return ""
 	else:
 		# No server: one process for this call.
 		var once := _run_once(cmd)

@@ -269,7 +269,7 @@ func _draw_layer(li: int, layer: LoopLayerT, offset: Vector2) -> void:
 				# The wheel turns wherever the cursor is at the time.
 				text = "SCROLL %s  ×%s" % [LoopActionT.scroll_dir_name(action.scroll_dir).to_upper(), LoopActionT.range_text(action.notches, action.notches_max)]
 			elif action.type == LoopActionT.Type.CAPTURE:
-				text = "CAPTURE  " + ["SAVE", "LOAD", "DETECT"][clampi(action.capture_mode, 0, 2)]
+				text = "CAPTURE  " + ("DETECT" if action.capture_mode == LoopActionT.CaptureMode.DETECT else "MOUSE")
 			elif action.type == LoopActionT.Type.STOP:
 				text = ("STOP LOOP" if action.stop_scope == LoopActionT.StopScope.LOOP else "STOP LAYER")
 				# While running, show which pass it is on out of its limit;
