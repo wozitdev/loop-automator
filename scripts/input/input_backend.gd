@@ -52,6 +52,17 @@ func click(button: int, pos: Vector2i) -> void:
 func release_button(_button: int) -> void:
 	pass
 
+## Presses (`pressed`) or lets go of `button` where the cursor is, without
+## moving it: a Click's Down / Hold / Up with ~Move off. Unlike
+## release_button this is an input action, so the ~Self guard applies.
+func button_here(_button: int, _pressed: bool) -> void:
+	pass
+
+## Clicks `button` where the cursor is, without moving it (~Move off).
+func click_here(button: int) -> void:
+	button_here(button, true)
+	button_here(button, false)
+
 func send_keys(_text: String) -> void:
 	pass
 

@@ -51,6 +51,7 @@ const SETTINGS_PATH := "user://settings.cfg"
 var layer_list: ItemList
 var layer_visible_check: CheckBox
 var layer_enabled_check: CheckBox
+var layer_solo_check: CheckBox
 var layer_color_btn: ColorPickerButton
 
 # --- action panel ---------------------------------------------------------
@@ -288,6 +289,8 @@ func _build_toolbar() -> Control:
 	new_btn = _tool_button("New", _on_new)
 	new_btn.tooltip_text = "Start a new loop (its first layer, and so the loop, gets a random name)"
 	hb.add_child(new_btn)
+	duplicate_loop_btn = _icon_button(UiIconsT.copy(), "Duplicate this loop", _on_duplicate_loop)
+	hb.add_child(duplicate_loop_btn)
 	var loop_lbl := Label.new()
 	loop_lbl.text = "Loop"
 	hb.add_child(loop_lbl)
@@ -323,9 +326,7 @@ func _build_toolbar() -> Control:
 		else:
 			_on_export())
 	hb.add_child(share_btn)
-	duplicate_loop_btn = _icon_button(UiIconsT.copy(), "Duplicate this loop", _on_duplicate_loop)
-	hb.add_child(duplicate_loop_btn)
-	delete_loop_btn = _icon_button(UiIconsT.trash(), "Delete this loop (its file too)", _confirm_delete_loop)
+	delete_loop_btn =_icon_button(UiIconsT.trash(), "Delete this loop (its file too)", _confirm_delete_loop)
 	hb.add_child(delete_loop_btn)
 
 	hb.add_child(_vsep())
@@ -430,10 +431,10 @@ func _build_layer_panel() -> Control:
 
 	var btns := HBoxContainer.new()
 	btns.add_child(_icon_button(UiIconsT.plus(), "Add a layer", func(): ProjectData.add_layer()))
+	btns.add_child(_icon_button(UiIconsT.copy(), "Duplicate this layer", func(): ProjectData.duplicate_layer(ProjectData.active_layer_index)))
 	btns.add_child(_icon_button(UiIconsT.up(), "Move this layer up", func(): ProjectData.move_layer(ProjectData.active_layer_index, -1)))
 	btns.add_child(_icon_button(UiIconsT.down(), "Move this layer down", func(): ProjectData.move_layer(ProjectData.active_layer_index, 1)))
 	btns.add_child(_tool_button("Rename", func(): _rename_layer_dialog(ProjectData.active_layer_index)))
-	btns.add_child(_icon_button(UiIconsT.copy(), "Duplicate this layer", func(): ProjectData.duplicate_layer(ProjectData.active_layer_index)))
 	btns.add_child(_icon_button(UiIconsT.trash(), "Delete this layer", _confirm_delete_layer))
 	vb.add_child(btns)
 
@@ -482,13 +483,25 @@ func _build_layer_panel() -> Control:
 		ProjectData.emit_signal("overlay_view_changed"))
 	vb.add_child(layer_visible_check)
 
+	# Enabled and Solo side by side. Solo runs this layer alone: the others
+	# are treated as off without their Enabled changing (nothing is saved),
+	# and Enabled is greyed out meanwhile since it has no say.
+	var run_row := HBoxContainer.new()
 	layer_enabled_check = CheckBox.new()
 	layer_enabled_check.text = "Enabled (runs in loop)"
 	layer_enabled_check.toggled.connect(func(v):
 		var l := ProjectData.active_layer()
 		if l: l.enabled = v
 		ProjectData.emit_signal("layers_changed"))
-	vb.add_child(layer_enabled_check)
+	run_row.add_child(layer_enabled_check)
+	layer_solo_check = CheckBox.new()
+	layer_solo_check.text = "Solo"
+	layer_solo_check.focus_mode = Control.FOCUS_NONE
+	layer_solo_check.tooltip_text = "Run only this layer; the other layers' settings are not changed."
+	layer_solo_check.toggled.connect(func(v):
+		ProjectData.set_solo(ProjectData.active_layer_index if v else -1))
+	run_row.add_child(layer_solo_check)
+	vb.add_child(run_row)
 
 	var color_row := HBoxContainer.new()
 	var cl := Label.new()
@@ -565,6 +578,7 @@ func _build_editor_panel() -> Control:
 # ======================================================================
 func _connect_signals() -> void:
 	ProjectData.layers_changed.connect(_refresh_layers)
+	ProjectData.layers_changed.connect(_refresh_layer_props)
 	ProjectData.layers_changed.connect(_refresh_actions)
 	ProjectData.layers_changed.connect(_refresh_overlay_label)
 	ProjectData.actions_changed.connect(func(_i): _refresh_actions())
@@ -649,13 +663,20 @@ func _refresh_running_marks() -> void:
 # ======================================================================
 func _refresh_layers() -> void:
 	layer_list.clear()
+	var solo := ProjectData.solo_layer != null
 	for i in ProjectData.project.layers.size():
 		var l: LoopLayerT = ProjectData.project.layers[i]
-		# Two marks in front of the name: runs / does not run, drawn / not
-		# drawn on the overlay (the same check and cross as the action list).
-		layer_list.add_item(l.name, UiIconsT.layer_marks(l.enabled, l.visible))
+		# Two marks in front of the name: runs / does not run (Solo counts),
+		# drawn / not drawn on the overlay (the same check and cross as the
+		# action list).
+		var runs := ProjectData.layer_runs(i)
+		layer_list.add_item(l.name, UiIconsT.layer_marks(runs, l.visible))
 		layer_list.set_item_custom_fg_color(i, l.color)
-		var tip := "Runs in the loop" if l.enabled else "Does not run (off)"
+		var tip := "Runs in the loop"
+		if not runs:
+			tip = "Does not run (another layer is solo)" if solo else "Does not run (off)"
+		elif solo:
+			tip = "Runs alone (solo)"
 		tip += ", drawn on the overlay" if l.visible else ", not drawn on the overlay"
 		layer_list.set_item_tooltip(i, tip)
 	_refresh_layers_selection()
@@ -674,6 +695,9 @@ func _refresh_layer_props() -> void:
 		return
 	layer_visible_check.set_pressed_no_signal(l.visible)
 	layer_enabled_check.set_pressed_no_signal(l.enabled)
+	# Enabled has no say while a layer is solo.
+	layer_enabled_check.disabled = ProjectData.solo_layer != null
+	layer_solo_check.set_pressed_no_signal(ProjectData.solo_layer == l)
 	layer_color_btn.color = l.color
 
 
@@ -781,11 +805,14 @@ func _rebuild_editor() -> void:
 			_add_duration_field(a)
 			_add_captures_field(a)
 		LoopActionT.Type.CLICK:
-			_add_point_fields(a, false)
+			_add_move_to_field(a)
+			if a.move_to:
+				_add_point_fields(a, false)
+				_add_duration_field(a)
 			_add_button_field(a)
 			_add_hold_field(a)
-			# Captures goes with a plain click (see Playback._execute_action).
-			if a.press_mode == LoopActionT.PressMode.TAP:
+			# Captures goes with a plain click at a point (see Playback._execute_action).
+			if a.press_mode == LoopActionT.PressMode.TAP and a.move_to:
 				_add_captures_field(a)
 		LoopActionT.Type.DRAG:
 			_add_point_fields(a, true)
@@ -793,7 +820,9 @@ func _rebuild_editor() -> void:
 			_add_duration_field(a)
 			_add_captures_field(a)
 		LoopActionT.Type.SCROLL:
-			_add_point_fields(a, false)
+			_add_move_to_field(a)
+			if a.move_to:
+				_add_point_fields(a, false)
 			_add_scroll_fields(a)
 			_add_duration_field(a, "How long the scroll takes: the notches are spread over it (0 = as fast as a wheel goes).\nChecked: the gaps between notches vary a little, like a hand's.")
 		LoopActionT.Type.KEY:
@@ -842,6 +871,10 @@ static func _recentre_range(lo: int, hi: int, centre: int) -> Vector2i:
 	return Vector2i(new_lo, new_lo + span)
 
 
+## A point's X / Y ranges with two picks under them: "Pick" keeps the range's
+## width and re-centres it on the point clicked; "Pick area" is a dragged
+## box, and the ranges become that box (the click can land anywhere in it),
+## which is how a loop gets its random spread without typing numbers.
 func _add_point_fields(a: LoopActionT, second: bool) -> void:
 	editor_box.add_child(_section_label("Point" + (" A" if second else "")))
 	_add_range_field("X", a.x, a.x_max, -20000, 20000, func(lo: int, hi: int):
@@ -850,14 +883,17 @@ func _add_point_fields(a: LoopActionT, second: bool) -> void:
 	_add_range_field("Y", a.y, a.y_max, -20000, 20000, func(lo: int, hi: int):
 		a.y = lo
 		a.y_max = hi)
-	editor_box.add_child(_grab_button(UiIconsT.target(), "Pick on screen", func():
-		_begin_point_pick(func(g: Vector2i):
-			var rx := _recentre_range(a.x, a.x_max, g.x)
-			var ry := _recentre_range(a.y, a.y_max, g.y)
-			a.x = rx.x
-			a.x_max = rx.y
-			a.y = ry.x
-			a.y_max = ry.y)))
+	_add_point_picks(a, "", func(g: Vector2i):
+		var rx := _recentre_range(a.x, a.x_max, g.x)
+		var ry := _recentre_range(a.y, a.y_max, g.y)
+		a.x = rx.x
+		a.x_max = rx.y
+		a.y = ry.x
+		a.y_max = ry.y, func(r: Rect2i):
+		a.x = r.position.x
+		a.x_max = maxi(a.x, r.end.x - 1)
+		a.y = r.position.y
+		a.y_max = maxi(a.y, r.end.y - 1))
 	if second:
 		editor_box.add_child(_section_label("Point B"))
 		_add_range_field("X2", a.x2, a.x2_max, -20000, 20000, func(lo: int, hi: int):
@@ -866,14 +902,30 @@ func _add_point_fields(a: LoopActionT, second: bool) -> void:
 		_add_range_field("Y2", a.y2, a.y2_max, -20000, 20000, func(lo: int, hi: int):
 			a.y2 = lo
 			a.y2_max = hi)
-		editor_box.add_child(_grab_button(UiIconsT.target(), "Pick B on screen", func():
-			_begin_point_pick(func(g: Vector2i):
-				var rx := _recentre_range(a.x2, a.x2_max, g.x)
-				var ry := _recentre_range(a.y2, a.y2_max, g.y)
-				a.x2 = rx.x
-				a.x2_max = rx.y
-				a.y2 = ry.x
-				a.y2_max = ry.y)))
+		_add_point_picks(a, " B", func(g: Vector2i):
+			var rx := _recentre_range(a.x2, a.x2_max, g.x)
+			var ry := _recentre_range(a.y2, a.y2_max, g.y)
+			a.x2 = rx.x
+			a.x2_max = rx.y
+			a.y2 = ry.x
+			a.y2_max = ry.y, func(r: Rect2i):
+			a.x2 = r.position.x
+			a.x2_max = maxi(a.x2, r.end.x - 1)
+			a.y2 = r.position.y
+			a.y2_max = maxi(a.y2, r.end.y - 1))
+
+
+## The two pick buttons of a point, side by side: a point pick (`on_point`)
+## and an area pick (`on_rect`). `which` names the point ("", " B").
+func _add_point_picks(_a: LoopActionT, which: String, on_point: Callable, on_rect: Callable) -> void:
+	var row := HBoxContainer.new()
+	var point := _grab_button(UiIconsT.target(), "Pick%s on screen" % which, func(): _begin_point_pick(on_point))
+	point.tooltip_text = "Click where it should land (a range keeps its size and moves there)."
+	row.add_child(point)
+	var area := _grab_button(UiIconsT.target(), "Pick%s area" % which, func(): _begin_rect_pick(on_rect))
+	area.tooltip_text = "Drag a box; it lands anywhere inside it."
+	row.add_child(area)
+	editor_box.add_child(row)
 
 
 func _add_rect_fields(a: LoopActionT) -> void:
@@ -936,7 +988,9 @@ func _add_button_field(a: LoopActionT) -> void:
 
 ## The press dropdown of a Click or Key: `tap` is what the plain press is
 ## called there ("Click" / "Tap"), then Hold, Down and Up. Changing it
-## rebuilds the editor, since Hold has a row of its own.
+## rebuilds the editor, since Hold has a row of its own. A Click switched
+## to Up loses its ~Move: letting go is done where the cursor is (a move
+## first would drag whatever is held); it can be ticked back.
 func _press_mode_option(a: LoopActionT, tap: String) -> OptionButton:
 	var opt := _compact_option(false)
 	opt.add_item(tap, LoopActionT.PressMode.TAP)
@@ -947,9 +1001,29 @@ func _press_mode_option(a: LoopActionT, tap: String) -> OptionButton:
 	opt.select(opt.get_item_index(a.press_mode))
 	opt.item_selected.connect(func(i):
 		a.press_mode = opt.get_item_id(i)
+		if a.type == LoopActionT.Type.CLICK and a.press_mode == LoopActionT.PressMode.UP:
+			a.move_to = false
 		_after_edit()
 		_rebuild_editor.call_deferred())
 	return opt
+
+
+## A Click / Scroll's "~Move" row: checked (the default) it goes to X / Y
+## first; unchecked it happens wherever the cursor is, and the point rows
+## are not shown. Toggling rebuilds the editor.
+func _add_move_to_field(a: LoopActionT) -> void:
+	var what := "the wheel turns" if a.type == LoopActionT.Type.SCROLL else "it presses"
+	var row := _row_toggle("Move", a.move_to,
+		"Checked: go to X / Y first.\nUnchecked: %s wherever the cursor is." % what,
+		func(v: bool):
+			a.move_to = v
+			_after_edit()
+			_rebuild_editor.call_deferred())
+	var hint := Label.new()
+	hint.text = "to the point first" if a.move_to else "off: at the cursor"
+	hint.modulate = Color(1, 1, 1, 0.7)
+	row.add_child(hint)
+	editor_box.add_child(row)
 
 
 ## A Scroll's direction and how many notches of the wheel.
@@ -1184,13 +1258,15 @@ func _show_image_preview(a: LoopActionT) -> void:
 	_image_preview.popup_centered()
 
 
-## A detect's condition, read as a sentence over two rows: "~If [not found /
-## found]", "Then [Skip rest of layer / Wait till found (gone)]". The "~If"
-## checkbox is the Safe walk-through.
+## A detect's condition over four rows: "~If [not found / found]" (the "~If"
+## checkbox is the Safe walk-through), "~Wait [check every … ms]" (re-check
+## until it clears), its "~Timeout [… ms]", and "~Skip" (skip the rest of
+## the layer while it holds). Wait and Skip are independent: one detect can
+## wait and then skip, wait and carry on, skip at once, or just look.
 func _add_on_fail_field(a: LoopActionT) -> void:
 	var target := "image" if a.type == LoopActionT.Type.IMAGE_DETECT else "colour"
 	var row := _row_toggle("If", a.safe_continue,
-		"What happens when the %s is not there — or, with \"found\", when it is.\nChecked: in Safe mode nothing is skipped or waited for, so you can walk through the whole loop; Live keeps to the choice." % target,
+		"The condition: the %s is not there — or, with \"found\", it is.\nChecked: in Safe mode nothing is skipped or waited for, so you can walk through the whole loop; Live keeps to the choice." % target,
 		func(v: bool):
 			a.safe_continue = v
 			_after_edit())
@@ -1200,44 +1276,55 @@ func _add_on_fail_field(a: LoopActionT) -> void:
 	when.add_item("not found", 0)
 	when.add_item("found", 1)
 	when.select(1 if a.if_found else 0)
-	row.add_child(when)
-	editor_box.add_child(row)
-	# Stopping the loop is the Stop action's job now, not a Pixel Detect's.
-	var then_row := _row("Then")
-	var opt := _compact_option()
-	opt.add_item("Skip rest of layer", LoopActionT.OnFail.SKIP_LAYER)
-	opt.add_item("Wait till gone" if a.if_found else "Wait till found", LoopActionT.OnFail.WAIT_FOUND)
-	opt.select(maxi(0, opt.get_item_index(a.on_fail)))
-	opt.item_selected.connect(func(i):
-		a.on_fail = opt.get_item_id(i)
-		_after_edit()
-		# Show or hide the re-check interval for "Wait till found".
-		_rebuild_editor.call_deferred())
 	when.item_selected.connect(func(i):
 		a.if_found = i == 1
-		opt.set_item_text(opt.get_item_index(LoopActionT.OnFail.WAIT_FOUND), "Wait till gone" if a.if_found else "Wait till found")
-		_after_edit())
-	then_row.add_child(opt)
-	editor_box.add_child(then_row)
-	if a.on_fail == LoopActionT.OnFail.WAIT_FOUND:
-		# "Wait till found / gone" re-checks the same spot on this interval
-		# until the colour appears / goes (F8 / Esc / a Stop action still
-		# ends the loop).
-		_add_range_field("Check every", a.wait_ms, a.wait_ms_max, 0, 600000, func(lo: int, hi: int):
-			a.wait_ms = lo
-			a.wait_ms_max = hi, "ms")
-		# ~Timeout: give up after this long (a range, like every number) and
-		# skip the rest of the layer. The range is greyed out while unchecked.
-		var trow := _row_toggle("Timeout", a.wait_timeout,
-			"Checked: stop waiting after this long and skip the rest of the layer.",
-			func(v: bool):
-				a.wait_timeout = v
-				_after_edit())
-		var tpair := _add_range_field_in(trow, a.wait_timeout_ms, a.wait_timeout_ms_max, 0, 3600000, func(lo: int, hi: int):
-			a.wait_timeout_ms = lo
-			a.wait_timeout_ms_max = hi, "ms")
-		tpair.set_editable(a.wait_timeout)
-		(trow.get_child(0) as CheckBox).toggled.connect(func(v: bool): tpair.set_editable(v))
+		_after_edit()
+		# The Wait / Skip tooltips read "appears" / "goes" from this.
+		_rebuild_editor.call_deferred())
+	row.add_child(when)
+	editor_box.add_child(row)
+	# ~Wait: re-check the same spot on this interval until the condition
+	# clears (F8 / Esc / a Stop action still end the loop). The interval and
+	# the timeout are greyed out while it is off.
+	var wrow := _row_toggle("Wait", a.wait,
+		"Checked: keep checking this spot every so often until the %s %s." % [target, "goes" if a.if_found else "appears"],
+		func(v: bool):
+			a.wait = v
+			_after_edit())
+	var wpair := _add_range_field_in(wrow, a.wait_ms, a.wait_ms_max, 0, 600000, func(lo: int, hi: int):
+		a.wait_ms = lo
+		a.wait_ms_max = hi, "ms")
+	wpair.set_editable(a.wait)
+	# ~Timeout: give up waiting after this long (a range, like every number);
+	# ~Skip then decides what happens.
+	var trow := _row_toggle("Timeout", a.wait_timeout,
+		"Checked: stop waiting after this long.",
+		func(v: bool):
+			a.wait_timeout = v
+			_after_edit())
+	var tpair := _add_range_field_in(trow, a.wait_timeout_ms, a.wait_timeout_ms_max, 0, 3600000, func(lo: int, hi: int):
+		a.wait_timeout_ms = lo
+		a.wait_timeout_ms_max = hi, "ms")
+	var timeout_check := trow.get_child(0) as CheckBox
+	timeout_check.disabled = not a.wait
+	tpair.set_editable(a.wait and a.wait_timeout)
+	(wrow.get_child(0) as CheckBox).toggled.connect(func(v: bool):
+		wpair.set_editable(v)
+		timeout_check.disabled = not v
+		tpair.set_editable(v and a.wait_timeout))
+	timeout_check.toggled.connect(func(v: bool): tpair.set_editable(a.wait and v))
+	# ~Skip: skip the rest of the layer while the condition holds (at once,
+	# or still after the wait). Off, the layer carries on either way.
+	var srow := _row_toggle("Skip", a.skip,
+		"Checked: skip the rest of the layer while the %s is %s.\nUnchecked: carry on either way." % [target, "there" if a.if_found else "not there"],
+		func(v: bool):
+			a.skip = v
+			_after_edit())
+	var shint := Label.new()
+	shint.text = "rest of layer"
+	shint.modulate = Color(1, 1, 1, 0.7)
+	srow.add_child(shint)
+	editor_box.add_child(srow)
 
 
 func _add_capture_mode_field(a: LoopActionT) -> void:
@@ -1245,14 +1332,19 @@ func _add_capture_mode_field(a: LoopActionT) -> void:
 	var opt := _compact_option()
 	opt.add_item("Save", LoopActionT.CaptureMode.SAVE)
 	opt.add_item("Load", LoopActionT.CaptureMode.LOAD)
-	opt.select(a.capture_mode)
+	opt.add_item("Detect", LoopActionT.CaptureMode.DETECT)
+	opt.select(opt.get_item_index(a.capture_mode))
 	opt.item_selected.connect(func(i):
 		a.capture_mode = opt.get_item_id(i)
-		_after_edit())
+		_after_edit()
+		# Load and Detect travel: they have a Duration row.
+		_rebuild_editor.call_deferred())
 	row.add_child(opt)
 	editor_box.add_child(row)
+	if a.capture_mode != LoopActionT.CaptureMode.SAVE:
+		_add_duration_field(a)
 	var hint := Label.new()
-	hint.text = "Save remembers where the mouse is; Load moves it back there. A Load with nothing saved yet does nothing and disables itself."
+	hint.text = "Save remembers where the mouse is; Load moves it back there (a Load with nothing saved yet does nothing and disables itself). Detect moves it to where the last Pixel or Image Detect found its target."
 	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	hint.modulate = Color(1, 1, 1, 0.7)
 	editor_box.add_child(hint)
@@ -1937,6 +2029,7 @@ func _refresh_edit_lock() -> void:
 		_ui_root.modulate = tint
 		if not locked:
 			_refresh_loop_nav()   # the unlock enabled the ◀ ▶ buttons too
+			_refresh_layer_props()   # and Enabled, which Solo may keep greyed
 	if play_btn != null:
 		# Keep this as the only clickable control in lock mode.
 		play_btn.disabled = _stop_cooldown_active

@@ -55,18 +55,24 @@ layer 1, just broken out so you can view each layer's visuals separately.
 - **Move** — move the cursor to `(x, y)`; with a duration the cursor travels
   there over that time instead of jumping (`~Duration` adds a little
   hand-like wander on the way; start and end stay exact).
-- **Click** — move to `(x, y)` and click Left / Right / Middle. The press
-  dropdown beside the button makes it a **Hold** (the button stays down for
-  **Hold** time, then is let go), a **Down** (pressed and left that way for
-  the actions after it — drag around a detect, hold a mouse button while a
-  key is tapped) or an **Up**. Stopping the loop lets go of anything still
-  held. **Captures** goes with a plain click.
+- **Click** — go to `(x, y)` and click Left / Right / Middle. With a
+  **Duration** the cursor travels there over that time first, like a Move
+  (`~Duration` adds the hand-like wander), so a human click is one action.
+  Untick **~Move** and the click happens wherever the cursor is right now,
+  with no move at all — a release after a long hold, a press after a
+  Capture Mouse. The press dropdown beside the button makes it a **Hold**
+  (the button stays down for **Hold** time, then is let go), a **Down**
+  (pressed and left that way for the actions after it — drag around a
+  detect, hold a mouse button while a key is tapped) or an **Up** (which
+  turns ~Move off for you: letting go is done in place). Stopping the loop
+  lets go of anything still held. **Captures** goes with a plain click at a
+  point.
 - **Drag** — press at A, move to B over the duration, release.
-- **Scroll** — move to `(x, y)` and turn the mouse wheel Up / Down / Left /
-  Right by a number of **Notches** (a range, like every number), one wheel
-  click at a time - spread over the **Duration** if it has one (`~Duration`
-  makes the gaps uneven, like a hand's). The program under the point gets
-  them.
+- **Scroll** — move to `(x, y)` (or, with **~Move** unticked, stay where the
+  cursor is) and turn the mouse wheel Up / Down / Left / Right by a number
+  of **Notches** (a range, like every number), one wheel click at a time -
+  spread over the **Duration** if it has one (`~Duration` makes the gaps
+  uneven, like a hand's). The program under the point gets them.
 - **Key** — send keystrokes. In Live mode this uses the
   [`SendKeys`](https://learn.microsoft.com/dotnet/api/system.windows.forms.sendkeys)
   format, e.g. `abc`, `{ENTER}`, `^c` (Ctrl+C), `%{F4}` (Alt+F4). You can
@@ -103,18 +109,20 @@ layer 1, just broken out so you can view each layer's visuals separately.
   picking, a swatch next to the cursor previews the colour under it. Tick
   **Follow Cursor** and the rect is centred on the mouse instead of X / Y — it
   moves with the mouse on the overlay and is scanned wherever the mouse is when
-  the action runs. The condition reads as a sentence: **If** *not found*,
-  **Then** **Skip rest of layer** — or **Wait till found**, which re-checks the same
-  spot on an interval until the colour appears (tick **~Timeout** to give
-  up after a while and skip the rest of the layer instead). Flip *not found*
-  to *found* and the same detect works the other way round: skip the rest
-  of the layer while the colour is there, or **Wait till gone**. That is
-  the "else" half of a condition — one layer guarded by *not found*, the
-  next by *found* — and a way to wait for a loading screen or a popup to
-  go away. With the **~If** box checked (the default) a Safe run carries
-  on regardless, so the whole loop can be walked through. With **~Self** on,
-  a detect may match on Loop Automator's own window; off (default) it ignores it. The overlay is
-  never read.
+  the action runs. The condition is **If** *not found* (flip it to *found*
+  and the same detect works the other way round: the "else" half of a
+  condition — one layer guarded by *not found*, the next by *found*). Two
+  boxes say what happens while it holds, and they are independent:
+  **~Wait** keeps checking the same spot every so often until the colour
+  appears (or goes), with **~Timeout** to give up after a while; **~Skip**
+  (on by default) skips the rest of the layer — at once, or still after the
+  wait. So one detect can wait for a popup and skip the layer if it never
+  shows, wait and carry on either way, skip at once, or, with both boxes
+  off, just look — which is how a Capture Mouse set to *Detect* gets its
+  spot. With the **~If** box checked (the default) a Safe run carries on
+  regardless, so the whole loop can be walked through. With **~Self** on,
+  a detect may match on Loop Automator's own window; off (default) it
+  ignores it. The overlay is never read.
 - **Image Detect** — look for a small screenshot anywhere in a screen rect: every
   pixel of it within ± tolerance of the screen, at any offset the image fits.
   **Just sample** grabs the area you drag over as the image and leaves the
@@ -132,16 +140,22 @@ layer 1, just broken out so you can view each layer's visuals separately.
   rect takes to scan). Check **~Mismatch** to compare by light and dark
   only, so the image is still found when it is tinted differently (hovered,
   pressed, another theme). Rect,
-  **Follow Cursor**, **If** *not found* / *found*, **Wait till found** /
-  **gone**, **~Timeout** and **~Self** work as for Pixel Detect. The scan runs in the helper, so a whole screen is
-  checked in a few tens of milliseconds.
+  **Follow Cursor**, **If** *not found* / *found*, **~Wait**, **~Timeout**,
+  **~Skip** and **~Self** work as for Pixel Detect. The scan runs in the
+  helper, so a whole screen is checked in a few tens of milliseconds.
 - **Stop** — stop the loop, or **This layer** to just end the current layer's
   pass, when reached. Set **after N passes** to stop only once it has been
   reached that many times (0 = the first time) — a run limiter.
 - **Capture Mouse** — **Save** remembers where the mouse is right now; **Load** moves
   it back to the last saved position. There is one saved position per run (it is
   cleared when you press Play). A Load that runs before anything was saved does
-  nothing and switches itself off.
+  nothing and switches itself off. **Detect** moves the mouse to where the
+  last Pixel or Image Detect found its target (the middle of the image, or
+  the matching pixel) — so "find the buy button anywhere in the shop →
+  Capture Mouse: Detect → Click with ~Move off" presses whichever one is
+  there, wherever it is. Load and Detect take a **Duration** (with
+  `~Duration`'s wander) so the move looks like a hand's. Before any detect
+  has found anything, Detect does nothing and the layer carries on.
   Move, Click and Drag also have a **Captures** checkbox: the action saves the
   mouse position, runs, then moves the mouse back where it was — plus whatever
   you moved it meanwhile, so your own movement is never lost. Handy for
@@ -170,9 +184,11 @@ pair expanded.
 
 - **Pick on screen** keeps a range's *width* and re-centres it on the point
   you click: a 20-pixel jitter stays a 20-pixel jitter around the new spot
-  (a fixed point simply moves). A dragged **rect** is exact: fixed position
-  and size. **Sample & place** fixes the rect's position so the sampled pixel
-  is inside every size the range allows.
+  (a fixed point simply moves). **Pick area** next to it is the quick way to
+  a spread: drag a box, and the point's X and Y become that box — the click
+  lands anywhere inside it, a fresh spot each time. A dragged detection
+  **rect** is exact: fixed position and size. **Sample & place** fixes the
+  rect's position so the sampled pixel is inside every size the range allows.
 - The action list and the overlay show ranges as `min–max`; on the overlay a
   point with a range is drawn at the middle of a dashed box covering where
   it can land, and a Pixel Detect frames the extent every possible rect
@@ -194,7 +210,10 @@ one). Both are saved with the loop.
 
 1. Run the [downloaded binary](#download), or open the folder in Godot 4.7 and
    press **Run** (F5).
-2. Pick a **layer** on the left (add / reorder / rename / duplicate / remove / recolour).
+2. Pick a **layer** on the left (add / duplicate / reorder / rename / remove /
+   recolour). **Solo** beside *Enabled* runs that layer on its own: the other
+   layers are treated as off for as long as it is ticked, and nothing about
+   them changes — untick it and they are back as they were.
 3. Add **actions** in the middle column, edit them on the right.
    - Use the **🎯 Pick on screen** buttons to place a point/rect *interactively*:
      the overlay takes over the screen, you move the mouse to the real target and

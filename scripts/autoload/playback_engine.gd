@@ -61,6 +61,11 @@ var _generation: int = 0
 var _saved_cursor: Vector2i = Vector2i.ZERO
 var _has_saved_cursor: bool = false
 
+# Where the last Pixel / Image Detect found its target (an image's middle),
+# for Capture Mouse's Detect. Cleared whenever playback starts.
+var _last_hit: Vector2i = Vector2i.ZERO
+var _has_last_hit: bool = false
+
 # How many times each STOP action has been reached this run (keyed by the
 # action), so "stop after N passes" can count. Cleared when playback starts.
 var _stop_counts: Dictionary = {}
@@ -246,6 +251,7 @@ func start() -> void:
 	is_running = true
 	_generation += 1
 	_has_saved_cursor = false
+	_has_last_hit = false
 	_sweep_retired()
 	_stop_counts.clear()
 	_held_buttons.clear()
@@ -298,7 +304,8 @@ func _run_loop(gen: int) -> void:
 			if not is_running or gen != _generation:
 				break
 			var layer: LoopLayerT = project.layers[li]
-			if not layer.enabled:
+			# Enabled, or the solo layer while one is set (see ProjectData).
+			if not ProjectData.layer_runs(li):
 				continue
 			var skip_layer := false
 			for ai in layer.actions.size():
@@ -360,10 +367,10 @@ func _wait_loop_delay(project: LoopProjectT, gen: int, what: String) -> void:
 ## `layer_index` / `action_index` locate the action in the project (a Capture
 ## Load with nothing saved disables itself).
 func _execute_action(action: LoopActionT, layer_index: int, action_index: int) -> int:
-	# Captures goes with a plain click (a held button put back where the
-	# cursor was would be a drag).
+	# Captures goes with a plain click at a point (a held button put back
+	# where the cursor was would be a drag; a click at the cursor goes nowhere).
 	if action.captures and LoopActionT.supports_captures(action.type) \
-			and (action.type != LoopActionT.Type.CLICK or action.press_mode == LoopActionT.PressMode.TAP):
+			and (action.type != LoopActionT.Type.CLICK or (action.press_mode == LoopActionT.PressMode.TAP and action.move_to)):
 		await _execute_captured(action)
 		return LoopActionT.OnFail.CONTINUE
 	# Every numeric setting is a range; each run draws fresh values from it.
@@ -372,10 +379,23 @@ func _execute_action(action: LoopActionT, layer_index: int, action_index: int) -
 			var p := action.roll_point()
 			await _travel(_mouse_pos(), p, action.roll_duration_ms(), action.wiggle, "MOVE")
 		LoopActionT.Type.CLICK:
-			var p := action.roll_point()
+			# ~Move: get to the point first (over the duration, like a Move);
+			# off, the press is wherever the cursor is.
+			var p := _mouse_pos()
+			if action.move_to:
+				p = action.roll_point()
+				var ms := action.roll_duration_ms()
+				if ms > 0:
+					var gen := _generation
+					await _travel(_mouse_pos(), p, ms, action.wiggle, "CLICK")
+					if not is_running or gen != _generation:
+						return LoopActionT.OnFail.CONTINUE
 			if action.press_mode == LoopActionT.PressMode.TAP:
 				_set_tracker(p, true, "CLICK")
-				backend.click(action.button, p)
+				if action.move_to:
+					backend.click(action.button, p)
+				else:
+					backend.click_here(action.button)
 				_report_skipped(action)
 			else:
 				await _press_button(action, p)
@@ -392,7 +412,8 @@ func _execute_action(action: LoopActionT, layer_index: int, action_index: int) -
 				_set_tracker(p2, true, "DRAG END")
 				backend.mouse_button(action.button, false, p2)
 		LoopActionT.Type.SCROLL:
-			var p := action.roll_point()
+			# ~Move off: the wheel turns wherever the cursor is.
+			var p := action.roll_point() if action.move_to else _mouse_pos()
 			var n := action.roll_notches()
 			var ms := action.roll_duration_ms()
 			_set_tracker(p, true, "SCROLL")
@@ -438,25 +459,23 @@ func _execute_action(action: LoopActionT, layer_index: int, action_index: int) -
 			var what := "Image detect" if is_image else "Pixel detect"
 			var target := "image" if is_image else "colour"
 			var hit := await _detect_once(action, gen)
-			# The choice fires when the colour or image is missing — or, with
-			# "If found", when it is there. "Wait" re-checks the same spot
-			# until that is no longer so (till found / till gone), or the
-			# loop is stopped. A Safe walk-through does not wait —
-			# safe_continue carries it on regardless.
+			# The condition holds when the colour or image is missing — or,
+			# with "If found", when it is there. ~Wait re-checks the same spot
+			# until it no longer holds (till found / till gone), the ~Timeout
+			# runs out, or the loop is stopped; ~Skip then skips the rest of
+			# the layer while it still holds. A Safe walk-through does neither
+			# — safe_continue carries it on regardless.
 			var fires := (hit.x >= 0) == action.if_found
-			var wait_mode := action.on_fail == LoopActionT.OnFail.WAIT_FOUND \
-					and not (action.safe_continue and not backend.is_real())
+			var walk_through := action.safe_continue and not backend.is_real()
+			var wait_mode := action.wait and not walk_through
 			var waiting_for := ("the %s to go" % target) if action.if_found else ("the %s" % target)
 			var wait_started := Time.get_ticks_msec()
 			var wait_limit := action.roll_wait_timeout_ms()
+			var timed_out := false
 			while wait_mode and fires and is_running and gen == _generation:
-				# Timed out: give up and skip the rest of the layer. (The
-				# fallback is fixed for now; it could follow a chosen
-				# If-not-found option once there are more of them.)
 				if action.wait_timeout and Time.get_ticks_msec() - wait_started >= wait_limit:
-					_last_event = "%s: still %s (timed out)." % [what, "there" if action.if_found else "not found"]
-					emit_signal("status", _last_event)
-					return LoopActionT.OnFail.SKIP_LAYER
+					timed_out = true
+					break
 				_last_event = "%s: waiting for %s…" % [what, waiting_for]
 				emit_signal("status", _last_event)
 				_set_tracker(tracker_pos, tracker_visible, "WAIT DETECT")
@@ -469,18 +488,26 @@ func _execute_action(action: LoopActionT, layer_index: int, action_index: int) -
 				return LoopActionT.OnFail.CONTINUE
 			var found := hit.x >= 0
 			if found:
-				# The tracker marks an image at its middle (hit is its corner).
-				_set_tracker(hit + action.image_size() / 2 if is_image else hit, true, "DETECT")
+				# The tracker marks an image at its middle (hit is its corner);
+				# that middle is also where Capture Mouse's Detect goes.
+				_last_hit = hit + action.image_size() / 2 if is_image else hit
+				_has_last_hit = true
+				_set_tracker(_last_hit, true, "DETECT")
+			if timed_out:
+				_last_event = "%s: still %s (timed out)." % [what, "there" if found else "not found"]
+			elif found:
 				_last_event = "%s: found at (%d, %d)." % [what, hit.x, hit.y]
 			else:
 				_last_event = "%s: not found." % what
 			if fires:
 				# ~If: a Safe run walks on regardless.
-				if action.safe_continue and not backend.is_real():
+				if walk_through:
 					_last_event = _last_event.trim_suffix(".") + " (Safe: carrying on)."
-				else:
+				elif action.skip:
 					emit_signal("status", _last_event)
-					return action.on_fail
+					return LoopActionT.OnFail.SKIP_LAYER
+				else:
+					_last_event = _last_event.trim_suffix(".") + ", carrying on."
 			emit_signal("status", _last_event)
 		LoopActionT.Type.STOP:
 			_set_tracker(tracker_pos, tracker_visible, "STOP")
@@ -499,19 +526,29 @@ func _execute_action(action: LoopActionT, layer_index: int, action_index: int) -
 				stop(reason)
 				return LoopActionT.OnFail.CONTINUE
 		LoopActionT.Type.CAPTURE:
-			if action.capture_mode == LoopActionT.CaptureMode.SAVE:
-				if _save_cursor():
-					emit_signal("status", "Capture: saved mouse position (%d, %d)" % [_saved_cursor.x, _saved_cursor.y])
-				else:
-					emit_signal("status", "Capture: could not read the mouse position")
-			elif _has_saved_cursor:
-				_load_cursor("CAPTURE LOAD")
-				emit_signal("status", "Capture: moved to saved position (%d, %d)" % [_saved_cursor.x, _saved_cursor.y])
-			else:
-				# Nothing to go back to: do nothing and switch the action off so
-				# it stops being attempted every iteration.
-				emit_signal("status", "Capture: nothing saved yet — action disabled.")
-				ProjectData.disable_action(layer_index, action_index)
+			match action.capture_mode:
+				LoopActionT.CaptureMode.SAVE:
+					if _save_cursor():
+						emit_signal("status", "Capture: saved mouse position (%d, %d)" % [_saved_cursor.x, _saved_cursor.y])
+					else:
+						emit_signal("status", "Capture: could not read the mouse position")
+				LoopActionT.CaptureMode.LOAD:
+					if _has_saved_cursor:
+						await _travel(_mouse_pos(), _saved_cursor, action.roll_duration_ms(), action.wiggle, "CAPTURE LOAD")
+						emit_signal("status", "Capture: moved to saved position (%d, %d)" % [_saved_cursor.x, _saved_cursor.y])
+					else:
+						# Nothing to go back to: do nothing and switch the action off so
+						# it stops being attempted every iteration.
+						emit_signal("status", "Capture: nothing saved yet — action disabled.")
+						ProjectData.disable_action(layer_index, action_index)
+				LoopActionT.CaptureMode.DETECT:
+					# The last detect's spot. Nothing found yet is not a fault
+					# of the action (the detect may find next pass): carry on.
+					if _has_last_hit:
+						await _travel(_mouse_pos(), _last_hit, action.roll_duration_ms(), action.wiggle, "CAPTURE DETECT")
+						emit_signal("status", "Capture: moved to the last detect's spot (%d, %d)" % [_last_hit.x, _last_hit.y])
+					else:
+						emit_signal("status", "Capture: no detect has found anything yet.")
 	return LoopActionT.OnFail.CONTINUE
 
 
@@ -524,12 +561,16 @@ func _report_skipped(action: LoopActionT) -> void:
 
 ## A Click set to Hold, Down or Up at `p`: the button goes down and is
 ## remembered as held (so a stop lets go of it), a Hold sleeps its time and
-## lets go, an Up lets go. The button's name is what the status line says.
+## lets go, an Up lets go. With ~Move off it all happens where the cursor is
+## (`p`), without a move. The button's name is what the status line says.
 func _press_button(action: LoopActionT, p: Vector2i) -> void:
 	var name := LoopActionT.button_name(action.button)
 	if action.press_mode == LoopActionT.PressMode.UP:
 		_set_tracker(p, true, "UP")
-		backend.mouse_button(action.button, false, p)
+		if action.move_to:
+			backend.mouse_button(action.button, false, p)
+		else:
+			backend.button_here(action.button, false)
 		# Refused by ~Self (it would land on this app): still held, so the
 		# stop lets go of it where it went down.
 		if not backend.last_skipped:
@@ -538,7 +579,10 @@ func _press_button(action: LoopActionT, p: Vector2i) -> void:
 		return
 	var hold := action.press_mode == LoopActionT.PressMode.HOLD
 	_set_tracker(p, true, "HOLD" if hold else "DOWN")
-	backend.mouse_button(action.button, true, p)
+	if action.move_to:
+		backend.mouse_button(action.button, true, p)
+	else:
+		backend.button_here(action.button, true)
 	if backend.last_skipped:
 		_report_skipped(action)
 		return
@@ -653,7 +697,6 @@ func _execute_captured(action: LoopActionT) -> void:
 	match action.type:
 		LoopActionT.Type.CLICK:
 			kind = "click"
-			ms = 0
 		LoopActionT.Type.DRAG:
 			kind = "drag"
 			path = MousePathT.make(from, to, ms, action.wiggle)
@@ -666,7 +709,7 @@ func _execute_captured(action: LoopActionT) -> void:
 	# The tracker walks the path while the helper moves the real cursor.
 	var started := Time.get_ticks_msec()
 	while thread.is_alive():
-		if kind != "click" and ms > 0:
+		if ms > 0:
 			_set_tracker(Vector2i(MousePathT.at(path, float(Time.get_ticks_msec() - started) / float(ms)).round()), true, label)
 		await get_tree().process_frame
 	var result: Array = thread.wait_to_finish()
@@ -852,12 +895,6 @@ func _save_cursor() -> bool:
 	_has_saved_cursor = true
 	_set_tracker(pos, true, "CAPTURE SAVE")
 	return true
-
-
-## Moves the mouse back to the saved position (callers check _has_saved_cursor).
-func _load_cursor(label: String) -> void:
-	_set_tracker(_saved_cursor, true, label)
-	backend.move_to(_saved_cursor)
 
 
 ## Most pixels a Pixel Detect scans per check. Bigger rects are sampled on a

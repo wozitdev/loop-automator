@@ -37,6 +37,11 @@ var selected_action_index: int = -1
 var overlay_layer_index: int = 0
 var overlay_show_all: bool = false
 
+## Solo: while set, this layer alone runs and every other layer is treated
+## as off - without any layer's Enabled setting changing (nothing is saved).
+## The layer itself, not its index, so moving layers about keeps it.
+var solo_layer: LoopLayerT = null
+
 var current_path: String = ""
 var _next_loop_id: int = 1
 var _session_projects_by_id: Dictionary = {}
@@ -96,9 +101,31 @@ func add_layer() -> void:
 	emit_signal("selection_changed")
 
 
+## Solo `index` (-1: nobody). One layer at a time; the layer list and the
+## run follow through layer_runs.
+func set_solo(index: int) -> void:
+	var l: LoopLayerT = project.layers[index] if index >= 0 and index < project.layers.size() else null
+	if l == solo_layer:
+		return
+	solo_layer = l
+	emit_signal("layers_changed")
+
+
+## Whether layer `index` takes part in a run: the solo layer alone while one
+## is set, otherwise whatever its Enabled says.
+func layer_runs(index: int) -> bool:
+	if index < 0 or index >= project.layers.size():
+		return false
+	if solo_layer != null:
+		return project.layers[index] == solo_layer
+	return project.layers[index].enabled
+
+
 func remove_layer(index: int) -> void:
 	if project.layers.size() <= 1:
 		return
+	if project.layers[index] == solo_layer:
+		solo_layer = null
 	project.layers.remove_at(index)
 	active_layer_index = clampi(active_layer_index, 0, project.layers.size() - 1)
 	selected_action_index = -1
@@ -543,6 +570,7 @@ func _open_project_for_id(loop_id: int) -> void:
 		_pending_by_id[key] = bool(_pending_by_id.get(key, false))
 	project = _session_projects_by_id[key]
 	_sync_loop_name()
+	solo_layer = null
 	active_layer_index = 0
 	selected_action_index = -1
 	overlay_layer_index = 0

@@ -375,6 +375,24 @@ switch ($cmd) {
     # Never refused (see Guarded): the press was allowed where it happened.
     [Win32In]::ButtonOnly((Up-Flag $a[1]))
   }
+  'tap' {
+    # tap / bdown / bup <button>: a click, a press or a release where the
+    # cursor is right now, with no move at all (a Click with ~Move off).
+    # Guarded like a click at that point.
+    $c = Read-Cursor
+    if (Guarded-Point $c.X $c.Y) { Write-Output 'skipped'; break }
+    [Win32In]::ButtonOnly((Down-Flag $a[1])); [Win32In]::ButtonOnly((Up-Flag $a[1]))
+  }
+  'bdown' {
+    $c = Read-Cursor
+    if (Guarded-Point $c.X $c.Y) { Write-Output 'skipped'; break }
+    [Win32In]::ButtonOnly((Down-Flag $a[1]))
+  }
+  'bup' {
+    $c = Read-Cursor
+    if (Guarded-Point $c.X $c.Y) { Write-Output 'skipped'; break }
+    [Win32In]::ButtonOnly((Up-Flag $a[1]))
+  }
   'wheel' {
     # wheel <x> <y> <up|down|left|right> <n> <ms> <uneven 0|1>: the cursor
     # goes to (x, y) and the wheel turns n notches that way, one event per
@@ -406,8 +424,8 @@ switch ($cmd) {
     # movement is never lost. With ghost=1 the real cursor is hidden for the
     # duration and a ghost cursor stands in for it, so nothing appears to jump.
     # The path (\"x,y;x,y;...\") is the travel over $ms: to (x, y) for a
-    # move, from (x, y) to (x2, y2) for a drag; without one the cursor jumps.
-    # Prints \"savedX,savedY,restoredX,restoredY\".
+    # move or a click, from (x, y) to (x2, y2) for a drag; without one the
+    # cursor jumps. Prints \"savedX,savedY,restoredX,restoredY\".
     $kind = $a[1]; $useGhost = ($a[2] -eq '1'); $btn = $a[3]
     $x = [int]$a[4]; $y = [int]$a[5]; $x2 = [int]$a[6]; $y2 = [int]$a[7]; $ms = [int]$a[8]
     $path = ''; if ($a.Count -gt 9) { $path = [string]$a[9] }
@@ -431,7 +449,7 @@ switch ($cmd) {
           if ($path -ne '') { Glide $path $ms } else { Jump $x $y; Wait-Ms $ms }
         }
         'click' {
-          Jump $x $y
+          if ($path -ne '') { Glide $path $ms } else { Jump $x $y }
           Wait-Ms 15
           [Win32In]::MouseAt($x,$y,(Down-Flag $btn)); Wait-Ms 15; [Win32In]::MouseAt($x,$y,(Up-Flag $btn))
         }
@@ -1062,6 +1080,14 @@ func release_button(button: int) -> void:
 	_run_sync(PackedStringArray(["release", str(button)]))
 
 
+func button_here(button: int, pressed: bool) -> void:
+	_run_sync(PackedStringArray(["bdown" if pressed else "bup", str(button)]))
+
+
+func click_here(button: int) -> void:
+	_run_sync(PackedStringArray(["tap", str(button)]))
+
+
 func scroll(pos: Vector2i, dir: int, notches: int, ms: int = 0, uneven: bool = false) -> void:
 	_last_pos = pos
 	var n := clampi(notches, 1, 200)
@@ -1081,7 +1107,7 @@ func run_captured(kind: String, button: int, from: Vector2i, to: Vector2i, ms: i
 	var cmd := PackedStringArray([
 		"cap", kind, "1" if ghost else "0", str(button),
 		str(from.x), str(from.y), str(to.x), str(to.y), str(ms)])
-	if kind != "click" and path.size() > 1:
+	if path.size() > 2:
 		cmd.append(MousePathT.encode(path))
 	var line := _run_sync(cmd, ms + 10000)
 	if last_skipped:

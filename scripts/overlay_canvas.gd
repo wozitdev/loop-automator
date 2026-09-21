@@ -191,7 +191,7 @@ func _draw_layer(li: int, layer: LoopLayerT, offset: Vector2) -> void:
 			continue
 		var is_current := (Playback.current_layer_index == li and Playback.current_action_index == ai)
 		var is_selected := (li == ProjectData.active_layer_index and ai == ProjectData.selected_action_index)
-		var positioned := LoopActionT.has_position(action.type)
+		var positioned := action.positioned()
 		var p := action.overlay_point(_mouse)
 		# Where the chips of the position-less actions that follow hang from.
 		# A detect's inside is left clear so the target stays visible:
@@ -211,9 +211,10 @@ func _draw_layer(li: int, layer: LoopLayerT, offset: Vector2) -> void:
 			d.a = 0.5
 			draw_dashed_line(prev_point, local, d, 1.5, 6.0)
 
-		# Per-type visual guide. A point whose X / Y is a range is drawn at the
+		# Per-type visual guide (a Click / Scroll with ~Move off has none: it
+		# is a chip below). A point whose X / Y is a range is drawn at the
 		# middle of the area it can land in, with that area boxed.
-		match action.type:
+		match action.type if positioned else -1:
 			LoopActionT.Type.PIXEL_DETECT, LoopActionT.Type.IMAGE_DETECT:
 				_draw_detect_guide(action, _detect_rect(action, li, ai), offset, col, is_selected)
 			LoopActionT.Type.MOVE:
@@ -263,8 +264,14 @@ func _draw_layer(li: int, layer: LoopLayerT, offset: Vector2) -> void:
 					text = "KEY %s  %s" % [action.press_text().to_upper(), ktxt]
 			elif action.type == LoopActionT.Type.WAIT:
 				text = "WAIT  %s ms" % LoopActionT.range_text(action.wait_ms, action.wait_ms_max)
+			elif action.type == LoopActionT.Type.CLICK:
+				# ~Move off: a press wherever the cursor is at the time.
+				var press := action.press_text().to_upper()
+				text = "%s %s  AT CURSOR" % [LoopActionT.button_name(action.button).to_upper(), press if not press.is_empty() else "CLICK"]
+			elif action.type == LoopActionT.Type.SCROLL:
+				text = "SCROLL %s ×%s  AT CURSOR" % [LoopActionT.scroll_dir_name(action.scroll_dir).to_upper(), LoopActionT.range_text(action.notches, action.notches_max)]
 			elif action.type == LoopActionT.Type.CAPTURE:
-				text = "CAPTURE  " + ("SAVE" if action.capture_mode == LoopActionT.CaptureMode.SAVE else "LOAD")
+				text = "CAPTURE  " + ["SAVE", "LOAD", "DETECT"][clampi(action.capture_mode, 0, 2)]
 			elif action.type == LoopActionT.Type.STOP:
 				text = ("STOP LOOP" if action.stop_scope == LoopActionT.StopScope.LOOP else "STOP LAYER")
 				# While running, show which pass it is on out of its limit;
