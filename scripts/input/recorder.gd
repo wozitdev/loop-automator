@@ -96,9 +96,13 @@ public class Rec : NativeWindow {
   // (WM_NCHITTEST), and a program that is not answering would hold it.
   struct Ev { public string line; public bool atPoint; public Pt pt; }
   static System.Collections.Generic.Queue<Ev> lines = new System.Collections.Generic.Queue<Ev>();
+  // The most lines kept waiting for the writer (a window under the cursor
+  // that does not answer holds it): past that, input is dropped rather
+  // than the queue growing for as long as the recording runs.
+  const int MaxQueued = 50000;
   static void Out(string s) { Ev e; e.line = s; e.atPoint = false; e.pt = new Pt(); Push(e); }
   static void OutAt(string s, Pt p) { Ev e; e.line = s; e.atPoint = true; e.pt = p; Push(e); }
-  static void Push(Ev e) { lock (lines) { lines.Enqueue(e); Monitor.Pulse(lines); } }
+  static void Push(Ev e) { lock (lines) { if (lines.Count < MaxQueued || !e.atPoint) lines.Enqueue(e); Monitor.Pulse(lines); } }
   static void Writer() {
     while (true) {
       Ev e;

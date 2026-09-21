@@ -419,7 +419,10 @@ the built-in text immediately before every launch, so what runs is always the
 copy this build generated — editing them has no effect. `powershell.exe` is
 always started by its full `System32` path. Action data never becomes script
 text: the helpers take numbers, and the Key text travels base64-encoded as a
-single argument.
+single argument (a long text in pieces, cut between keystrokes). Loop files
+and the store index are written to a file beside them and renamed into place,
+so a crash mid-save never leaves a loop cut short; a store file that will not
+read is kept as `<name>.loop.broken` rather than written over.
 
 ---
 

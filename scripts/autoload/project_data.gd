@@ -396,6 +396,12 @@ func _read_loop_file(path: String) -> LoopProjectT:
 	var f := FileAccess.open(path, FileAccess.READ)
 	if f == null:
 		return null
+	return _read_loop(f)
+
+
+## The loop in the open file `f` (closed here), or null if its contents are
+## not a loop (or it is too big to read).
+func _read_loop(f: FileAccess) -> LoopProjectT:
 	if f.get_length() > LOOP_FILE_MAX_BYTES:
 		f.close()
 		return null
@@ -661,11 +667,7 @@ func _save_store_index() -> void:
 		"active_loop_id": active_loop_id,
 		"loops": loop_stack,
 	}
-	var f := FileAccess.open(STORE_INDEX_PATH, FileAccess.WRITE)
-	if f == null:
-		return
-	f.store_string(JSON.stringify(payload, "\t"))
-	f.close()
+	_write_text_file(STORE_INDEX_PATH, JSON.stringify(payload, "\t"))
 
 
 func _loop_index_from_id(loop_id: int) -> int:
@@ -692,16 +694,28 @@ static func _store_loop_file(loop_id: int, raw: String) -> String:
 	return "%s/%d.loop" % [STORE_LOOPS_DIR, loop_id]
 
 
+## The loop in a store file. A file that is there but is not a loop (cut
+## short by a crash while it was written, edited by hand, too big) is not
+## thrown away: it is moved aside as "<name>.broken" - the next Save would
+## otherwise write over it - and the loop opens empty. One that cannot be
+## opened at all (held by another program) is left where it is.
 func _read_project_file(path: String, fallback_name: String) -> LoopProjectT:
 	if FileAccess.file_exists(path):
+		var abs := ProjectSettings.globalize_path(path)
 		var f := FileAccess.open(path, FileAccess.READ)
-		if f != null:
-			var text := f.get_as_text()
-			f.close()
-			var loaded := LoopProjectT.from_json(text)
-			if loaded.name.strip_edges().is_empty():
-				loaded.name = fallback_name
-			return loaded
+		if f == null:
+			push_warning("ProjectData: could not open %s (error %d)." % [abs, FileAccess.get_open_error()])
+		else:
+			var loaded := _read_loop(f)
+			if loaded != null:
+				if loaded.name.strip_edges().is_empty():
+					loaded.name = fallback_name
+				return loaded
+			var aside := path + ".broken"
+			if DirAccess.rename_absolute(abs, ProjectSettings.globalize_path(aside)) == OK:
+				push_warning("ProjectData: %s is not a readable loop file; kept as %s." % [abs, aside.get_file()])
+			else:
+				push_warning("ProjectData: %s is not a readable loop file." % abs)
 	# Never saved: an empty loop that keeps the name it was given (the loop is
 	# named after its first layer, so that is where the name goes).
 	var p := LoopProjectT.make_default()
@@ -712,9 +726,28 @@ func _read_project_file(path: String, fallback_name: String) -> LoopProjectT:
 
 
 func _write_project_file(path: String, value: LoopProjectT) -> Error:
-	var f := FileAccess.open(path, FileAccess.WRITE)
+	return _write_text_file(path, value.to_json())
+
+
+## Writes `text` to `path` by way of a file beside it that is renamed into
+## place once it is whole, so a crash (or the power going) mid-write leaves
+## what was there (a loop, the store index) as it was, never a file cut
+## short.
+static func _write_text_file(path: String, text: String) -> Error:
+	var tmp := path + ".tmp"
+	var f := FileAccess.open(tmp, FileAccess.WRITE)
 	if f == null:
 		return FileAccess.get_open_error()
-	f.store_string(value.to_json())
+	f.store_string(text)
+	var err := f.get_error()
 	f.close()
-	return OK
+	var abs_tmp := ProjectSettings.globalize_path(tmp)
+	if err != OK:
+		DirAccess.remove_absolute(abs_tmp)
+		return err
+	# (On Windows the rename removes the old file first; if it then failed,
+	# the whole new file is still there as .tmp, so that is left alone.)
+	err = DirAccess.rename_absolute(abs_tmp, ProjectSettings.globalize_path(path))
+	if err != OK:
+		push_warning("ProjectData: could not put %s in place (error %d); what was written is in %s." % [path.get_file(), err, abs_tmp])
+	return err

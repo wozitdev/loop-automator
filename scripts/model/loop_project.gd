@@ -47,7 +47,7 @@ func to_dict() -> Dictionary:
 
 static func from_dict(d: Dictionary) -> Self:
 	var p := Self.new()
-	p.name = LoopActionT.read_string(d, "name", "Untitled Loop")
+	p.name = LoopLayerT.clean_name(LoopActionT.read_string(d, "name", "Untitled Loop"))
 	p.loop_delay_ms = maxi(0, LoopActionT.read_int(d, "loop_delay_ms", 250))
 	p.loop_delay_ms_max = maxi(0, LoopActionT.read_int(d, "loop_delay_ms_max", p.loop_delay_ms))
 	p.delay_after_each_action = LoopActionT.read_bool(d, "delay_after_each_action", false)
@@ -71,13 +71,6 @@ static func from_dict(d: Dictionary) -> Self:
 
 func to_json() -> String:
 	return JSON.stringify(to_dict(), "\t")
-
-
-static func from_json(text: String) -> Self:
-	var data: Variant = JSON.parse_string(text)
-	if typeof(data) != TYPE_DICTIONARY:
-		return Self.make_default()
-	return Self.from_dict(data)
 
 
 ## The pause to insert after this iteration: random within the range.

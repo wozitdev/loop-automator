@@ -393,7 +393,7 @@ func _build_toolbar() -> Control:
 	stay_on_edit_check = CheckBox.new()
 	stay_on_edit_check.text = "~Edit"
 	stay_on_edit_check.focus_mode = Control.FOCUS_NONE
-	stay_on_edit_check.button_pressed = not _load_setting("lower_on_edit", true)
+	stay_on_edit_check.button_pressed = not _load_bool_setting("lower_on_edit", true)
 	stay_on_edit_check.toggled.connect(func(v): _save_setting("lower_on_edit", not v))
 	hb.add_child(stay_on_edit_check)
 	# Embedding is only reported once the window has been parented, so check
@@ -405,7 +405,7 @@ func _build_toolbar() -> Control:
 	feedback_check.text = "~Self"
 	feedback_check.focus_mode = Control.FOCUS_NONE
 	feedback_check.tooltip_text = "Checked: a running loop may interact with Loop Automator itself (clicks and keys can land on this window, like a feedback loop), and Rec records what you do on it.\nUnchecked: clicks and keys that would land on Loop Automator are skipped, so the loop cannot affect the app running it, and Rec leaves them out."
-	feedback_check.button_pressed = _load_setting("feedback", false)
+	feedback_check.button_pressed = _load_bool_setting("feedback", false)
 	Playback.set_feedback(feedback_check.button_pressed)
 	feedback_check.toggled.connect(func(v):
 		_save_setting("feedback", v)
@@ -418,7 +418,7 @@ func _build_toolbar() -> Control:
 	hotkey_check.text = "~F8"
 	hotkey_check.focus_mode = Control.FOCUS_NONE
 	hotkey_check.tooltip_text = "Checked: F8 starts and stops the loop from any window while Loop Automator is open (other programs do not get F8 meanwhile), and this window moves out of the way while a loop runs.\nUnchecked: F8 only works while this window has the focus."
-	hotkey_check.button_pressed = _load_setting("global_hotkey", true)
+	hotkey_check.button_pressed = _load_bool_setting("global_hotkey", true)
 	Playback.set_global_hotkey(hotkey_check.button_pressed)
 	hotkey_check.toggled.connect(func(v):
 		_save_setting("global_hotkey", v)
@@ -1101,7 +1101,7 @@ func _add_scroll_fields(a: LoopActionT) -> void:
 	editor_box.add_child(row)
 	var nrow := _row("Notches")
 	nrow.tooltip_text = "How many clicks of the wheel (the program under the cursor gets them)."
-	_add_range_field_in(nrow, a.notches, a.notches_max, 1, 200, func(lo: int, hi: int):
+	_add_range_field_in(nrow, a.notches, a.notches_max, 1, LoopActionT.NOTCHES_MAX, func(lo: int, hi: int):
 		a.notches = lo
 		a.notches_max = hi)
 
@@ -1128,6 +1128,7 @@ func _add_keys_field(a: LoopActionT) -> void:
 	row.add_child(_press_mode_option(a, "Tap"))
 	var le := LineEdit.new()
 	le.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	le.max_length = LoopActionT.KEYS_MAX_CHARS
 	le.text = a.keys
 	le.placeholder_text = "e.g. abc, {ENTER}, ^c"
 	le.text_changed.connect(func(t: String):
@@ -1169,7 +1170,8 @@ func _open_key_capture(le: LineEdit, a: LoopActionT) -> void:
 		# The window is resizable; the size it was last closed at is kept.
 		var saved: Variant = _load_setting("key_capture_size", Vector2i.ZERO)
 		if saved is Vector2i and saved.x >= _key_capture.min_size.x and saved.y >= _key_capture.min_size.y:
-			_key_capture.size = saved
+			# No bigger than the screen it opens on: the file is the user's to edit.
+			_key_capture.size = saved.min(DisplayServer.screen_get_size(DisplayServer.window_get_current_screen()))
 		_key_capture.visibility_changed.connect(func():
 			if not _key_capture.visible:
 				_save_setting("key_capture_size", _key_capture.size))
@@ -1475,6 +1477,7 @@ func _add_comment_field(a: LoopActionT) -> void:
 	var row := _row("Comment")
 	var le := LineEdit.new()
 	le.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	le.max_length = LoopActionT.COMMENT_MAX_CHARS
 	le.text = a.comment
 	le.text_changed.connect(func(t):
 		a.comment = t
@@ -2072,6 +2075,13 @@ func _load_setting(key: String, default: Variant) -> Variant:
 	if cfg.load(SETTINGS_PATH) != OK:
 		return default
 	return cfg.get_value("ui", key, default)
+
+
+## A yes / no setting. The file is the user's to edit, so a value that is
+## not one (a word, a number) is the default, not a type error at start-up.
+func _load_bool_setting(key: String, default: bool) -> bool:
+	var v: Variant = _load_setting(key, default)
+	return v if v is bool else default
 
 
 func _save_setting(key: String, value: Variant) -> void:

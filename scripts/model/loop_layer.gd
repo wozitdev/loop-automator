@@ -29,13 +29,18 @@ static func make(layer_name: String, index: int = 0) -> Self:
 	return l
 
 
+## The most characters a name keeps (the list, the picker and the status
+## line show it; a file may hold anything).
+const NAME_MAX_CHARS := 200
+
+
 ## `raw` as a name fit for the layer list, the loop picker and the store
-## index: one line, no control characters, no invisible direction marks
-## (a loop file may hold anything, and the loop is named after its first
-## layer).
+## index: one line, no control characters, no invisible direction marks,
+## at most NAME_MAX_CHARS (a loop file may hold anything, and the loop is
+## named after its first layer).
 static func clean_name(raw: String) -> String:
 	var out := ""
-	for ch in raw:
+	for ch in raw.left(NAME_MAX_CHARS * 2):
 		var code := ch.unicode_at(0)
 		if code < 32 or (code >= 127 and code <= 159):
 			continue  # C0 / C1 control characters (line breaks, tabs, …)
@@ -44,7 +49,7 @@ static func clean_name(raw: String) -> String:
 		if code == 0x200E or code == 0x200F or (code >= 0x202A and code <= 0x202E) or (code >= 0x2066 and code <= 0x2069):
 			continue  # bidi marks and overrides: they can make text read differently
 		out += ch
-	return out.strip_edges()
+	return out.strip_edges().left(NAME_MAX_CHARS)
 
 
 func to_dict() -> Dictionary:

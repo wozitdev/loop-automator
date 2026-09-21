@@ -5,6 +5,8 @@ class_name PreviewBackend
 ## Use this while you build and test a loop.
 
 var virtual_cursor: Vector2i = Vector2i.ZERO
+## Set by interrupt(): a captured action's dwell under way ends now.
+var _cut_short := false
 
 func backend_name() -> String:
 	return "Preview (no OS input)"
@@ -38,7 +40,16 @@ func run_captured(kind: String, _button: int, from: Vector2i, to: Vector2i, ms: 
 	# drawn by playback (the tracker walks the path meanwhile).
 	var saved := virtual_cursor
 	virtual_cursor = to if kind == "drag" else from
-	if ms > 0:
-		OS.delay_msec(ms)
+	# The dwell is waited in slices so a stop (or a quit, which joins this
+	# thread) is not held up for the rest of it.
+	_cut_short = false
+	var until := Time.get_ticks_msec() + ms
+	while Time.get_ticks_msec() < until and not _cut_short:
+		OS.delay_msec(mini(10, maxi(1, until - Time.get_ticks_msec())))
 	virtual_cursor = saved
-	return [saved, saved]
+	# Cut short is no result, as for the real backend.
+	return [] if _cut_short else [saved, saved]
+
+
+func interrupt() -> void:
+	_cut_short = true

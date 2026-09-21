@@ -632,14 +632,15 @@ func _press_button(action: LoopActionT, p: Vector2i) -> void:
 ## A Key set to Hold, Down or Up: its text read as presses (see
 ## KeyStrokes: "^c" is Ctrl and c, "(wa)" is w and a), each pressed and
 ## remembered as held, or let go of. A Hold sleeps its time and lets go
-## of what it pressed. A stroke a press cannot express (an unknown name)
-## is typed once on the way down and ignored on the way up.
+## of what it pressed. A stroke a press cannot express (an unknown name, a
+## group too long for one helper command) is typed once on the way down and
+## ignored on the way up.
 func _press_keys(action: LoopActionT) -> void:
 	var presses: Array = []
 	var typed := PackedStringArray()
 	for stroke in KeyStrokesT.split(action.keys):
 		var press := KeyStrokesT.parse(stroke)
-		if press.is_empty():
+		if press.is_empty() or (press["keys"] as PackedStringArray).size() > KEY_GROUP_MAX:
 			typed.append(stroke)
 		else:
 			presses.append({"mods": press["mods"], "keys": press["keys"]})

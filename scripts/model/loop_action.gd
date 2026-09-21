@@ -189,6 +189,13 @@ var _image_texture: ImageTexture = null
 ## otherwise turn into INT64_MIN and be sent as such).
 const FIELD_MIN := -2147483648
 const FIELD_MAX := 2147483647
+## The most notches one Scroll turns (the editor's and the helper's limit;
+## a file saying more would have the run turning the wheel for hours).
+const NOTCHES_MAX := 200
+## The text fields are kept to a size the list and the editor draw without
+## trouble (a file may hold anything); the editor's boxes take no more.
+const KEYS_MAX_CHARS := 8192
+const COMMENT_MAX_CHARS := 2000
 
 
 ## Field `key` of a loop-file dictionary as a whole number: the number as
@@ -649,7 +656,7 @@ static func from_dict(d: Dictionary) -> Self:
 	# else, and it can be looked at and deleted.
 	if a.type < Type.MOVE or a.type > Type.SCROLL:
 		a.enabled = false
-	a.comment = read_string(d, "comment", "")
+	a.comment = read_string(d, "comment", "").left(COMMENT_MAX_CHARS)
 	# A missing "<name>_max" (files from before ranges) means a fixed value.
 	a.x = read_int(d, "x", 0)
 	a.x_max = read_int(d, "x_max", a.x)
@@ -667,7 +674,7 @@ static func from_dict(d: Dictionary) -> Self:
 	if a.button < BUTTON_LEFT or a.button > BUTTON_MIDDLE:
 		a.button = BUTTON_LEFT
 	# One line of SendKeys text; a file cannot smuggle line breaks into it.
-	a.keys = read_string(d, "keys", "").replace("\r", "").replace("\n", "")
+	a.keys = read_string(d, "keys", "").replace("\r", "").replace("\n", "").left(KEYS_MAX_CHARS)
 	a.wait_ms = read_int(d, "wait_ms", 100)
 	a.wait_ms_max = read_int(d, "wait_ms_max", a.wait_ms)
 	a.duration_ms = read_int(d, "duration_ms", 0)
@@ -685,8 +692,8 @@ static func from_dict(d: Dictionary) -> Self:
 	a.scroll_dir = read_int(d, "scroll_dir", ScrollDir.DOWN)
 	if a.scroll_dir < ScrollDir.UP or a.scroll_dir > ScrollDir.RIGHT:
 		a.scroll_dir = ScrollDir.DOWN
-	a.notches = maxi(1, read_int(d, "notches", 3))
-	a.notches_max = maxi(1, read_int(d, "notches_max", a.notches))
+	a.notches = clampi(read_int(d, "notches", 3), 1, NOTCHES_MAX)
+	a.notches_max = clampi(read_int(d, "notches_max", a.notches), 1, NOTCHES_MAX)
 	a.press_mode = read_int(d, "press_mode", PressMode.TAP)
 	if a.press_mode < PressMode.TAP or a.press_mode > PressMode.UP:
 		a.press_mode = PressMode.TAP
