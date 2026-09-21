@@ -82,12 +82,12 @@ func press_keys(_mods: String, _keys: PackedStringArray, _pressed: bool) -> void
 	pass
 
 
-## Moves the cursor to `pos` and turns the mouse wheel `notches` clicks in
-## `dir` (a LoopAction.ScrollDir), one wheel event per notch, spread over
-## `ms` (a moment apart at least; `uneven` varies the gaps like a hand).
-## Blocks for the whole scroll (callers run it off the main thread).
-func scroll(pos: Vector2i, _dir: int, _notches: int, _ms: int = 0, _uneven: bool = false) -> void:
-	move_to(pos)
+## Turns the mouse wheel `notches` clicks in `dir` (a LoopAction.ScrollDir)
+## where the cursor is, one wheel event per notch, spread over `ms` (a
+## moment apart at least; `uneven` varies the gaps like a hand). Blocks for
+## the whole scroll (callers run it off the main thread).
+func scroll(_dir: int, _notches: int, _ms: int = 0, _uneven: bool = false) -> void:
+	pass
 
 ## Returns the colour of a single screen pixel, or a transparent colour
 ## if the backend cannot read the screen.

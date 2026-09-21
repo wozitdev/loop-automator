@@ -26,6 +26,8 @@ const HOLD_MS := 250
 const TYPING_GAP_MS := 400
 ## Wheel notches this close together are one Scroll.
 const WHEEL_GAP_MS := 400
+## The Esc key (a recording ended with it from the builder).
+const VK_ESCAPE := 0x1B
 
 ## Virtual keys that are modifiers, and the letter each is in
 ## KeyStrokes' mods (the hook reports left / right codes; see _vk).
@@ -43,10 +45,36 @@ static func to_actions(events: Array) -> Array[LoopActionT]:
 	return _actions(_items(events))
 
 
+## `events` without the gesture that ended the recording from the builder
+## (recorded with ~Self on): the press of its Stop button - the last mouse
+## down (its up may have come in too) and everything after it - or the Esc,
+## and the motion up to it.
+static func without_stop_gesture(events: Array) -> Array:
+	var out := events.duplicate()
+	var cut := out.size()
+	for i in range(out.size() - 1, -1, -1):
+		var e: Dictionary = out[i]
+		if e["kind"] == "m":
+			continue
+		if e["kind"] == "d" or (e["kind"] == "k" and e["vk"] == VK_ESCAPE):
+			cut = i
+		elif e["kind"] == "u":
+			# The release of the press: cut from the press itself.
+			for j in range(i - 1, -1, -1):
+				if out[j]["kind"] == "d" and out[j]["button"] == e["button"]:
+					cut = j
+					break
+		break
+	out.resize(cut)
+	while not out.is_empty() and out[out.size() - 1]["kind"] == "m":
+		out.resize(out.size() - 1)
+	return out
+
+
 # ----------------------------------------------------------------- phase 1
 ## The events grouped into items, each with a start (t0) and end (t1):
 ## "move" (x, y: where it ends), "click" / "hold" / "drag" / "down" / "up"
-## (button; x, y; drag: x2, y2), "scroll" (dir, n, x, y), "key" / "keyhold" /
+## (button; x, y; drag: x2, y2), "scroll" (dir, n), "key" / "keyhold" /
 ## "keydown" / "keyup" (text: the SendKeys stroke). Sorted by t0.
 static func _items(events: Array) -> Array:
 	var items: Array = []
@@ -112,7 +140,7 @@ static func _items(events: Array) -> Array:
 					items.append(_item("scroll", wheel["t0"], wheel["t1"], wheel))
 					wheel = {}
 				if wheel.is_empty():
-					wheel = {"t0": t, "t1": t, "dir": dir, "n": 0, "x": e["x"], "y": e["y"]}
+					wheel = {"t0": t, "t1": t, "dir": dir, "n": 0}
 				wheel["n"] += n
 				wheel["t1"] = t
 			"k":
@@ -321,7 +349,6 @@ static func _actions(items: Array) -> Array[LoopActionT]:
 				a.scroll_dir = it["dir"]
 				a.notches = it["n"]
 				a.notches_max = a.notches
-				_at(a, it["x"], it["y"])
 				_over(a, t1 - t0 if it["n"] > 1 else 0)
 			"key":
 				a = LoopActionT.new_of_type(LoopActionT.Type.KEY)

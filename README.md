@@ -58,24 +58,24 @@ layer 1, just broken out so you can view each layer's visuals separately.
 - **Click** — go to `(x, y)` and click Left / Right / Middle. With a
   **Duration** the cursor travels there over that time first, like a Move
   (`~Duration` adds the hand-like wander), so a human click is one action.
-  Untick **~Move** and the click happens wherever the cursor is right now,
-  with no move at all — a release after a long hold, a press after a
-  Capture Mouse. The press dropdown beside the button makes it a **Hold**
-  (the button stays down for **Hold** time, then is let go), a **Down**
-  (pressed and left that way for the actions after it — drag around a
-  detect, hold a mouse button while a key is tapped) or an **Up** (which
-  turns ~Move off for you: letting go is done in place). Stopping the loop
-  lets go of anything still held. **Captures** goes with a plain click at a
-  point.
+  Untick **Move to the point first** and the click happens wherever the
+  cursor is right now, with no move at all — a release after a long hold,
+  a press after a Capture Mouse. The press dropdown beside the button makes
+  it a **Hold** (the button stays down for **Hold** time, then is let go), a
+  **Down** (pressed and left that way for the actions after it — drag
+  around a detect, hold a mouse button while a key is tapped) or an **Up**
+  (which unticks the move for you: letting go is done in place). Stopping
+  the loop lets go of anything still held. **Captures** goes with a plain
+  click at a point, and is greyed out otherwise.
 - **Drag** — press at A, move to B over the duration, release. The travel
   (a Drag's, a Move's, a Click's) is sent as real mouse motion, so a game
   that reads the mouse directly — turning its camera on a right-drag — gets
   it too.
-- **Scroll** — move to `(x, y)` (or, with **~Move** unticked, stay where the
-  cursor is) and turn the mouse wheel Up / Down / Left / Right by a number
-  of **Notches** (a range, like every number), one wheel click at a time -
+- **Scroll** — turn the mouse wheel Up / Down / Left / Right by a number of
+  **Notches** (a range, like every number), one wheel click at a time -
   spread over the **Duration** if it has one (`~Duration` makes the gaps
-  uneven, like a hand's). The program under the point gets them.
+  uneven, like a hand's). It happens wherever the cursor is: the program
+  under it gets the notches, so put a Move before it if it matters where.
 - **Key** — send keystrokes. In Live mode this uses the
   [`SendKeys`](https://learn.microsoft.com/dotnet/api/system.windows.forms.sendkeys)
   format, e.g. `abc`, `{ENTER}`, `^c` (Ctrl+C), `%{F4}` (Alt+F4). You can
@@ -117,8 +117,8 @@ layer 1, just broken out so you can view each layer's visuals separately.
   condition — one layer guarded by *not found*, the next by *found*). Two
   boxes say what happens while it holds, and they are independent:
   **~Wait** keeps checking the same spot every so often until the colour
-  appears (or goes), with **~Timeout** to give up after a while; **~Skip**
-  (on by default) skips the rest of the layer — at once, or still after the
+  appears (or goes), with **~Timeout** to give up after a while; **Skip rest
+  of layer** (on by default) does that — at once, or still after the
   wait. So one detect can wait for a popup and skip the layer if it never
   shows, wait and carry on either way, skip at once, or, with both boxes
   off, just look — which is how a Capture Mouse set to *Detect* gets its
@@ -144,7 +144,7 @@ layer 1, just broken out so you can view each layer's visuals separately.
   only, so the image is still found when it is tinted differently (hovered,
   pressed, another theme). Rect,
   **Follow Cursor**, **If** *not found* / *found*, **~Wait**, **~Timeout**,
-  **~Skip** and **~Self** work as for Pixel Detect. The scan runs in the
+  **Skip rest of layer** and **~Self** work as for Pixel Detect. The scan runs in the
   helper, so a whole screen is checked in a few tens of milliseconds.
 - **Stop** — stop the loop, or **This layer** to just end the current layer's
   pass, when reached. Set **after N passes** to stop only once it has been
@@ -155,7 +155,7 @@ layer 1, just broken out so you can view each layer's visuals separately.
   nothing and switches itself off. **Detect** moves the mouse to where the
   last Pixel or Image Detect found its target (the middle of the image, or
   the matching pixel) — so "find the buy button anywhere in the shop →
-  Capture Mouse: Detect → Click with ~Move off" presses whichever one is
+  Capture Mouse: Detect → Click that does not move first" presses whichever one is
   there, wherever it is. Load and Detect take a **Duration** (with
   `~Duration`'s wander) so the move looks like a hand's. Before any detect
   has found anything, Detect does nothing and the layer carries on.
@@ -174,7 +174,7 @@ place over your other applications.
 
 ### Record
 
-**Rec** (at the end of the actions row) turns what you do into actions.
+**Rec** (far right of the actions row) turns what you do into actions.
 Press it: the builder moves out of the way (unless **~Edit** keeps it), the
 status line counts down from 3, and from then on every mouse move, click,
 drag, wheel turn and keystroke is recorded until you press **F8** (from any
@@ -186,9 +186,9 @@ keystrokes close together are one Key action typed with ~Keys (Ctrl+C is
 `^c`, Shift and a letter its capital), a key held while other things
 happen is a Key down … up, and the pauses in between are Waits. Every
 number is exact — a TAS — and each is a range you can open with its `~`.
-Windows only. What lands on Loop Automator itself, and input a program
-makes (a game re-centring the cursor), is left out; camera turns in a game
-that locks the cursor are not recorded faithfully.
+Windows only. What lands on Loop Automator itself (unless **~Self** is on)
+and input a program makes (a game re-centring the cursor) is left out;
+camera turns in a game that locks the cursor are not recorded faithfully.
 
 ### Ranges: random values
 
@@ -207,8 +207,8 @@ pair expanded.
   you click: a 20-pixel jitter stays a 20-pixel jitter around the new spot
   (a fixed point simply moves). **Pick area** next to it is the quick way to
   a spread: drag a box, and the point's X and Y become that box — the click
-  lands anywhere inside it, a fresh spot each time. A dragged detection
-  **rect** is exact: fixed position and size. **Sample & place** fixes the
+  lands anywhere inside it, a fresh spot each time. A detect's **Pick Area**
+  is exact: the dragged rect is its fixed position and size. **Sample & place** fixes the
   rect's position so the sampled pixel is inside every size the range allows.
 - The action list and the overlay show ranges as `min–max`; on the overlay a
   point with a range is drawn at the middle of a dashed box covering where
@@ -242,7 +242,8 @@ one). Both are saved with the loop.
      cancels. This replaces the old "grab current mouse" approach, which captured
      the button's own position. While you pick, the builder window moves off-screen so
      the desktop it was covering is visible, and comes back when the pick ends —
-     tick **~Edit** (right end of the toolbar) to keep it put. (Lowering is
+     the same while a loop runs, so it never covers what the loop works on.
+     Tick **~Edit** (right end of the toolbar) to keep it put. (Lowering is
      unavailable while the game runs embedded in the Godot editor's Game tab;
      turn off *Embed Game on Next Play* there to try it from the editor.)
    - **~Self** (next to ~Edit, off by default) decides whether a running

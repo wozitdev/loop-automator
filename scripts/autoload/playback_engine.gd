@@ -412,11 +412,11 @@ func _execute_action(action: LoopActionT, layer_index: int, action_index: int) -
 				_set_tracker(p2, true, "DRAG END")
 				backend.mouse_button(action.button, false, p2)
 		LoopActionT.Type.SCROLL:
-			# ~Move off: the wheel turns wherever the cursor is.
-			var p := action.roll_point() if action.move_to else _mouse_pos()
+			# The wheel turns where the cursor is (a Move before it puts it
+			# somewhere).
 			var n := action.roll_notches()
 			var ms := action.roll_duration_ms()
-			_set_tracker(p, true, "SCROLL")
+			_set_tracker(_mouse_pos(), true, "SCROLL")
 			emit_signal("status", "Scroll %s ×%d over %d ms." % [LoopActionT.scroll_dir_name(action.scroll_dir), n, ms] if ms > 0 else "Scroll %s ×%d." % [LoopActionT.scroll_dir_name(action.scroll_dir), n])
 			# The helper spreads the notches over the duration, so it runs off
 			# the main thread like a paced key press - in pieces of about
@@ -430,7 +430,7 @@ func _execute_action(action: LoopActionT, layer_index: int, action_index: int) -
 			while sent < n and is_running and gen == _generation:
 				var k := mini(per_chunk, n - sent)
 				var thread := Thread.new()
-				thread.start(func(): b.scroll(p, action.scroll_dir, k, k * gap, action.wiggle))
+				thread.start(func(): b.scroll(action.scroll_dir, k, k * gap, action.wiggle))
 				while thread.is_alive():
 					await get_tree().process_frame
 				thread.wait_to_finish()

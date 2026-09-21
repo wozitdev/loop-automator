@@ -95,9 +95,10 @@ const EYE_OFF_SVG := """<svg xmlns="http://www.w3.org/2000/svg" width="16" heigh
 <path d="M2.5 14 L13.5 2" fill="none" stroke="#e08080" stroke-width="1.8" stroke-linecap="round"/>
 </svg>"""
 
-## Record: a red dot.
+## Record: a dot, white so the Rec button can tint it (grey, or red while
+## recording).
 const RECORD_SVG := """<svg xmlns="http://www.w3.org/2000/svg" width="14" height="16" viewBox="0 0 14 16">
-<circle cx="7" cy="8" r="4.5" fill="#e05050"/>
+<circle cx="7" cy="8" r="4.5" fill="#ffffff"/>
 </svg>"""
 
 static var _cache: Dictionary = {}

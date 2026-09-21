@@ -18,7 +18,7 @@ enum Type {
 	CAPTURE,       ## Save the mouse position, or move back to the saved one
 	STOP,          ## Stop the loop (or end this layer), now or after N passes
 	IMAGE_DETECT,  ## Look for a small screenshot anywhere in a screen rect
-	SCROLL,        ## Move to (x, y) and turn the mouse wheel
+	SCROLL,        ## Turn the mouse wheel where the cursor is
 }
 
 ## Biggest template an IMAGE_DETECT keeps, on a side: any screen region, and
@@ -93,9 +93,9 @@ var capture_mode: int = CaptureMode.SAVE
 ## PIXEL_DETECT / IMAGE_DETECT: centre the rect on the mouse (and keep it there as the mouse
 ## moves) instead of using the stored x / y.
 var follow_cursor: bool = false
-## CLICK / SCROLL: go to (x, y) first (~Move, the default). Off, the press,
-## release or wheel happens wherever the cursor is right now, and the action
-## has no point of its own.
+## CLICK: "Move to the point first" (the default). Off, the press or
+## release happens wherever the cursor is right now, and the action has no
+## point of its own.
 var move_to: bool = true
 ## MOVE / CLICK / DRAG: wander a little on the way (see MousePath), the way a hand
 ## does; where the travel starts and lands is not affected.
@@ -120,14 +120,14 @@ var stop_scope: int = StopScope.LOOP
 var stop_after: int = 1
 ## PIXEL_DETECT / IMAGE_DETECT: the condition is "not found" (or "found", see
 ## if_found). ~Wait: while it holds, re-check the same spot every wait_ms
-## until it clears (or ~Timeout runs out). ~Skip (the default): when it holds
+## until it clears (or ~Timeout runs out). Skip rest of layer (the default): when it holds
 ## - at once, or still after the wait - skip the rest of the layer. Both off
 ## is a plain look: the detect reports, and sets the spot Capture Mouse's
 ## Detect goes to, and the layer carries on either way.
 var wait: bool = false
 var skip: bool = true
 ## ~Wait's ~Timeout: give up after `wait_timeout_ms` (a range, rolled once
-## per wait) instead of waiting forever; what happens then is ~Skip's call.
+## per wait) instead of waiting forever; what happens then is Skip rest of layer's call.
 var wait_timeout: bool = false
 var wait_timeout_ms: int = 5000
 var wait_timeout_ms_max: int = 5000
@@ -313,13 +313,14 @@ static func supports_captures(t: int) -> bool:
 ## True for the action types that sit at a screen position (drawn on the
 ## overlay as a point or rect and joined by the ordered path).
 static func has_position(t: int) -> bool:
-	return t == Type.MOVE or t == Type.CLICK or t == Type.DRAG or t == Type.SCROLL or is_detect(t)
+	return t == Type.MOVE or t == Type.CLICK or t == Type.DRAG or is_detect(t)
 
 
-## True when this action has a point of its own on screen: a Click or
-## Scroll with ~Move off happens wherever the cursor is, so it has none.
+## True when this action has a point of its own on screen: a Click that
+## does not move to its point first happens wherever the cursor is, so it
+## has none.
 func positioned() -> bool:
-	if (type == Type.CLICK or type == Type.SCROLL) and not move_to:
+	if type == Type.CLICK and not move_to:
 		return false
 	return has_position(type)
 
@@ -403,8 +404,8 @@ func describe() -> String:
 	var suffix := " ↩" if captures and supports_captures(type) and (type != Type.CLICK or (press_mode == PressMode.TAP and move_to)) else ""
 	var xs := range_text(x, x_max)
 	var ys := range_text(y, y_max)
-	# A Click or Scroll with ~Move off has no point: it is "at cursor".
-	var at := "@ (%s, %s)" % [xs, ys] if move_to else "at cursor"
+	# A Click that does not move to its point has none: it is "at cursor".
+	var at := "@ (%s, %s)" % [xs, ys] if move_to or type != Type.CLICK else "at cursor"
 	var over := "" if maxi(duration_ms, duration_ms_max) == 0 else " over %s ms" % range_text(duration_ms, duration_ms_max)
 	match type:
 		Type.MOVE:
@@ -415,7 +416,7 @@ func describe() -> String:
 		Type.DRAG:
 			return "%s drag (%s, %s) → (%s, %s)%s" % [button_name(button), xs, ys, range_text(x2, x2_max), range_text(y2, y2_max), suffix]
 		Type.SCROLL:
-			return "Scroll %s ×%s %s%s" % [scroll_dir_name(scroll_dir), range_text(notches, notches_max), at, over]
+			return "Scroll %s ×%s%s" % [scroll_dir_name(scroll_dir), range_text(notches, notches_max), over]
 		Type.KEY:
 			var press := press_text()
 			return "Key%s: \"%s\"" % [" " + press if not press.is_empty() else "", keys]
@@ -487,7 +488,7 @@ func overlay_point(cursor: Vector2i = Vector2i.ZERO) -> Vector2:
 	if not positioned():
 		return Vector2(-1, -1)
 	match type:
-		Type.MOVE, Type.CLICK, Type.DRAG, Type.SCROLL:
+		Type.MOVE, Type.CLICK, Type.DRAG:
 			return Vector2(point_a_extent().get_center())
 		Type.PIXEL_DETECT, Type.IMAGE_DETECT:
 			# The top-left corner: the inside of the rect is kept clear on the

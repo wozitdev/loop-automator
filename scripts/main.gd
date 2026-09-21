@@ -24,6 +24,16 @@ var _recording: bool = false
 ## Bumped when a recording starts or stops, so a countdown still running
 ## for an earlier one does nothing.
 var _record_gen: int = 0
+## The Rec dot: grey until pressed, then red with a slow breath while the
+## recording is on.
+const REC_IDLE_COLOR := Color(0.5, 0.5, 0.5)
+const REC_ON_COLOR := Color(0.86, 0.22, 0.22)
+const REC_ON_BRIGHT_COLOR := Color(1.0, 0.4, 0.4)
+const REC_BREATH_SEC := 1.1
+var _rec_pulse: Tween
+## True while the recording keeps what lands on Loop Automator itself (~Self
+## on): the click or Esc that ends it is then trimmed off the end.
+var _record_unguarded: bool = false
 
 # --- top-level UI refs ----------------------------------------------------
 var status_label: Label
@@ -301,8 +311,6 @@ func _build_toolbar() -> Control:
 	new_btn = _tool_button("New", _on_new)
 	new_btn.tooltip_text = "Start a new loop (its first layer, and so the loop, gets a random name)"
 	hb.add_child(new_btn)
-	duplicate_loop_btn = _icon_button(UiIconsT.copy(), "Duplicate this loop", _on_duplicate_loop)
-	hb.add_child(duplicate_loop_btn)
 	var loop_lbl := Label.new()
 	loop_lbl.text = "Loop"
 	hb.add_child(loop_lbl)
@@ -338,7 +346,10 @@ func _build_toolbar() -> Control:
 		else:
 			_on_export())
 	hb.add_child(share_btn)
-	delete_loop_btn =_icon_button(UiIconsT.trash(), "Delete this loop (its file too)", _confirm_delete_loop)
+	# Duplicate sits right before Delete, as every Duplicate does.
+	duplicate_loop_btn = _icon_button(UiIconsT.copy(), "Duplicate this loop", _on_duplicate_loop)
+	hb.add_child(duplicate_loop_btn)
+	delete_loop_btn = _icon_button(UiIconsT.trash(), "Delete this loop (its file too)", _confirm_delete_loop)
 	hb.add_child(delete_loop_btn)
 
 	hb.add_child(_vsep())
@@ -373,7 +384,8 @@ func _build_toolbar() -> Control:
 	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	hb.add_child(spacer)
 	# ~Edit: unchecked = the builder is moved out of the way while you pick on
-	# screen (the stored setting keeps the "lower on edit" sense).
+	# screen, record, or a loop runs (the stored setting keeps the "lower on
+	# edit" sense).
 	stay_on_edit_check = CheckBox.new()
 	stay_on_edit_check.text = "~Edit"
 	stay_on_edit_check.focus_mode = Control.FOCUS_NONE
@@ -388,7 +400,7 @@ func _build_toolbar() -> Control:
 	feedback_check = CheckBox.new()
 	feedback_check.text = "~Self"
 	feedback_check.focus_mode = Control.FOCUS_NONE
-	feedback_check.tooltip_text = "Checked: a running loop may interact with Loop Automator itself (clicks and keys can land on this window, like a feedback loop).\nUnchecked: clicks and keys that would land on Loop Automator are skipped, so the loop cannot affect the app running it."
+	feedback_check.tooltip_text = "Checked: a running loop may interact with Loop Automator itself (clicks and keys can land on this window, like a feedback loop), and Rec records what you do on it.\nUnchecked: clicks and keys that would land on Loop Automator are skipped, so the loop cannot affect the app running it, and Rec leaves them out."
 	feedback_check.button_pressed = _load_setting("feedback", false)
 	Playback.set_feedback(feedback_check.button_pressed)
 	feedback_check.toggled.connect(func(v):
@@ -401,7 +413,7 @@ func _build_toolbar() -> Control:
 	hotkey_check = CheckBox.new()
 	hotkey_check.text = "~F8"
 	hotkey_check.focus_mode = Control.FOCUS_NONE
-	hotkey_check.tooltip_text = "Checked: F8 starts and stops the loop from any window while Loop Automator is open (other programs do not get F8 meanwhile).\nUnchecked: F8 only works while this window has the focus."
+	hotkey_check.tooltip_text = "Checked: F8 starts and stops the loop from any window while Loop Automator is open (other programs do not get F8 meanwhile), and this window moves out of the way while a loop runs.\nUnchecked: F8 only works while this window has the focus."
 	hotkey_check.button_pressed = _load_setting("global_hotkey", true)
 	Playback.set_global_hotkey(hotkey_check.button_pressed)
 	hotkey_check.toggled.connect(func(v):
@@ -443,10 +455,10 @@ func _build_layer_panel() -> Control:
 
 	var btns := HBoxContainer.new()
 	btns.add_child(_icon_button(UiIconsT.plus(), "Add a layer", func(): ProjectData.add_layer()))
-	btns.add_child(_icon_button(UiIconsT.copy(), "Duplicate this layer", func(): ProjectData.duplicate_layer(ProjectData.active_layer_index)))
 	btns.add_child(_icon_button(UiIconsT.up(), "Move this layer up", func(): ProjectData.move_layer(ProjectData.active_layer_index, -1)))
 	btns.add_child(_icon_button(UiIconsT.down(), "Move this layer down", func(): ProjectData.move_layer(ProjectData.active_layer_index, 1)))
 	btns.add_child(_tool_button("Rename", func(): _rename_layer_dialog(ProjectData.active_layer_index)))
+	btns.add_child(_icon_button(UiIconsT.copy(), "Duplicate this layer", func(): ProjectData.duplicate_layer(ProjectData.active_layer_index)))
 	btns.add_child(_icon_button(UiIconsT.trash(), "Delete this layer", _confirm_delete_layer))
 	vb.add_child(btns)
 
@@ -559,18 +571,23 @@ func _build_action_panel() -> Control:
 		pm.add_item(LoopActionT.type_name(t), t)
 	pm.id_pressed.connect(func(id): ProjectData.add_action(id))
 	btns.add_child(add_btn)
+	btns.add_child(_icon_button(UiIconsT.up(), "Move the selected action up", func(): ProjectData.move_action(ProjectData.selected_action_index, -1)))
+	btns.add_child(_icon_button(UiIconsT.down(), "Move the selected action down", func(): ProjectData.move_action(ProjectData.selected_action_index, 1)))
 	var dup_btn := _icon_button(UiIconsT.copy(), "Duplicate the selected action", func(): ProjectData.duplicate_action(ProjectData.selected_action_index))
 	dup_btn.text = "Duplicate"
 	btns.add_child(dup_btn)
-	btns.add_child(_icon_button(UiIconsT.up(), "Move the selected action up", func(): ProjectData.move_action(ProjectData.selected_action_index, -1)))
-	btns.add_child(_icon_button(UiIconsT.down(), "Move the selected action down", func(): ProjectData.move_action(ProjectData.selected_action_index, 1)))
 	var delete_btn := _icon_button(UiIconsT.trash(), "Delete the selected action", _confirm_delete_action)
 	delete_btn.text = "Delete"
 	btns.add_child(delete_btn)
-	# Rec: what you do next becomes actions of this layer, until F8.
+	# Rec at the far right: what you do next becomes actions of this layer,
+	# until F8.
+	var spacer := Control.new()
+	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	btns.add_child(spacer)
 	rec_btn = _icon_button(UiIconsT.record(), "", _on_rec_pressed)
 	rec_btn.text = "Rec"
 	rec_btn.custom_minimum_size = Vector2(_button_width(rec_btn, ["Rec", "Stop"]), 0)
+	_set_rec_icon_color(REC_IDLE_COLOR)
 	if OS.get_name() == "Windows":
 		rec_btn.tooltip_text = "Record what you do with the mouse and keyboard into this layer, until you press F8."
 	else:
@@ -617,11 +634,15 @@ func _connect_signals() -> void:
 		_stop_cooldown_active = false
 		play_btn.icon = UiIconsT.stop()
 		play_btn.text = "Stop"
-		_refresh_edit_lock())
+		_refresh_edit_lock()
+		# ~Edit unchecked: this window gets out of the way for the run, as
+		# for a pick (F8, Esc and the button still stop it).
+		_lower_builder())
 	Playback.playback_stopped.connect(func():
 		var was_real := Playback.backend != null and Playback.backend.is_real()
 		if was_real:
 			_switch_to_safe_backend_if_needed()
+		_restore_builder_after_pick()
 		await _animate_stop_feedback(was_real))
 	Playback.action_executing.connect(_on_action_executing)
 	# The global F8 while idle (~F8): a start, as the Run button (a pick in
@@ -829,24 +850,26 @@ func _rebuild_editor() -> void:
 			_add_duration_field(a)
 			_add_captures_field(a)
 		LoopActionT.Type.CLICK:
-			_add_move_to_field(a)
-			if a.move_to:
-				_add_point_fields(a, false)
-				_add_duration_field(a)
+			# The button and how it is pressed first, then whether the click goes
+			# to its point; the point and duration rows are greyed out when it
+			# does not. Captures goes with a plain click at a point (see
+			# Playback._execute_action): greyed out otherwise, not hidden.
 			_add_button_field(a)
 			_add_hold_field(a)
-			# Captures goes with a plain click at a point (see Playback._execute_action).
-			if a.press_mode == LoopActionT.PressMode.TAP and a.move_to:
-				_add_captures_field(a)
+			_add_move_to_field(a)
+			var rows := _add_point_fields(a, false)
+			rows.append(_add_duration_field(a))
+			for r in rows:
+				_set_controls_locked(r, not a.move_to)
+			var captures := _add_captures_field(a)
+			if a.press_mode != LoopActionT.PressMode.TAP or not a.move_to:
+				_set_controls_locked(captures, true)
 		LoopActionT.Type.DRAG:
-			_add_point_fields(a, true)
 			_add_button_field(a)
+			_add_point_fields(a, true)
 			_add_duration_field(a)
 			_add_captures_field(a)
 		LoopActionT.Type.SCROLL:
-			_add_move_to_field(a)
-			if a.move_to:
-				_add_point_fields(a, false)
 			_add_scroll_fields(a)
 			_add_duration_field(a, "How long the scroll takes: the notches are spread over it (0 = as fast as a wheel goes).\nChecked: the gaps between notches vary a little, like a hand's.")
 		LoopActionT.Type.KEY:
@@ -899,15 +922,18 @@ static func _recentre_range(lo: int, hi: int, centre: int) -> Vector2i:
 ## width and re-centres it on the point clicked; "Pick area" is a dragged
 ## box, and the ranges become that box (the click can land anywhere in it),
 ## which is how a loop gets its random spread without typing numbers.
-func _add_point_fields(a: LoopActionT, second: bool) -> void:
+## Returns the rows it added (a Click greys them out with "Move to the
+## point first" off).
+func _add_point_fields(a: LoopActionT, second: bool) -> Array:
+	var rows: Array = []
 	editor_box.add_child(_section_label("Point" + (" A" if second else "")))
-	_add_range_field("X", a.x, a.x_max, -20000, 20000, func(lo: int, hi: int):
+	rows.append(_add_range_field("X", a.x, a.x_max, -20000, 20000, func(lo: int, hi: int):
 		a.x = lo
-		a.x_max = hi)
-	_add_range_field("Y", a.y, a.y_max, -20000, 20000, func(lo: int, hi: int):
+		a.x_max = hi).lo.get_parent())
+	rows.append(_add_range_field("Y", a.y, a.y_max, -20000, 20000, func(lo: int, hi: int):
 		a.y = lo
-		a.y_max = hi)
-	_add_point_picks(a, "", func(g: Vector2i):
+		a.y_max = hi).lo.get_parent())
+	rows.append(_add_point_picks(a, "", func(g: Vector2i):
 		var rx := _recentre_range(a.x, a.x_max, g.x)
 		var ry := _recentre_range(a.y, a.y_max, g.y)
 		a.x = rx.x
@@ -917,7 +943,7 @@ func _add_point_fields(a: LoopActionT, second: bool) -> void:
 		a.x = r.position.x
 		a.x_max = maxi(a.x, r.end.x - 1)
 		a.y = r.position.y
-		a.y_max = maxi(a.y, r.end.y - 1))
+		a.y_max = maxi(a.y, r.end.y - 1)))
 	if second:
 		editor_box.add_child(_section_label("Point B"))
 		_add_range_field("X2", a.x2, a.x2_max, -20000, 20000, func(lo: int, hi: int):
@@ -937,11 +963,13 @@ func _add_point_fields(a: LoopActionT, second: bool) -> void:
 			a.x2_max = maxi(a.x2, r.end.x - 1)
 			a.y2 = r.position.y
 			a.y2_max = maxi(a.y2, r.end.y - 1))
+	return rows
 
 
 ## The two pick buttons of a point, side by side: a point pick (`on_point`)
 ## and an area pick (`on_rect`). `which` names the point ("", " B").
-func _add_point_picks(_a: LoopActionT, which: String, on_point: Callable, on_rect: Callable) -> void:
+## Returns the row.
+func _add_point_picks(_a: LoopActionT, which: String, on_point: Callable, on_rect: Callable) -> HBoxContainer:
 	var row := HBoxContainer.new()
 	var point := _grab_button(UiIconsT.target(), "Pick%s on screen" % which, func(): _begin_point_pick(on_point))
 	point.tooltip_text = "Click where it should land (a range keeps its size and moves there)."
@@ -950,6 +978,7 @@ func _add_point_picks(_a: LoopActionT, which: String, on_point: Callable, on_rec
 	area.tooltip_text = "Drag a box; it lands anywhere inside it."
 	row.add_child(area)
 	editor_box.add_child(row)
+	return row
 
 
 func _add_rect_fields(a: LoopActionT) -> void:
@@ -971,7 +1000,9 @@ func _add_rect_fields(a: LoopActionT) -> void:
 	_add_range_field("Height", a.h, a.h_max, 1, 20000, func(lo: int, hi: int):
 		a.h = lo
 		a.h_max = hi)
-	editor_box.add_child(_grab_button(UiIconsT.target(), "Pick detection rect on screen", func():
+	# The pick and Follow Cursor side by side.
+	var row := HBoxContainer.new()
+	row.add_child(_grab_button(UiIconsT.target(), "Pick Area", func():
 		_begin_rect_pick(func(r: Rect2i):
 			# A dragged rect is exact: fixed position and size.
 			a.x = r.position.x
@@ -991,7 +1022,8 @@ func _add_rect_fields(a: LoopActionT) -> void:
 		a.follow_cursor = v
 		set_xy_editable.call(not v)
 		_after_edit())
-	editor_box.add_child(follow)
+	row.add_child(follow)
+	editor_box.add_child(row)
 
 
 func _add_button_field(a: LoopActionT) -> void:
@@ -1032,22 +1064,21 @@ func _press_mode_option(a: LoopActionT, tap: String) -> OptionButton:
 	return opt
 
 
-## A Click / Scroll's "~Move" row: checked (the default) it goes to X / Y
-## first; unchecked it happens wherever the cursor is, and the point rows
-## are not shown. Toggling rebuilds the editor.
+## A Click's "Move to the point first" box, under its button row: checked
+## (the default) the click goes to X / Y first; unchecked it presses
+## wherever the cursor is, and the point and duration rows under it are
+## greyed out (the editor is rebuilt for that).
 func _add_move_to_field(a: LoopActionT) -> void:
-	var what := "the wheel turns" if a.type == LoopActionT.Type.SCROLL else "it presses"
-	var row := _row_toggle("Move", a.move_to,
-		"Checked: go to X / Y first.\nUnchecked: %s wherever the cursor is." % what,
-		func(v: bool):
-			a.move_to = v
-			_after_edit()
-			_rebuild_editor.call_deferred())
-	var hint := Label.new()
-	hint.text = "to the point first" if a.move_to else "off: at the cursor"
-	hint.modulate = Color(1, 1, 1, 0.7)
-	row.add_child(hint)
-	editor_box.add_child(row)
+	var cb := CheckBox.new()
+	cb.text = "Move to the point first"
+	cb.tooltip_text = "Unchecked: the click happens wherever the cursor is, with no move."
+	cb.focus_mode = Control.FOCUS_NONE
+	cb.button_pressed = a.move_to
+	cb.toggled.connect(func(v: bool):
+		a.move_to = v
+		_after_edit()
+		_rebuild_editor.call_deferred())
+	editor_box.add_child(cb)
 
 
 ## A Scroll's direction and how many notches of the wheel.
@@ -1065,7 +1096,7 @@ func _add_scroll_fields(a: LoopActionT) -> void:
 	row.add_child(opt)
 	editor_box.add_child(row)
 	var nrow := _row("Notches")
-	nrow.tooltip_text = "How many clicks of the wheel (the program under the point gets them)."
+	nrow.tooltip_text = "How many clicks of the wheel (the program under the cursor gets them)."
 	_add_range_field_in(nrow, a.notches, a.notches_max, 1, 200, func(lo: int, hi: int):
 		a.notches = lo
 		a.notches_max = hi)
@@ -1337,18 +1368,17 @@ func _add_on_fail_field(a: LoopActionT) -> void:
 		timeout_check.disabled = not v
 		tpair.set_editable(v and a.wait_timeout))
 	timeout_check.toggled.connect(func(v: bool): tpair.set_editable(a.wait and v))
-	# ~Skip: skip the rest of the layer while the condition holds (at once,
+	# Skip: skip the rest of the layer while the condition holds (at once,
 	# or still after the wait). Off, the layer carries on either way.
-	var srow := _row_toggle("Skip", a.skip,
-		"Checked: skip the rest of the layer while the %s is %s.\nUnchecked: carry on either way." % [target, "there" if a.if_found else "not there"],
-		func(v: bool):
-			a.skip = v
-			_after_edit())
-	var shint := Label.new()
-	shint.text = "rest of layer"
-	shint.modulate = Color(1, 1, 1, 0.7)
-	srow.add_child(shint)
-	editor_box.add_child(srow)
+	var skip := CheckBox.new()
+	skip.text = "Skip rest of layer"
+	skip.tooltip_text = "Checked: skip the rest of the layer while the %s is %s.\nUnchecked: carry on either way." % [target, "there" if a.if_found else "not there"]
+	skip.focus_mode = Control.FOCUS_NONE
+	skip.button_pressed = a.skip
+	skip.toggled.connect(func(v: bool):
+		a.skip = v
+		_after_edit())
+	editor_box.add_child(skip)
 
 
 func _add_capture_mode_field(a: LoopActionT) -> void:
@@ -1411,7 +1441,8 @@ func _add_stop_field(a: LoopActionT) -> void:
 	editor_box.add_child(hint)
 
 
-func _add_captures_field(a: LoopActionT) -> void:
+## Returns the row (a Click greys it out when Captures does not apply).
+func _add_captures_field(a: LoopActionT) -> HBoxContainer:
 	var row := HBoxContainer.new()
 	var cb := CheckBox.new()
 	cb.text = "Captures"
@@ -1432,6 +1463,7 @@ func _add_captures_field(a: LoopActionT) -> void:
 		ghost.disabled = not v
 		_after_edit())
 	editor_box.add_child(row)
+	return row
 
 
 func _add_comment_field(a: LoopActionT) -> void:
@@ -1613,7 +1645,7 @@ func _add_image_tolerance_fields(a: LoopActionT) -> void:
 ## A Move / Drag's duration: how long the travel takes. Its label is a
 ## checkbox, "~Duration (ms)": checked, the cursor wanders a
 ## little on the way, like a hand, without moving where it starts or lands.
-func _add_duration_field(a: LoopActionT, tip: String = "How long the cursor takes to get there.\nChecked: it wanders a little on the way, like a hand would; where it starts and lands stays exact.") -> void:
+func _add_duration_field(a: LoopActionT, tip: String = "How long the cursor takes to get there.\nChecked: it wanders a little on the way, like a hand would; where it starts and lands stays exact.") -> HBoxContainer:
 	var row := _row_toggle("Duration", a.wiggle, tip,
 		func(v: bool):
 			a.wiggle = v
@@ -1621,6 +1653,7 @@ func _add_duration_field(a: LoopActionT, tip: String = "How long the cursor take
 	_add_range_field_in(row, a.duration_ms, a.duration_ms_max, 0, 60000, func(lo: int, hi: int):
 		a.duration_ms = lo
 		a.duration_ms_max = hi, "ms")
+	return row
 
 
 # ======================================================================
@@ -1699,10 +1732,12 @@ func _start_pick(kind: int, sample_colors: bool = false) -> void:
 
 
 ## Gets the builder out of the way (~Edit unchecked) so the desktop it was
-## covering is visible - for a pick, or a recording. Put back by
+## covering is visible - for a pick, a recording, or a run. Put back by
 ## _restore_builder_after_pick.
 func _lower_builder() -> void:
 	_refresh_stay_on_edit_check()
+	if _builder_hidden_for_pick:
+		return
 	var lower := not stay_on_edit_check.button_pressed
 	if lower and stay_on_edit_check.disabled:
 		status_label.text += "  (Lowering the window is unavailable while embedded in the editor.)"
@@ -1737,7 +1772,7 @@ func _finish_pick() -> void:
 		_restore_builder_after_pick()
 
 
-## Lowering the builder for a pick (~Edit unchecked) can't work while the game
+## Lowering the builder (~Edit unchecked) can't work while the game
 ## runs embedded in the editor's Game tab: moving the (child) window just
 ## blanks that panel, and the editor keeps covering the desktop anyway. Grey
 ## the option out in that case.
@@ -1749,7 +1784,7 @@ func _refresh_stay_on_edit_check() -> void:
 	if embedded:
 		stay_on_edit_check.tooltip_text = "Unavailable while the game is embedded in the Godot editor (Game tab → turn off Embed Game on Next Play)."
 	else:
-		stay_on_edit_check.tooltip_text = "Unchecked: this window is moved out of the way while you pick on screen.\nChecked: it stays where it is."
+		stay_on_edit_check.tooltip_text = "Unchecked: this window is moved out of the way while you pick on screen, record, or a loop runs.\nChecked: it stays where it is."
 
 
 ## Bring the builder back (if it was moved away for the pick) and refocus it.
@@ -1769,7 +1804,7 @@ func _restore_builder_after_pick() -> void:
 # ======================================================================
 func _on_rec_pressed() -> void:
 	if _recording:
-		_stop_recording()
+		_stop_recording("", true)
 	elif not Playback.is_running and not _pick_active and not _dialog_open():
 		_start_recording()
 
@@ -1784,25 +1819,33 @@ func _start_recording() -> void:
 	_record_gen += 1
 	var gen := _record_gen
 	rec_btn.text = "Stop"
+	_start_rec_pulse()
 	_lower_builder()
 	for n in [3, 2, 1]:
 		status_label.text = "Recording in %d… (F8 stops it)" % n
 		await get_tree().create_timer(1.0).timeout
 		if gen != _record_gen:
 			return
-	_recorder.start(OS.get_process_id())
+	# ~Self on: what lands on Loop Automator itself is recorded too.
+	_record_unguarded = feedback_check.button_pressed
+	_recorder.start(0 if _record_unguarded else OS.get_process_id())
 	status_label.text = "Recording… press F8 to stop."
 
 
 ## Ends the recording; the events become actions on the end of the active
 ## layer. `reason` (a helper failure) is what the status line says instead.
-func _stop_recording(reason: String = "") -> void:
+## `from_builder`: the button or Esc here ended it - with ~Self on that
+## gesture was recorded too, so it is trimmed off the end.
+func _stop_recording(reason: String = "", from_builder: bool = false) -> void:
 	if not _recording:
 		return
 	_recording = false
 	_record_gen += 1
 	rec_btn.text = "Rec"
+	_stop_rec_pulse()
 	var events := _recorder.stop()
+	if from_builder and _record_unguarded:
+		events = RecordingT.without_stop_gesture(events)
 	_restore_builder_after_pick()
 	if not reason.is_empty():
 		status_label.text = reason
@@ -1814,6 +1857,30 @@ func _stop_recording(reason: String = "") -> void:
 		return
 	ProjectData.append_actions(actions)
 	status_label.text = "Recorded %d action%s into \"%s\"." % [actions.size(), "" if actions.size() == 1 else "s", layer_name]
+
+
+## The Rec dot goes red and breathes slowly (a shade brighter and back)
+## while the recording is on: lit, not flashing.
+func _start_rec_pulse() -> void:
+	_stop_rec_pulse()
+	_set_rec_icon_color(REC_ON_COLOR)
+	_rec_pulse = create_tween().set_loops()
+	_rec_pulse.tween_method(_set_rec_icon_color, REC_ON_COLOR, REC_ON_BRIGHT_COLOR, REC_BREATH_SEC).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+	_rec_pulse.tween_method(_set_rec_icon_color, REC_ON_BRIGHT_COLOR, REC_ON_COLOR, REC_BREATH_SEC).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+
+
+func _stop_rec_pulse() -> void:
+	if _rec_pulse != null and _rec_pulse.is_valid():
+		_rec_pulse.kill()
+	_rec_pulse = null
+	_set_rec_icon_color(REC_IDLE_COLOR)
+
+
+## The dot is a white circle tinted through the button's icon colours, in
+## every state (hovered, pressed) alike.
+func _set_rec_icon_color(c: Color) -> void:
+	for name in ["icon_normal_color", "icon_hover_color", "icon_pressed_color", "icon_hover_pressed_color", "icon_focus_color", "icon_disabled_color"]:
+		rec_btn.add_theme_color_override(name, c)
 
 
 func _on_point_picked(g: Vector2i) -> void:
@@ -2466,12 +2533,12 @@ func _input(event: InputEvent) -> void:
 			get_viewport().set_input_as_handled()
 		return
 
-	# While recording, this window's F8 and Esc end it (the hooks never
-	# record keys that land on Loop Automator itself). Nothing else here
-	# should fire meanwhile.
+	# While recording, this window's F8 and Esc end it (the hooks leave
+	# out keys that land on Loop Automator itself, unless ~Self; an Esc
+	# recorded that way is trimmed). Nothing else here should fire meanwhile.
 	if _recording:
 		if event.keycode == KEY_F8 or event.keycode == KEY_ESCAPE:
-			_stop_recording()
+			_stop_recording("", event.keycode == KEY_ESCAPE)
 			get_viewport().set_input_as_handled()
 		return
 

@@ -402,20 +402,20 @@ switch ($cmd) {
     [Win32In]::ButtonOnly((Up-Flag $a[1]))
   }
   'wheel' {
-    # wheel <x> <y> <up|down|left|right> <n> <ms> <uneven 0|1>: the cursor
-    # goes to (x, y) and the wheel turns n notches that way, one event per
-    # notch, spread over ms (a moment apart at least), the way a wheel is
-    # read; uneven makes the gaps vary like a hand's. A program under the
-    # cursor gets it.
-    if (Guarded-Point ([int]$a[1]) ([int]$a[2])) { Write-Output 'skipped'; break }
-    [Win32In]::MouseAt([int]$a[1],[int]$a[2],0)
-    $n = [Math]::Min([Math]::Max([int]$a[4], 1), 200)
-    $ms = 0; if ($a.Count -gt 5) { $ms = [int]$a[5] }
-    $uneven = ($a.Count -gt 6 -and $a[6] -eq '1')
+    # wheel <up|down|left|right> <n> <ms> <uneven 0|1>: the wheel turns n
+    # notches that way where the cursor is, one event per notch, spread
+    # over ms (a moment apart at least), the way a wheel is read; uneven
+    # makes the gaps vary like a hand's. The program under the cursor gets
+    # it (guarded like a click there).
+    $c = Read-Cursor
+    if (Guarded-Point $c.X $c.Y) { Write-Output 'skipped'; break }
+    $n = [Math]::Min([Math]::Max([int]$a[2], 1), 200)
+    $ms = 0; if ($a.Count -gt 3) { $ms = [int]$a[3] }
+    $uneven = ($a.Count -gt 4 -and $a[4] -eq '1')
     $gap = [Math]::Max(12, [int]($ms / $n))
     $rnd = New-Object System.Random
     $delta = 120; $horizontal = $false
-    switch ($a[3]) { 'down' { $delta = -120 } 'left' { $delta = -120; $horizontal = $true } 'right' { $horizontal = $true } }
+    switch ($a[1]) { 'down' { $delta = -120 } 'left' { $delta = -120; $horizontal = $true } 'right' { $horizontal = $true } }
     for ($i = 0; $i -lt $n; $i++) {
       if ($i -gt 0) {
         $g = $gap; if ($uneven) { $g = [int]($gap * (0.5 + $rnd.NextDouble())) }
@@ -1096,10 +1096,9 @@ func click_here(button: int) -> void:
 	_run_sync(PackedStringArray(["tap", str(button)]))
 
 
-func scroll(pos: Vector2i, dir: int, notches: int, ms: int = 0, uneven: bool = false) -> void:
-	_last_pos = pos
+func scroll(dir: int, notches: int, ms: int = 0, uneven: bool = false) -> void:
 	var n := clampi(notches, 1, 200)
-	_run_sync(PackedStringArray(["wheel", str(pos.x), str(pos.y), LoopActionT.scroll_dir_name(dir), str(n), str(maxi(0, ms)), "1" if uneven else "0"]),
+	_run_sync(PackedStringArray(["wheel", LoopActionT.scroll_dir_name(dir), str(n), str(maxi(0, ms)), "1" if uneven else "0"]),
 		maxi(ms, n * 12) * 2 + SERVER_READ_TIMEOUT_MS)
 
 
