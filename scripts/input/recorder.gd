@@ -1,16 +1,21 @@
 extends RefCounted
 class_name Recorder
 ## Record: what the user does with the mouse and keyboard, as a stream of
-## events, until F8. A small helper process holds system-wide mouse and
-## keyboard hooks (WH_MOUSE_LL / WH_KEYBOARD_LL) and prints one line per
-## event; poll() reads them each frame. Recording.to_actions turns the
-## stream into a layer's actions. Windows only.
+## events, until F8. A small helper process listens to the mouse and
+## keyboard system-wide through Raw Input (RegisterRawInputDevices with
+## RIDEV_INPUTSINK, the way games and macro tools do - not a keyboard hook,
+## which is what a keylogger installs and what antivirus heuristics look
+## for) and prints one line per event; poll() reads them each frame.
+## Recording.to_actions turns the stream into a layer's actions. Windows
+## only.
 ##
 ## The helper leaves out what a loop must not contain: injected input (a
 ## program moving the cursor, our own helpers), anything on Loop Automator's
 ## own windows (the ~Self rule: the guard pid), and F8 itself - a press of
-## F8 ends the recording instead ("stop" is printed) and is kept from the
-## program under it, as the run's stop hotkey is.
+## F8 ends the recording instead ("stop" is printed). F8 is held as a
+## hotkey (RegisterHotKey, as the run's ~F8 is) so the program under it
+## does not get it. While ~F8 already holds it, that helper's press ends
+## the recording through the engine instead (see `f8_taken`).
 
 const PowerShellHostT := preload("res://scripts/powershell_host.gd")
 const SCRIPT_FILE := "record_helper.ps1"
@@ -29,6 +34,10 @@ var events: Array = []
 ## past it the recording ends as if F8 had been pressed, and this is set.
 const MAX_EVENTS := 400000
 var limit_reached: bool = false
+## True when F8 could not be taken: another program holds it as a hotkey
+## (the run's own ~F8 helper, or something else - then F8 does not end the
+## recording; the builder's Stop button and Esc do).
+var f8_taken: bool = false
 
 var _proc: Dictionary = {}
 var _pending := PackedByteArray()
@@ -38,50 +47,53 @@ var _pending := PackedByteArray()
 var _stderr_text := PackedByteArray()
 const STDERR_KEEP := 4096
 
-## record <guard pid> [any]: hooks the mouse and keyboard, prints "ready",
-## then a line per event until stdin closes / says 'quit' or F8 is pressed
-## ("stop"). A second argument "any" keeps injected events too (probes).
+## record <guard pid> [any]: listens to the mouse and keyboard, prints
+## "ready", then a line per event until stdin closes / says 'quit' or F8 is
+## pressed ("stop"). A second argument "any" keeps injected events too
+## (probes).
 const SCRIPT := """param([int]$guard = 0, [string]$mode = '')
-Add-Type @\"
+Add-Type -ReferencedAssemblies System.Windows.Forms @\"
 using System;
 using System.Runtime.InteropServices;
 using System.Threading;
-public class Rec {
+using System.Windows.Forms;
+public class Rec : NativeWindow {
   [StructLayout(LayoutKind.Sequential)] public struct Pt { public int X; public int Y; }
   [StructLayout(LayoutKind.Sequential)] public struct Msg { public IntPtr hwnd; public uint message; public IntPtr wParam; public IntPtr lParam; public uint time; public Pt pt; }
-  [StructLayout(LayoutKind.Sequential)] public struct MsLL { public Pt pt; public int mouseData; public int flags; public int time; public IntPtr extra; }
-  [StructLayout(LayoutKind.Sequential)] public struct KbLL { public int vk; public int scan; public int flags; public int time; public IntPtr extra; }
-  public delegate IntPtr HookProc(int code, IntPtr wParam, IntPtr lParam);
-  [DllImport(\"user32.dll\", SetLastError = true)] static extern IntPtr SetWindowsHookExW(int id, HookProc proc, IntPtr mod, uint tid);
-  [DllImport(\"user32.dll\")] static extern bool UnhookWindowsHookEx(IntPtr h);
-  [DllImport(\"user32.dll\")] static extern IntPtr CallNextHookEx(IntPtr h, int code, IntPtr w, IntPtr l);
+  [StructLayout(LayoutKind.Sequential)] public struct RawDev { public ushort page; public ushort usage; public uint flags; public IntPtr target; }
+  [DllImport(\"user32.dll\", SetLastError = true)] static extern bool RegisterRawInputDevices(RawDev[] devs, uint n, uint size);
+  [DllImport(\"user32.dll\")] static extern uint GetRawInputData(IntPtr h, uint cmd, IntPtr data, ref uint size, uint header);
+  [DllImport(\"user32.dll\")] static extern bool RegisterHotKey(IntPtr h, int id, uint mods, uint vk);
+  [DllImport(\"user32.dll\")] static extern bool UnregisterHotKey(IntPtr h, int id);
   [DllImport(\"user32.dll\")] static extern bool PeekMessage(out Msg m, IntPtr h, uint lo, uint hi, uint remove);
+  [DllImport(\"user32.dll\")] static extern IntPtr DispatchMessage(ref Msg m);
+  [DllImport(\"user32.dll\")] static extern bool GetCursorPos(out Pt p);
   [DllImport(\"user32.dll\")] static extern IntPtr WindowFromPoint(Pt p);
   [DllImport(\"user32.dll\")] static extern IntPtr GetForegroundWindow();
   [DllImport(\"user32.dll\")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
-  [DllImport(\"kernel32.dll\")] static extern IntPtr GetModuleHandleW(string n);
   [DllImport(\"winmm.dll\")] static extern uint timeBeginPeriod(uint ms);
   [DllImport(\"winmm.dll\")] static extern uint timeEndPeriod(uint ms);
-  // The delegates are kept in fields: a collected one would end the hook.
-  static HookProc mouseProc, keyProc;
-  static IntPtr hMouse, hKey;
   static volatile bool done = false;
   static uint guard;
   static bool any;
+  static bool hotkey;  // F8 is ours (see Run)
   static System.Diagnostics.Stopwatch sw;
   static long lastMove = -1000;
+  // One RAWINPUT at a time: its header (type, size, device, wParam), then
+  // the mouse or keyboard block. Big enough for either.
+  static IntPtr buf;
+  const int BUF = 256;
+  static readonly int hdr = 8 + 2 * IntPtr.Size;
   static bool Guarded(IntPtr h) {
     if (guard == 0 || h == IntPtr.Zero) return false;
     uint pid; GetWindowThreadProcessId(h, out pid);
     return pid == guard;
   }
-  // Lines go out through a queue and a thread of their own: a hook
-  // procedure runs inside the OS input path, and one that blocked on a
-  // full pipe (the parent not reading for a second) would be dropped by
-  // Windows - the recording would silently stop. Queued, it never waits.
-  // The window check for a mouse event is made on that thread too:
-  // WindowFromPoint asks the window under the point (WM_NCHITTEST), and a
-  // program that is not answering would hold the hook the same way.
+  // Lines go out through a queue and a thread of their own, so the message
+  // loop never waits on a full pipe (the parent not reading for a second)
+  // and input keeps coming in. The window check for a mouse event is made
+  // there too: WindowFromPoint asks the window under the point
+  // (WM_NCHITTEST), and a program that is not answering would hold it.
   struct Ev { public string line; public bool atPoint; public Pt pt; }
   static System.Collections.Generic.Queue<Ev> lines = new System.Collections.Generic.Queue<Ev>();
   static void Out(string s) { Ev e; e.line = s; e.atPoint = false; e.pt = new Pt(); Push(e); }
@@ -100,64 +112,78 @@ public class Rec {
   static void Drain() {
     for (int i = 0; i < 200; i++) { lock (lines) { if (lines.Count == 0) return; } Thread.Sleep(10); }
   }
-  static IntPtr OnMouse(int code, IntPtr w, IntPtr l) {
-    if (code >= 0) {
-      MsLL m = (MsLL)Marshal.PtrToStructure(l, typeof(MsLL));
-      bool injected = (m.flags & 1) != 0;
-      if (any || !injected) {
-        long t = sw.ElapsedMilliseconds;
-        int msg = (int)w;
-        string at = \" \" + m.pt.X + \" \" + m.pt.Y;
-        switch (msg) {
-          case 0x200:  // WM_MOUSEMOVE: at most one every 8 ms
-            if (t - lastMove >= 8) { lastMove = t; OutAt(\"m \" + t + at, m.pt); }
-            break;
-          case 0x201: OutAt(\"d \" + t + \" 0\" + at, m.pt); break;
-          case 0x202: OutAt(\"u \" + t + \" 0\" + at, m.pt); break;
-          case 0x204: OutAt(\"d \" + t + \" 1\" + at, m.pt); break;
-          case 0x205: OutAt(\"u \" + t + \" 1\" + at, m.pt); break;
-          case 0x207: OutAt(\"d \" + t + \" 2\" + at, m.pt); break;
-          case 0x208: OutAt(\"u \" + t + \" 2\" + at, m.pt); break;
-          case 0x20A: OutAt(\"w \" + t + \" \" + (short)((m.mouseData >> 16) & 0xFFFF) + \" 0\" + at, m.pt); break;
-          case 0x20E: OutAt(\"w \" + t + \" \" + (short)((m.mouseData >> 16) & 0xFFFF) + \" 1\" + at, m.pt); break;
-        }
-      }
-    }
-    return CallNextHookEx(hMouse, code, w, l);
+  static void Stop() { if (!done) { Out(\"stop\"); done = true; } }
+  // WM_INPUT: one raw mouse or keyboard report. Input a program made
+  // (SendInput, keybd_event - our own helpers) comes with no device.
+  protected override void WndProc(ref Message m) {
+    if (m.Msg == 0xFF) OnInput(m.LParam);
+    base.WndProc(ref m);
   }
-  static IntPtr OnKey(int code, IntPtr w, IntPtr l) {
-    if (code >= 0) {
-      KbLL k = (KbLL)Marshal.PtrToStructure(l, typeof(KbLL));
-      bool injected = (k.flags & 0x10) != 0;
-      bool up = (k.flags & 0x80) != 0;
-      int ext = (k.flags & 1);
-      if (k.vk == 0x77 && !injected) {
-        // F8 ends the recording. It is neither in it nor passed on to the
-        // program in front (the run's stop hotkey takes F8 the same way);
-        // its release goes through, so a program never sees F8 stuck down.
-        if (!up) { Out(\"stop\"); done = true; return (IntPtr)1; }
-      } else if ((any || !injected) && !Guarded(GetForegroundWindow())) {
-        Out(\"k \" + sw.ElapsedMilliseconds + \" \" + k.vk + \" \" + (up ? 0 : 1) + \" \" + ext);
+  static void OnInput(IntPtr h) {
+    uint size = BUF;
+    uint got = GetRawInputData(h, 0x10000003, buf, ref size, (uint)hdr);  // RID_INPUT
+    if (got == uint.MaxValue || got < hdr) return;
+    int type = Marshal.ReadInt32(buf, 0);
+    bool injected = Marshal.ReadIntPtr(buf, 8) == IntPtr.Zero;
+    long t = sw.ElapsedMilliseconds;
+    if (type == 0) {  // RIM_TYPEMOUSE
+      if (got < hdr + 24 || (!any && injected)) return;
+      int flags = Marshal.ReadInt16(buf, hdr) & 0xFFFF;
+      int btn = Marshal.ReadInt16(buf, hdr + 4) & 0xFFFF;
+      short data = Marshal.ReadInt16(buf, hdr + 6);
+      int dx = Marshal.ReadInt32(buf, hdr + 12), dy = Marshal.ReadInt32(buf, hdr + 16);
+      Pt p; GetCursorPos(out p);
+      string at = \" \" + p.X + \" \" + p.Y;
+      // Motion: at most one line every 8 ms.
+      if ((dx != 0 || dy != 0 || (flags & 1) != 0) && t - lastMove >= 8) { lastMove = t; OutAt(\"m \" + t + at, p); }
+      if ((btn & 0x001) != 0) OutAt(\"d \" + t + \" 0\" + at, p);
+      if ((btn & 0x002) != 0) OutAt(\"u \" + t + \" 0\" + at, p);
+      if ((btn & 0x004) != 0) OutAt(\"d \" + t + \" 1\" + at, p);
+      if ((btn & 0x008) != 0) OutAt(\"u \" + t + \" 1\" + at, p);
+      if ((btn & 0x010) != 0) OutAt(\"d \" + t + \" 2\" + at, p);
+      if ((btn & 0x020) != 0) OutAt(\"u \" + t + \" 2\" + at, p);
+      if ((btn & 0x400) != 0) OutAt(\"w \" + t + \" \" + data + \" 0\" + at, p);
+      if ((btn & 0x800) != 0) OutAt(\"w \" + t + \" \" + data + \" 1\" + at, p);
+    } else if (type == 1) {  // RIM_TYPEKEYBOARD
+      if (got < hdr + 16) return;
+      int kflags = Marshal.ReadInt16(buf, hdr + 2) & 0xFFFF;
+      int vk = Marshal.ReadInt16(buf, hdr + 6) & 0xFFFF;
+      bool up = (kflags & 1) != 0;
+      int ext = (kflags & 2) != 0 ? 1 : 0;
+      if (vk == 0xFF) return;  // the fake shift some keys are padded with
+      // F8 ends the recording (WM_HOTKEY, below) and is never in it.
+      if (vk != 0x77 && (any || !injected) && !Guarded(GetForegroundWindow())) {
+        Out(\"k \" + t + \" \" + vk + \" \" + (up ? 0 : 1) + \" \" + ext);
       }
     }
-    return CallNextHookEx(hKey, code, w, l);
   }
   public static int Run(uint guardPid, bool anyInput) {
     guard = guardPid; any = anyInput;
+    buf = Marshal.AllocHGlobal(BUF);
     Thread writer = new Thread(Writer); writer.IsBackground = true; writer.Start();
     Msg m;
     PeekMessage(out m, IntPtr.Zero, 0, 0, 0);  // gives this thread a message queue
-    mouseProc = new HookProc(OnMouse); keyProc = new HookProc(OnKey);
-    IntPtr mod = GetModuleHandleW(null);
-    hMouse = SetWindowsHookExW(14, mouseProc, mod, 0);
-    hKey = SetWindowsHookExW(13, keyProc, mod, 0);
-    if (hMouse == IntPtr.Zero || hKey == IntPtr.Zero) {
-      Out(\"error could not hook the mouse and keyboard (\" + Marshal.GetLastWin32Error() + \")\");
-      if (hMouse != IntPtr.Zero) UnhookWindowsHookEx(hMouse);
-      if (hKey != IntPtr.Zero) UnhookWindowsHookEx(hKey);
+    // A message-only window takes the reports (RIDEV_INPUTSINK: from every
+    // window, in front or not).
+    Rec w = new Rec();
+    CreateParams cp = new CreateParams();
+    cp.Parent = (IntPtr)(-3);  // HWND_MESSAGE
+    w.CreateHandle(cp);
+    RawDev[] devs = new RawDev[2];
+    devs[0].page = 1; devs[0].usage = 2; devs[0].flags = 0x100; devs[0].target = w.Handle;  // mouse
+    devs[1].page = 1; devs[1].usage = 6; devs[1].flags = 0x100; devs[1].target = w.Handle;  // keyboard
+    if (!RegisterRawInputDevices(devs, 2, (uint)Marshal.SizeOf(typeof(RawDev)))) {
+      Out(\"error could not listen to the mouse and keyboard (\" + Marshal.GetLastWin32Error() + \")\");
       Drain();
+      w.DestroyHandle();
       return 1;
     }
+    // F8 as a hotkey, as the run's ~F8 holds it: its press comes as
+    // WM_HOTKEY and the program in front never sees it. When another
+    // program (the run's own helper, with ~F8 on) has it, the press goes
+    // there instead - a hotkey's key is not reported as input either.
+    hotkey = RegisterHotKey(IntPtr.Zero, 1, 0x4000, 0x77);  // MOD_NOREPEAT, VK_F8
+    if (!hotkey) Out(\"nohotkey\");
     sw = System.Diagnostics.Stopwatch.StartNew();
     Out(\"ready\");
     // Stdin closing (or 'quit') ends the loop: the parent is gone or done.
@@ -169,13 +195,16 @@ public class Rec {
     reader.Start();
     bool timer = timeBeginPeriod(1) == 0;
     try {
-      // The hooks are called from inside PeekMessage, so keep pumping.
       while (!done) {
-        while (PeekMessage(out m, IntPtr.Zero, 0, 0, 1)) { }
+        while (PeekMessage(out m, IntPtr.Zero, 0, 0, 1)) {
+          if (m.message == 0x0312) Stop();  // WM_HOTKEY
+          else DispatchMessage(ref m);
+        }
         Thread.Sleep(1);
       }
     } finally {
-      UnhookWindowsHookEx(hMouse); UnhookWindowsHookEx(hKey);
+      if (hotkey) UnregisterHotKey(IntPtr.Zero, 1);
+      w.DestroyHandle();
       if (timer) timeEndPeriod(1);
     }
     Drain();
@@ -196,6 +225,7 @@ func start(guard_pid: int, any_input: bool = false) -> void:
 	reason = ""
 	events = []
 	limit_reached = false
+	f8_taken = false
 	if OS.get_name() != "Windows":
 		state = State.UNAVAILABLE
 		reason = "not on Windows"
@@ -220,7 +250,7 @@ func start(guard_pid: int, any_input: bool = false) -> void:
 
 
 ## Reads whatever the helper has printed so far into `events`. Returns true
-## when F8 was pressed (the helper has stopped hooking; call stop()).
+## when F8 was pressed (the helper has stopped listening; call stop()).
 ## Non-blocking; call it every frame.
 func poll() -> bool:
 	if _proc.is_empty():
@@ -249,6 +279,8 @@ func poll() -> bool:
 			state = State.ON
 		elif line == "stop":
 			stopped = true
+		elif line == "nohotkey":
+			f8_taken = true
 		elif line.begins_with("error"):
 			state = State.UNAVAILABLE
 			reason = line.substr(6).strip_edges()
@@ -302,7 +334,7 @@ static func parse_line(line: String) -> Dictionary:
 	return {}
 
 
-## Ends the helper (the hooks go with it) and returns the events read so
+## Ends the helper (its listening goes with it) and returns the events read so
 ## far - whatever the helper printed and had not been polled yet included.
 func stop() -> Array:
 	if _proc.is_empty():
@@ -327,7 +359,7 @@ static func _shutdown(proc: Dictionary) -> void:
 	io.close()
 	(proc["stderr"] as FileAccess).close()
 	# Closing stdin ends the loop; a stuck helper is killed outright (the OS
-	# removes a thread's hooks with the thread).
+	# releases a thread's hotkey and window with the thread).
 	for i in 10:
 		if not OS.is_process_running(pid):
 			return

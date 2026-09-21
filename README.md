@@ -374,13 +374,13 @@ scripts/
     loop_layer.gd          # a layer of actions (+ JSON)
     loop_project.gd        # the whole loop (+ JSON)
     layer_names.gd         # random Bible names for a new loop's first layer
-    recording.gd           # a recording (hook events) as a layer's actions
+    recording.gd           # a recording (input events) as a layer's actions
   input/
     input_backend.gd       # backend interface
     preview_backend.gd     # safe, no-OS backend
     windows_backend.gd     # experimental real Windows input
     stop_hotkey.gd         # system-wide F8 (a real loop, or ~F8)
-    recorder.gd            # Rec: the mouse / keyboard hook helper
+    recorder.gd            # Rec: the mouse / keyboard listener helper
 ```
 
 ## Notes / limitations
@@ -481,7 +481,9 @@ window**.
 **Record keeps everything you type.** While **Rec** is on, keystrokes go
 into the loop file as Key text, exactly as typed — so stop the recording
 before you type a password, or delete that Key action afterwards. The
-recording helper only runs between Rec and F8 and is ended with it.
+recording helper only runs between Rec and F8 and is ended with it, and it
+listens through Windows Raw Input (the way games and macro tools do), not a
+keyboard hook - the thing a keylogger installs.
 
 ## License
 

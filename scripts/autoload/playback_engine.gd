@@ -175,6 +175,11 @@ func set_global_hotkey(on: bool) -> void:
 	_refresh_hotkey()
 
 
+## True while the global F8 is held by our helper (~F8 on and F8 was free).
+func global_hotkey_armed() -> bool:
+	return _stop_hotkey.state == StopHotkeyT.State.ARMED
+
+
 ## Holds the global F8 while ~F8 is on and lets go of it otherwise; a held
 ## one is left as it is.
 func _refresh_hotkey() -> void:

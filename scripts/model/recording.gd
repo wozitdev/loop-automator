@@ -1,6 +1,6 @@
 extends RefCounted
 class_name Recording
-## A recording (see Recorder: the events the hooks saw, in order) turned
+## A recording (see Recorder: the events the helper saw, in order) turned
 ## into a layer's actions, the way a person would have written them: a run
 ## of mouse motion is one Move, a press that travels is a Drag, a press held
 ## still is a Click hold, keystrokes close together are one Key action typed
@@ -30,7 +30,7 @@ const WHEEL_GAP_MS := 400
 const VK_ESCAPE := 0x1B
 
 ## Virtual keys that are modifiers, and the letter each is in
-## KeyStrokes' mods (the hook reports left / right codes; see _vk).
+## KeyStrokes' mods (a helper may report left / right codes; see _vk).
 const MODIFIERS := {0x10: "s", 0x11: "c", 0x12: "a", 0x5B: "w", 0x5C: "w"}
 ## US-layout characters of the OEM virtual keys, the unshifted one; Shift
 ## on them keeps its "+" so the shifted character is the layout's.
@@ -246,7 +246,7 @@ static func _touch(buttons: Dictionary, keys: Dictionary, mods: Dictionary, by_m
 			m["mouse"] = true
 
 
-## The hook's left / right modifier codes as the plain ones.
+## Left / right modifier codes as the plain ones.
 static func _vk(vk: int) -> int:
 	match vk:
 		0xA0, 0xA1: return 0x10

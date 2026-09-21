@@ -16,7 +16,7 @@ const RecorderT := preload("res://scripts/input/recorder.gd")
 const RecordingT := preload("res://scripts/model/recording.gd")
 
 ## Record (the Rec button): what the user does is recorded by a helper
-## with system-wide hooks (see Recorder) until F8, then turned into actions
+## that listens system-wide (see Recorder) until F8, then turned into actions
 ## (see Recording) and appended to the layer whose actions are shown.
 var rec_btn: Button
 var _recorder := RecorderT.new()
@@ -34,7 +34,7 @@ var _rec_pulse: Tween
 ## True while the recording keeps what lands on Loop Automator itself (~Self
 ## on): the click or Esc that ends it is then trimmed off the end.
 var _record_unguarded: bool = false
-## True once the countdown is over and the hooks are in: what the helper saw
+## True once the countdown is over and the helper listens: what it saw
 ## before that (it is started first, so its start-up hides in the countdown)
 ## is not part of the recording.
 var _record_armed: bool = false
@@ -1813,14 +1813,14 @@ func _on_rec_pressed() -> void:
 		var layer := ProjectData.active_layer()
 		if layer == null:
 			return
-		# Asked first: the hooks see every window, and what is typed lands in
+		# Asked first: the helper sees every window, and what is typed lands in
 		# the loop file readable - a password too.
 		_confirm("Record what you do with the mouse and keyboard into \"%s\" until you press F8?\nEverything you type is kept in the loop as plain text - stop before typing a password." % layer.name,
 			_start_recording, "Record")
 
 
 ## Rec: the builder moves out of the way, a short countdown on the status
-## line, then the hooks are on until F8 (or the button, or Esc here).
+## line, then the recording is on until F8 (or the button, or Esc here).
 func _start_recording() -> void:
 	if ProjectData.active_layer() == null:
 		return
@@ -1830,11 +1830,10 @@ func _start_recording() -> void:
 	_record_gen += 1
 	var gen := _record_gen
 	rec_btn.text = "Stop"
-	_start_rec_pulse()
 	_lower_builder()
 	# The helper is started before the countdown: it takes a second or two
 	# to come up (PowerShell compiles it), which the countdown hides - so the
-	# first click after "Recording…" is not lost to a hook not yet in. What
+	# first click after "Recording…" is not lost to a helper not yet in. What
 	# it sees meanwhile is dropped below.
 	# ~Self on: what lands on Loop Automator itself is recorded too.
 	_record_unguarded = feedback_check.button_pressed
@@ -1853,7 +1852,15 @@ func _start_recording() -> void:
 			return
 	_recorder.events.clear()
 	_record_armed = true
-	status_label.text = "Recording… press F8 to stop."
+	# The dot goes red now, not at the button: red means it is recording.
+	_start_rec_pulse()
+	if _recorder.f8_taken and not Playback.global_hotkey_armed():
+		# Another program holds F8 as its hotkey, so its press never reaches
+		# the recorder (with ~F8 on, the run's helper holds it and ends the
+		# recording itself).
+		status_label.text = "Recording… F8 is taken by another program: stop with the button or Esc here."
+	else:
+		status_label.text = "Recording… press F8 to stop."
 
 
 ## Ends the recording; the events become actions on the end of the active
@@ -2055,7 +2062,7 @@ func _exit_tree() -> void:
 	if _hover_thread != null:
 		_hover_thread.wait_to_finish()
 		_hover_thread = null
-	# Closing mid-recording: the hooks go with the helper.
+	# Closing mid-recording: the listening goes with the helper.
 	_recorder.stop()
 
 
@@ -2561,7 +2568,7 @@ func _input(event: InputEvent) -> void:
 			get_viewport().set_input_as_handled()
 		return
 
-	# While recording, this window's F8 and Esc end it (the hooks leave
+	# While recording, this window's F8 and Esc end it (the helper leaves
 	# out keys that land on Loop Automator itself, unless ~Self; an Esc
 	# recorded that way is trimmed). Nothing else here should fire meanwhile.
 	if _recording:
