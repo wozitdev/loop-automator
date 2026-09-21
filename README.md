@@ -67,7 +67,10 @@ layer 1, just broken out so you can view each layer's visuals separately.
   turns ~Move off for you: letting go is done in place). Stopping the loop
   lets go of anything still held. **Captures** goes with a plain click at a
   point.
-- **Drag** — press at A, move to B over the duration, release.
+- **Drag** — press at A, move to B over the duration, release. The travel
+  (a Drag's, a Move's, a Click's) is sent as real mouse motion, so a game
+  that reads the mouse directly — turning its camera on a right-drag — gets
+  it too.
 - **Scroll** — move to `(x, y)` (or, with **~Move** unticked, stay where the
   cursor is) and turn the mouse wheel Up / Down / Left / Right by a number
   of **Notches** (a range, like every number), one wheel click at a time -

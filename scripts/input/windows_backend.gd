@@ -344,17 +344,25 @@ $script:guard = 0
 if ($a[0] -eq 'guard') { $script:guard = [int]$a[1]; $a = @($a | Select-Object -Skip 2) }
 $cmd = $a[0]
 switch ($cmd) {
-  'move' { [Win32In]::SetCursorPos([int]$a[1],[int]$a[2]) | Out-Null }
+  'move' {
+    # A jump. Through SendInput, not SetCursorPos: a program that reads the
+    # mouse as raw input (a game turning its camera) sees SendInput's
+    # motion and never sees SetCursorPos at all. (Verified in Roblox: a
+    # right-drag walked with SetCursorPos does nothing; SendInput, absolute
+    # or relative, turns the camera. Absolute lands on the exact pixel.)
+    [Win32In]::MouseAt([int]$a[1],[int]$a[2],0)
+  }
   'path' {
     # path <x,y;x,y;...> <ms>: move the cursor through the points, evenly
-    # spaced over the time (a Move or Drag with a duration).
+    # spaced over the time (a Move, Click or Drag with a duration). Each
+    # step is SendInput motion, as for 'move'.
     $pts = ([string]$a[1]).Split(';'); $n = $pts.Count; $ms = [int]$a[2]
     $timerRes = ([Win32In]::timeBeginPeriod(1) -eq 0)
     try {
       $sw = [System.Diagnostics.Stopwatch]::StartNew()
       for ($i = 0; $i -lt $n; $i++) {
         $xy = $pts[$i].Split(',')
-        [Win32In]::SetCursorPos([int]$xy[0],[int]$xy[1]) | Out-Null
+        [Win32In]::MouseAt([int]$xy[0],[int]$xy[1],0)
         $due = [int]([long]$ms * ($i + 1) / $n)
         while ($sw.ElapsedMilliseconds -lt $due) { [System.Threading.Thread]::Sleep(1) }
       }
