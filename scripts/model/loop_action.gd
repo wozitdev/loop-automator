@@ -53,9 +53,7 @@ enum StopScope {
 	LAYER,  ## Skip the rest of this layer this pass
 }
 
-## Where a CAPTURE action moves the mouse. (Files from before 0.9.6 had a
-## Save / Load pair, values 0 and 1: the run now keeps the user's own mouse
-## position by itself, so both read as MOUSE.)
+## Where a CAPTURE action moves the mouse.
 enum CaptureMode {
 	MOUSE = 1,   ## To where the user's own mouse is (see PlaybackEngine)
 	DETECT = 2,  ## To where the last detect found its target
@@ -394,7 +392,7 @@ static func type_name(t: int) -> String:
 		Type.CLICK: return "Click"
 		Type.DRAG: return "Drag"
 		Type.KEY: return "Key"
-		Type.WAIT: return "Wait"
+		Type.WAIT: return "Delay"
 		Type.PIXEL_DETECT: return "Pixel Detect"
 		Type.CAPTURE: return "Capture Mouse"
 		Type.STOP: return "Stop"
@@ -519,7 +517,7 @@ func describe() -> String:
 			var press := press_text()
 			return "Key%s: \"%s\"" % [" " + press if not press.is_empty() else "", keys]
 		Type.WAIT:
-			return "Wait %s ms" % range_text(wait_ms, wait_ms_max)
+			return "Delay %s ms" % range_text(wait_ms, wait_ms_max)
 		Type.PIXEL_DETECT:
 			var ws := range_text(w, w_max)
 			var hs := range_text(h, h_max)
@@ -714,8 +712,6 @@ static func from_dict(d: Dictionary) -> Self:
 	a.captures = read_bool(d, "captures", false)
 	# "lag_compensation" is the pre-release name of the same option.
 	a.ghost_cursor = read_bool(d, "ghost_cursor", read_bool(d, "lag_compensation", false))
-	# 0 was Save (before 0.9.6): the user's mouse position is kept by the
-	# run itself now, so it reads as Mouse, as Load (1) does.
 	a.capture_mode = read_int(d, "capture_mode", CaptureMode.MOUSE)
 	if a.capture_mode != CaptureMode.DETECT:
 		a.capture_mode = CaptureMode.MOUSE

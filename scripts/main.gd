@@ -292,6 +292,33 @@ func _build_toolbar() -> Control:
 	var hb := HBoxContainer.new()
 	hb.add_theme_constant_override("separation", 6)
 
+	# --- Timing -----------------------------------------------------------
+	# The delay's label is a checkbox, "~Delay ms": checked, the delay is
+	# also waited after every action.
+	var delay_tip := "Pause after the loop's last action, before it starts over (ms). Saved with the loop."
+	delay_each_check = CheckBox.new()
+	delay_each_check.text = "~Delay"
+	delay_each_check.focus_mode = Control.FOCUS_NONE
+	delay_each_check.tooltip_text = "%s\nChecked: also wait it after every action." % delay_tip
+	delay_each_check.button_pressed = ProjectData.project.delay_after_each_action
+	delay_each_check.toggled.connect(func(v: bool): ProjectData.set_delay_after_each_action(v))
+	hb.add_child(delay_each_check)
+	# A RangePair like the editor fields: "~" expands it to a min - max pause.
+	# The controls sit in the toolbar row at a fixed width (no expand).
+	_delay_pair = RangePair.new()
+	_delay_pair.build(hb, ProjectData.project.loop_delay_ms, ProjectData.project.loop_delay_ms_max, 0, 60000, func(l: int, h: int):
+		ProjectData.set_loop_delay(l, h))
+	_delay_pair.set_suffix("ms")
+	# Wide enough for the biggest value, 60000 ms, to show whole.
+	for sp in [_delay_pair.lo, _delay_pair.hi]:
+		sp.size_flags_horizontal = Control.SIZE_FILL
+		sp.custom_minimum_size = Vector2(_spin_box_width(sp, "60000 ms"), 0)
+	_delay_pair.single_tip = delay_tip
+	if not _delay_pair.ranged:
+		_delay_pair.lo.tooltip_text = delay_tip
+
+	hb.add_child(_vsep())
+
 	# --- Playback ---------------------------------------------------------
 	play_btn = _icon_button(UiIconsT.play(), "", _on_play_pressed)
 	play_btn.text = _run_label()
@@ -355,33 +382,6 @@ func _build_toolbar() -> Control:
 	hb.add_child(duplicate_loop_btn)
 	delete_loop_btn = _icon_button(UiIconsT.trash(), "Delete this loop (its file too)", _confirm_delete_loop)
 	hb.add_child(delete_loop_btn)
-
-	hb.add_child(_vsep())
-
-	# --- Timing -----------------------------------------------------------
-	# The delay's label is a checkbox, "~Delay ms": checked, the delay is
-	# also waited after every action.
-	var delay_tip := "Pause after the loop's last action, before it starts over (ms). Saved with the loop."
-	delay_each_check = CheckBox.new()
-	delay_each_check.text = "~Delay"
-	delay_each_check.focus_mode = Control.FOCUS_NONE
-	delay_each_check.tooltip_text = "%s\nChecked: also wait it after every action." % delay_tip
-	delay_each_check.button_pressed = ProjectData.project.delay_after_each_action
-	delay_each_check.toggled.connect(func(v: bool): ProjectData.set_delay_after_each_action(v))
-	hb.add_child(delay_each_check)
-	# A RangePair like the editor fields: "~" expands it to a min - max pause.
-	# The controls sit in the toolbar row at a fixed width (no expand).
-	_delay_pair = RangePair.new()
-	_delay_pair.build(hb, ProjectData.project.loop_delay_ms, ProjectData.project.loop_delay_ms_max, 0, 60000, func(l: int, h: int):
-		ProjectData.set_loop_delay(l, h))
-	_delay_pair.set_suffix("ms")
-	# Wide enough for the biggest value, 60000 ms, to show whole.
-	for sp in [_delay_pair.lo, _delay_pair.hi]:
-		sp.size_flags_horizontal = Control.SIZE_FILL
-		sp.custom_minimum_size = Vector2(_spin_box_width(sp, "60000 ms"), 0)
-	_delay_pair.single_tip = delay_tip
-	if not _delay_pair.ranged:
-		_delay_pair.lo.tooltip_text = delay_tip
 
 	# --- Self-interaction toggles (right-aligned) ---------------------------
 	var spacer := Control.new()
@@ -879,7 +879,7 @@ func _rebuild_editor() -> void:
 		LoopActionT.Type.KEY:
 			_add_keys_field(a)
 		LoopActionT.Type.WAIT:
-			_add_range_field("Wait", a.wait_ms, a.wait_ms_max, 0, 600000, func(lo: int, hi: int):
+			_add_range_field("Delay", a.wait_ms, a.wait_ms_max, 0, 600000, func(lo: int, hi: int):
 				a.wait_ms = lo
 				a.wait_ms_max = hi, "ms")
 		LoopActionT.Type.PIXEL_DETECT:
@@ -1340,14 +1340,14 @@ func _add_on_fail_field(a: LoopActionT) -> void:
 	when.item_selected.connect(func(i):
 		a.if_found = i == 1
 		_after_edit()
-		# The Wait / Skip tooltips read "appears" / "goes" from this.
+		# The Delay / Skip tooltips read "appears" / "goes" from this.
 		_rebuild_editor.call_deferred())
 	row.add_child(when)
 	editor_box.add_child(row)
 	# ~Wait: re-check the same spot on this interval until the condition
 	# clears (F8 / Esc / a Stop action still end the loop). The interval and
 	# the timeout are greyed out while it is off.
-	var wrow := _row_toggle("Wait", a.wait,
+	var wrow := _row_toggle("Delay", a.wait,
 		"Checked: keep checking this spot every so often until the %s %s." % [target, "goes" if a.if_found else "appears"],
 		func(v: bool):
 			a.wait = v
@@ -1795,11 +1795,30 @@ func _restore_builder_after_pick() -> void:
 	var win := get_window()
 	if _builder_hidden_for_pick:
 		_builder_hidden_for_pick = false
+		# Both are put back, whatever happened meanwhile: a window parked
+		# off-screen that the user then minimised from the taskbar came back
+		# un-minimised but still off-screen, with no way to reach it.
 		if win.mode == Window.MODE_MINIMIZED:
 			win.mode = _builder_prev_mode
-		else:
+		if _builder_prev_mode == Window.MODE_WINDOWED and win.mode == Window.MODE_WINDOWED:
 			win.position = _builder_prev_pos
+	_keep_builder_on_screen()
 	win.grab_focus()
+
+
+## A windowed builder that is off every display (parked there and never
+## brought back, or the display it was on is gone) is centred on the
+## primary one: an off-screen window cannot be reached to fix it.
+func _keep_builder_on_screen() -> void:
+	var win := get_window()
+	if win.mode != Window.MODE_WINDOWED or _builder_hidden_for_pick:
+		return
+	var desktop := OverlayT.virtual_desktop_rect()
+	var shown := Rect2i(win.position, win.size).intersection(desktop)
+	if shown.size.x >= 64 and shown.size.y >= 64:
+		return
+	var usable := DisplayServer.screen_get_usable_rect(DisplayServer.get_primary_screen())
+	win.position = usable.position + (usable.size - win.size) / 2
 
 
 # ======================================================================

@@ -40,9 +40,9 @@ Prefer running from source? Open the folder in Godot 4.7 and press **F5** — se
 
 | Concept    | Meaning |
 |------------|---------|
-| **Project / Loop** | The full automation. Runs forever, top to bottom, then repeats. |
+| **Project / Loop** | The full automation. Runs forever, top to bottom, then repeats (one with nothing to run stops after a pass). |
 | **Layer**  | A named group of actions. *All enabled layers run every iteration.* Layers exist purely to organise a loop into flip-through "screens" with their own colour + overlay view. |
-| **Action** | One step: Move, Click, Drag, Scroll, Key, Wait, Pixel Detect, Image Detect, Capture Mouse, or Stop. |
+| **Action** | One step: Move, Click, Drag, Scroll, Key, Delay, Pixel Detect, Image Detect, Capture Mouse, or Stop. |
 
 So a loop with `Layer 1` and `Layer 2` runs **Layer 1's actions, then Layer 2's
 actions, then repeats** — exactly as described: layer 2 runs in the same loop as
@@ -104,7 +104,7 @@ layer 1, just broken out so you can view each layer's visuals separately.
   together; `(wa)` is `w` and `a`. A key that cannot be held (a name the
   keyboard has no key for) is typed once instead. Stopping the loop lets go
   of everything still held.
-- **Wait** — pause N milliseconds.
+- **Delay** — pause N milliseconds.
 - **Pixel Detect** — look for an expected colour (± tolerance) anywhere in a screen rect.
   The whole rect is scanned (the centre first). **Sample & place** centres the
   rect on the point you click and reads its colour; **Just sample** reads the
@@ -116,7 +116,7 @@ layer 1, just broken out so you can view each layer's visuals separately.
   and the same detect works the other way round: the "else" half of a
   condition — one layer guarded by *not found*, the next by *found*). Two
   boxes say what happens while it holds, and they are independent:
-  **~Wait** keeps checking the same spot every so often until the colour
+  **~Delay** keeps checking the same spot every so often until the colour
   appears (or goes), with **~Timeout** to give up after a while; **Skip rest
   of layer** (on by default) does that — at once, or still after the
   wait. So one detect can wait for a popup and skip the layer if it never
@@ -143,7 +143,7 @@ layer 1, just broken out so you can view each layer's visuals separately.
   rect takes to scan). Check **~Mismatch** to compare by light and dark
   only, so the image is still found when it is tinted differently (hovered,
   pressed, another theme). Rect,
-  **Follow Cursor**, **If** *not found* / *found*, **~Wait**, **~Timeout**,
+  **Follow Cursor**, **If** *not found* / *found*, **~Delay**, **~Timeout**,
   **Skip rest of layer** and **~Self** work as for Pixel Detect. The scan runs in the
   helper, so a whole screen is checked in a few tens of milliseconds.
 - **Stop** — stop the loop, or **This layer** to just end the current layer's
@@ -159,9 +159,7 @@ layer 1, just broken out so you can view each layer's visuals separately.
   the shop → Capture Mouse: Detect → Click that does not move first" presses
   whichever one is there, wherever it is. Both take a **Duration** (with
   `~Duration`'s wander) so the move looks like a hand's. Before any detect
-  has found anything, Detect does nothing and the layer carries on. (A
-  **Save** or **Load** from a loop made before 0.9.6 reads as Mouse; a Save
-  at the top of a layer can simply be deleted.)
+  has found anything, Detect does nothing and the layer carries on.
   Move, Click and Drag also have a **Captures** checkbox: the action saves the
   mouse position, runs, then moves the mouse back where it was — plus whatever
   you moved it meanwhile, so your own movement is never lost. Handy for
@@ -191,7 +189,7 @@ one Move over its time, a press that travels is a Drag, one held still is
 a Click hold, keystrokes close together are one Key action typed with
 ~Keys (Ctrl+C is `^c`, Shift and a letter its capital), a key held while
 other things happen is a Key down … up, and the pauses in between are
-Waits. Every number is exact — a TAS — and each is a range you can open
+Delays. Every number is exact — a TAS — and each is a range you can open
 with its `~`.
 Windows only. What lands on Loop Automator itself (unless **~Self** is on)
 and input a program makes (a game re-centring the cursor) is left out;
@@ -228,7 +226,7 @@ pair expanded.
 **~Delay** in the toolbar is the pause after the loop's last action, before
 it starts over. It is also a checkbox: tick it and the same delay is waited
 after every action, a fresh random value each time when it is a range — a
-quick way to slow a whole loop down without adding a Wait after every step
+quick way to slow a whole loop down without adding a Delay after every step
 (the last action's wait then leads into the next round; there is no second
 one). Both are saved with the loop.
 

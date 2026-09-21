@@ -260,7 +260,7 @@ func _draw_layer(li: int, layer: LoopLayerT, offset: Vector2) -> void:
 				if action.press_mode != LoopActionT.PressMode.TAP:
 					text = "KEY %s  %s" % [action.press_text().to_upper(), ktxt]
 			elif action.type == LoopActionT.Type.WAIT:
-				text = "WAIT  %s ms" % LoopActionT.range_text(action.wait_ms, action.wait_ms_max)
+				text = "DELAY  %s ms" % LoopActionT.range_text(action.wait_ms, action.wait_ms_max)
 			elif action.type == LoopActionT.Type.CLICK:
 				# No move to its point: a press wherever the cursor is at the time.
 				var press := action.press_text().to_upper()

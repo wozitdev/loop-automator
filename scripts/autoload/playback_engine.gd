@@ -334,6 +334,7 @@ func _run_loop(gen: int) -> void:
 		# With the "~" in front of the delay, it is waited after every action;
 		# the pass then ends with the last action's wait, not a second one.
 		var delayed_after_last := false
+		var ran := 0
 		for li in project.layers.size():
 			if not is_running or gen != _generation:
 				break
@@ -352,6 +353,7 @@ func _run_loop(gen: int) -> void:
 				current_action_index = ai
 				_last_event = ""
 				emit_signal("action_executing", li, ai)
+				ran += 1
 				_note_user_motion()
 				var result := await _execute_action(action)
 				_note_loop_cursor(action)
@@ -372,6 +374,11 @@ func _run_loop(gen: int) -> void:
 				continue
 		if not is_running or gen != _generation:
 			break
+		if ran == 0:
+			# Nothing to run (no actions, or none switched on): one pass says
+			# so, rather than a loop that runs forever doing nothing.
+			stop("Stopped: the loop has no actions to run.")
+			return
 		if not delayed_after_last:
 			await _wait_loop_delay(project, gen, "Loop delay")
 		# One frame per pass whatever the delay: a pass with nothing to wait
@@ -484,8 +491,8 @@ func _execute_action(action: LoopActionT) -> int:
 				await _type_plain(action)
 		LoopActionT.Type.WAIT:
 			var wait := action.roll_wait_ms()
-			emit_signal("status", "Wait: %d ms" % wait)
-			_set_tracker(tracker_pos, tracker_visible, "WAIT")
+			emit_signal("status", "Delay: %d ms" % wait)
+			_set_tracker(tracker_pos, tracker_visible, "DELAY")
 			await _sleep_ms(wait)
 		LoopActionT.Type.PIXEL_DETECT, LoopActionT.Type.IMAGE_DETECT:
 			var gen := _generation
