@@ -82,6 +82,10 @@ var _held_keys: Array[Dictionary] = []
 # pinned, so a stop ends that command (see _interrupt_helper) rather than
 # leaving the user without a mouse until the dwell is over.
 var _captured_thread: Thread = null
+# The button that action may have down in the helper (-1 for a move): let
+# go of at quit if the action was cut short, since the coroutine that does
+# it after a stop never resumes once the tree is going.
+var _captured_button: int = -1
 
 # Lazily-created real backend used purely for reading screen pixels (so colour
 # sampling works even while the active playback backend is Preview).
@@ -117,8 +121,14 @@ func _ready() -> void:
 
 func _exit_tree() -> void:
 	# Closing the app mid-run: nothing stays pressed, F8 is given back.
-	_interrupt_helper()
+	var cut_short := _interrupt_helper()
 	_release_held()
+	# A captured click or drag cut short had its button down in the helper;
+	# after a stop the action's own coroutine lets go of it, but no frame
+	# comes now, so it is done here (the call waits for the killed helper to
+	# be noticed, then runs on a fresh one).
+	if cut_short and _captured_button >= 0 and backend != null:
+		backend.release_button(_captured_button)
 	_stop_hotkey.stop()
 	# The backends end their helpers while the scripts are still loaded: a
 	# warm-up thread still running backend code at teardown is a crash.
@@ -682,10 +692,13 @@ func _forget_held(press: Dictionary) -> void:
 
 ## A captured action still running in the helper is cut short, so the
 ## mouse is the user's again at once. Before _release_held: that call waits
-## for the helper, which would otherwise be the rest of the dwell.
-func _interrupt_helper() -> void:
+## for the helper, which would otherwise be the rest of the dwell. Returns
+## whether there was one to cut short.
+func _interrupt_helper() -> bool:
 	if _captured_thread != null and _captured_thread.is_alive() and backend != null:
 		backend.interrupt()
+		return true
+	return false
 
 
 ## Lets go of every button and key a Down left pressed (keys in the reverse
@@ -731,6 +744,7 @@ func _execute_captured(action: LoopActionT) -> void:
 	# short (see stop): the user has the mouse back at once, not when the
 	# dwell is over.
 	_captured_thread = thread
+	_captured_button = -1 if kind == "move" else action.button
 	thread.start(func() -> Array:
 		return b.run_captured(kind, action.button, from, to, ms, action.ghost_cursor, path))
 	# The tracker walks the path while the helper moves the real cursor.
@@ -741,6 +755,7 @@ func _execute_captured(action: LoopActionT) -> void:
 		await get_tree().process_frame
 	var result: Array = thread.wait_to_finish()
 	_captured_thread = null
+	_captured_button = -1
 	if result.size() != 2:
 		if gen != _generation:
 			# Cut short: the helper was ended mid-action, so a button it had

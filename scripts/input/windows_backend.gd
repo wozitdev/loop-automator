@@ -43,6 +43,10 @@ var _closing := false
 ## Set by interrupt(): the empty answer the waiting call is about to get is
 ## meant, not a fault, so it is not logged as one (see _server_call).
 var _cut_short := false
+## The server's pid (-1: none), kept beside `_server` for interrupt(), which
+## runs on the main thread while a worker holds the lock and may be
+## replacing `_server` itself: an int is read whole, a Dictionary is not.
+var _server_pid: int = -1
 
 const HELPER_SCRIPT := """param([Parameter(ValueFromRemainingArguments=$true)][string[]]$a)
 # 'guard <pid> <command...>': clicks and keys that would land on a window of
@@ -854,10 +858,9 @@ func settled() -> bool:
 ## A ghost cursor the killed helper had blanked is put back by the caller
 ## that gets the empty answer (see run_captured).
 func interrupt() -> void:
-	var server := _server
-	if server.is_empty():
+	var pid := _server_pid
+	if pid < 0:
 		return
-	var pid: int = server["pid"]
 	if OS.is_process_running(pid):
 		_cut_short = true
 		OS.kill(pid)
@@ -966,6 +969,7 @@ func _server_ready() -> bool:
 		_server_failed_at = Time.get_ticks_msec()
 		return false
 	_server = started
+	_server_pid = int(started["pid"])
 	_server_pending = PackedByteArray()
 	var hello := _server_read_line(SERVER_START_TIMEOUT_MS)
 	if hello != "ready":
@@ -1009,6 +1013,7 @@ func _stop_server() -> void:
 		return
 	var server := _server
 	_server = {}
+	_server_pid = -1
 	_server_pending = PackedByteArray()
 	_shutdown_server(server)
 

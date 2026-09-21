@@ -9,7 +9,8 @@ class_name Recorder
 ## The helper leaves out what a loop must not contain: injected input (a
 ## program moving the cursor, our own helpers), anything on Loop Automator's
 ## own windows (the ~Self rule: the guard pid), and F8 itself - a press of
-## F8 ends the recording instead ("stop" is printed).
+## F8 ends the recording instead ("stop" is printed) and is kept from the
+## program under it, as the run's stop hotkey is.
 
 const PowerShellHostT := preload("res://scripts/powershell_host.gd")
 const SCRIPT_FILE := "record_helper.ps1"
@@ -24,6 +25,10 @@ var reason: String = ""
 ## (d / u: 0 left, 1 right, 2 middle); "delta" (w: +-120 per notch, up /
 ## right positive) and "horizontal"; "vk", "down", "extended" (k).
 var events: Array = []
+## The most events a recording keeps (about an hour of constant motion):
+## past it the recording ends as if F8 had been pressed, and this is set.
+const MAX_EVENTS := 400000
+var limit_reached: bool = false
 
 var _proc: Dictionary = {}
 var _pending := PackedByteArray()
@@ -47,7 +52,7 @@ public class Rec {
   [StructLayout(LayoutKind.Sequential)] public struct MsLL { public Pt pt; public int mouseData; public int flags; public int time; public IntPtr extra; }
   [StructLayout(LayoutKind.Sequential)] public struct KbLL { public int vk; public int scan; public int flags; public int time; public IntPtr extra; }
   public delegate IntPtr HookProc(int code, IntPtr wParam, IntPtr lParam);
-  [DllImport(\"user32.dll\")] static extern IntPtr SetWindowsHookExW(int id, HookProc proc, IntPtr mod, uint tid);
+  [DllImport(\"user32.dll\", SetLastError = true)] static extern IntPtr SetWindowsHookExW(int id, HookProc proc, IntPtr mod, uint tid);
   [DllImport(\"user32.dll\")] static extern bool UnhookWindowsHookEx(IntPtr h);
   [DllImport(\"user32.dll\")] static extern IntPtr CallNextHookEx(IntPtr h, int code, IntPtr w, IntPtr l);
   [DllImport(\"user32.dll\")] static extern bool PeekMessage(out Msg m, IntPtr h, uint lo, uint hi, uint remove);
@@ -74,13 +79,20 @@ public class Rec {
   // procedure runs inside the OS input path, and one that blocked on a
   // full pipe (the parent not reading for a second) would be dropped by
   // Windows - the recording would silently stop. Queued, it never waits.
-  static System.Collections.Generic.Queue<string> lines = new System.Collections.Generic.Queue<string>();
-  static void Out(string s) { lock (lines) { lines.Enqueue(s); Monitor.Pulse(lines); } }
+  // The window check for a mouse event is made on that thread too:
+  // WindowFromPoint asks the window under the point (WM_NCHITTEST), and a
+  // program that is not answering would hold the hook the same way.
+  struct Ev { public string line; public bool atPoint; public Pt pt; }
+  static System.Collections.Generic.Queue<Ev> lines = new System.Collections.Generic.Queue<Ev>();
+  static void Out(string s) { Ev e; e.line = s; e.atPoint = false; e.pt = new Pt(); Push(e); }
+  static void OutAt(string s, Pt p) { Ev e; e.line = s; e.atPoint = true; e.pt = p; Push(e); }
+  static void Push(Ev e) { lock (lines) { lines.Enqueue(e); Monitor.Pulse(lines); } }
   static void Writer() {
     while (true) {
-      string s;
-      lock (lines) { while (lines.Count == 0) Monitor.Wait(lines); s = lines.Dequeue(); }
-      try { Console.Out.WriteLine(s); Console.Out.Flush(); } catch { done = true; return; }
+      Ev e;
+      lock (lines) { while (lines.Count == 0) Monitor.Wait(lines); e = lines.Dequeue(); }
+      if (e.atPoint && Guarded(WindowFromPoint(e.pt))) continue;
+      try { Console.Out.WriteLine(e.line); Console.Out.Flush(); } catch { done = true; return; }
     }
   }
   // Gives the writer a moment to send what is queued (the \"stop\" line
@@ -92,21 +104,22 @@ public class Rec {
     if (code >= 0) {
       MsLL m = (MsLL)Marshal.PtrToStructure(l, typeof(MsLL));
       bool injected = (m.flags & 1) != 0;
-      if ((any || !injected) && !Guarded(WindowFromPoint(m.pt))) {
+      if (any || !injected) {
         long t = sw.ElapsedMilliseconds;
         int msg = (int)w;
+        string at = \" \" + m.pt.X + \" \" + m.pt.Y;
         switch (msg) {
           case 0x200:  // WM_MOUSEMOVE: at most one every 8 ms
-            if (t - lastMove >= 8) { lastMove = t; Out(\"m \" + t + \" \" + m.pt.X + \" \" + m.pt.Y); }
+            if (t - lastMove >= 8) { lastMove = t; OutAt(\"m \" + t + at, m.pt); }
             break;
-          case 0x201: Out(\"d \" + t + \" 0 \" + m.pt.X + \" \" + m.pt.Y); break;
-          case 0x202: Out(\"u \" + t + \" 0 \" + m.pt.X + \" \" + m.pt.Y); break;
-          case 0x204: Out(\"d \" + t + \" 1 \" + m.pt.X + \" \" + m.pt.Y); break;
-          case 0x205: Out(\"u \" + t + \" 1 \" + m.pt.X + \" \" + m.pt.Y); break;
-          case 0x207: Out(\"d \" + t + \" 2 \" + m.pt.X + \" \" + m.pt.Y); break;
-          case 0x208: Out(\"u \" + t + \" 2 \" + m.pt.X + \" \" + m.pt.Y); break;
-          case 0x20A: Out(\"w \" + t + \" \" + (short)((m.mouseData >> 16) & 0xFFFF) + \" 0 \" + m.pt.X + \" \" + m.pt.Y); break;
-          case 0x20E: Out(\"w \" + t + \" \" + (short)((m.mouseData >> 16) & 0xFFFF) + \" 1 \" + m.pt.X + \" \" + m.pt.Y); break;
+          case 0x201: OutAt(\"d \" + t + \" 0\" + at, m.pt); break;
+          case 0x202: OutAt(\"u \" + t + \" 0\" + at, m.pt); break;
+          case 0x204: OutAt(\"d \" + t + \" 1\" + at, m.pt); break;
+          case 0x205: OutAt(\"u \" + t + \" 1\" + at, m.pt); break;
+          case 0x207: OutAt(\"d \" + t + \" 2\" + at, m.pt); break;
+          case 0x208: OutAt(\"u \" + t + \" 2\" + at, m.pt); break;
+          case 0x20A: OutAt(\"w \" + t + \" \" + (short)((m.mouseData >> 16) & 0xFFFF) + \" 0\" + at, m.pt); break;
+          case 0x20E: OutAt(\"w \" + t + \" \" + (short)((m.mouseData >> 16) & 0xFFFF) + \" 1\" + at, m.pt); break;
         }
       }
     }
@@ -118,8 +131,11 @@ public class Rec {
       bool injected = (k.flags & 0x10) != 0;
       bool up = (k.flags & 0x80) != 0;
       int ext = (k.flags & 1);
-      if (k.vk == 0x77 && !injected) {  // F8 ends the recording, and is not in it
-        if (!up) { Out(\"stop\"); done = true; }
+      if (k.vk == 0x77 && !injected) {
+        // F8 ends the recording. It is neither in it nor passed on to the
+        // program in front (the run's stop hotkey takes F8 the same way);
+        // its release goes through, so a program never sees F8 stuck down.
+        if (!up) { Out(\"stop\"); done = true; return (IntPtr)1; }
       } else if ((any || !injected) && !Guarded(GetForegroundWindow())) {
         Out(\"k \" + sw.ElapsedMilliseconds + \" \" + k.vk + \" \" + (up ? 0 : 1) + \" \" + ext);
       }
@@ -179,6 +195,7 @@ func start(guard_pid: int, any_input: bool = false) -> void:
 	stop()
 	reason = ""
 	events = []
+	limit_reached = false
 	if OS.get_name() != "Windows":
 		state = State.UNAVAILABLE
 		reason = "not on Windows"
@@ -235,6 +252,11 @@ func poll() -> bool:
 		elif line.begins_with("error"):
 			state = State.UNAVAILABLE
 			reason = line.substr(6).strip_edges()
+		elif events.size() >= MAX_EVENTS:
+			# Left running for hours: what there is becomes the layer's
+			# actions, as if F8 had been pressed now.
+			limit_reached = true
+			stopped = true
 		else:
 			var e := parse_line(line)
 			if not e.is_empty():

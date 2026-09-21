@@ -34,6 +34,10 @@ var _rec_pulse: Tween
 ## True while the recording keeps what lands on Loop Automator itself (~Self
 ## on): the click or Esc that ends it is then trimmed off the end.
 var _record_unguarded: bool = false
+## True once the countdown is over and the hooks are in: what the helper saw
+## before that (it is started first, so its start-up hides in the countdown)
+## is not part of the recording.
+var _record_armed: bool = false
 
 # --- top-level UI refs ----------------------------------------------------
 var status_label: Label
@@ -1822,19 +1826,33 @@ func _start_recording() -> void:
 		return
 	_commit_pending_edits()
 	_recording = true
+	_record_armed = false
 	_record_gen += 1
 	var gen := _record_gen
 	rec_btn.text = "Stop"
 	_start_rec_pulse()
 	_lower_builder()
+	# The helper is started before the countdown: it takes a second or two
+	# to come up (PowerShell compiles it), which the countdown hides - so the
+	# first click after "Recording…" is not lost to a hook not yet in. What
+	# it sees meanwhile is dropped below.
+	# ~Self on: what lands on Loop Automator itself is recorded too.
+	_record_unguarded = feedback_check.button_pressed
+	_recorder.start(0 if _record_unguarded else OS.get_process_id())
 	for n in [3, 2, 1]:
 		status_label.text = "Recording in %d… (F8 stops it)" % n
 		await get_tree().create_timer(1.0).timeout
 		if gen != _record_gen:
 			return
-	# ~Self on: what lands on Loop Automator itself is recorded too.
-	_record_unguarded = feedback_check.button_pressed
-	_recorder.start(0 if _record_unguarded else OS.get_process_id())
+	# Still coming up (a slow machine): say so rather than record nothing.
+	# A helper that fails meanwhile ends the recording from _process.
+	while _recorder.state == RecorderT.State.STARTING:
+		status_label.text = "Starting the recorder…"
+		await get_tree().process_frame
+		if gen != _record_gen:
+			return
+	_recorder.events.clear()
+	_record_armed = true
 	status_label.text = "Recording… press F8 to stop."
 
 
@@ -1850,7 +1868,9 @@ func _stop_recording(reason: String = "", from_builder: bool = false) -> void:
 	rec_btn.text = "Rec"
 	_stop_rec_pulse()
 	var events := _recorder.stop()
-	if from_builder and _record_unguarded:
+	if not _record_armed:
+		events = []   # ended during the countdown: nothing was being recorded yet
+	elif from_builder and _record_unguarded:
 		events = RecordingT.without_stop_gesture(events)
 	_restore_builder_after_pick()
 	if not reason.is_empty():
@@ -1863,6 +1883,8 @@ func _stop_recording(reason: String = "", from_builder: bool = false) -> void:
 		return
 	ProjectData.append_actions(actions)
 	status_label.text = "Recorded %d action%s into \"%s\"." % [actions.size(), "" if actions.size() == 1 else "s", layer_name]
+	if _recorder.limit_reached:
+		status_label.text += " The recording limit was reached, so it ended there."
 
 
 ## The Rec dot goes red and breathes slowly (a shade brighter and back)
