@@ -2460,6 +2460,10 @@ func _ask_import(path: String) -> void:
 			text += "    •  … and %d more\n" % (keys.size() - IMPORT_KEYS_SHOWN)
 	text += "\nIt opens in Safe mode. Read its actions there and dry-run it before you ever run it Live."
 	var do_import := func():
+		# As the question says: with Live chosen, an idle ~F8 or one press of
+		# Run would drive the real mouse and keyboard with a loop nobody has
+		# read yet.
+		_switch_to_safe_backend_if_needed()
 		var id := ProjectData.import_loop(path)
 		if id < 0:
 			status_label.text = "Import failed: %s is not a readable .loop file." % path.get_file()

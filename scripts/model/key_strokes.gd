@@ -28,6 +28,11 @@ const NAMED := {
 ## helper (see helper_only); everything else may go to SendKeys as text.
 const EXTRA := [0x5B, 0x5C, 0x11, 0x10, 0x12, 0x20]
 const VK_ENTER := 0x0D
+## The most times one braced key repeats ("{ENTER 3}"). Each repeat is a
+## press of its own in a run, so a file saying "{TAB 999999999}" would
+## otherwise have the app build a billion presses before typing one; a
+## stroke over this is left to SendKeys as it is (see parse).
+const REPEAT_MAX := 1000
 
 
 ## `text` cut into the keystrokes it stands for: a plain character, a
@@ -99,7 +104,7 @@ static func parse(stroke: String) -> Dictionary:
 			else:
 				return {}
 			if parts.size() == 2:
-				if not parts[1].is_valid_int() or int(parts[1]) < 1:
+				if not parts[1].is_valid_int() or int(parts[1]) < 1 or int(parts[1]) > REPEAT_MAX:
 					return {}
 				repeat = int(parts[1])
 	elif rest.begins_with("(") and rest.ends_with(")"):

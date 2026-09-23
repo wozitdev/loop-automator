@@ -16,16 +16,19 @@ static var _executable := ""
 static var _script_dir := ""
 
 
-## Full path of Windows PowerShell. Falls back to the bare name only when the
-## expected file is missing (CreateProcess still resolves that).
+## Full path of Windows PowerShell: under %SystemRoot%, else the stock
+## C:\Windows. Falls back to the bare name only when neither has it
+## (CreateProcess still resolves that).
 static func executable() -> String:
 	if _executable.is_empty():
 		var found := "powershell.exe"
-		var root := OS.get_environment("SystemRoot")
-		if not root.is_empty():
-			var full := root.path_join("System32/WindowsPowerShell/v1.0/powershell.exe")
+		for root in [OS.get_environment("SystemRoot"), "C:\\Windows"]:
+			if root.is_empty():
+				continue
+			var full: String = root.path_join("System32/WindowsPowerShell/v1.0/powershell.exe")
 			if FileAccess.file_exists(full):
 				found = full.replace("/", "\\")
+				break
 		_executable = found
 	return _executable
 

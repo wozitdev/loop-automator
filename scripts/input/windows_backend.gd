@@ -1146,7 +1146,14 @@ func _run_sync(extra: PackedStringArray, timeout_ms: int = SERVER_READ_TIMEOUT_M
 	var line: String = served["line"]
 	if served["served"]:
 		if line.begins_with("error "):
-			push_warning("WindowsBackend: %s failed in the helper: %s" % [extra[0], line.substr(6)])
+			var why := line.substr(6)
+			# PowerShell quotes the value it could not use ('Cannot convert
+			# value "128512" to type "System.Char"'): for a key command that
+			# is a piece of what the loop types, and the log is what gets
+			# attached to bug reports (see _loggable).
+			if extra[0] in ["key", "hold", "kdown", "kup"]:
+				why = RegEx.create_from_string("\"[^\"]*\"").sub(why, "\"...\"", true)
+			push_warning("WindowsBackend: %s failed in the helper: %s" % [extra[0], why])
 			return ""
 		if line == "ok":
 			line = ""

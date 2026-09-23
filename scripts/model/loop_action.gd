@@ -383,6 +383,13 @@ func set_image_png(png: PackedByteArray) -> bool:
 		if img.load_png_from_buffer(png) != OK or img.is_empty() \
 				or img.get_width() > IMAGE_MAX_SIDE or img.get_height() > IMAGE_MAX_SIDE:
 			return false
+		# Kept (and saved, and sent to the helper's decoder) as Godot writes
+		# it from the decoded pixels, not as the file had it: whatever else a
+		# PNG from a shared loop carried (extra chunks, text, trailing
+		# bytes) never reaches another parser.
+		png = img.save_png_to_buffer()
+		if png.is_empty():
+			return false
 	image_png = png
 	_image = img
 	_image_texture = null
