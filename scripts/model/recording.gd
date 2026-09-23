@@ -109,7 +109,7 @@ static func _items(events: Array) -> Array:
 					if not plain:
 						continue
 				if not run.is_empty() and t - run["t1"] > MOVE_GAP_MS:
-					_flush_move(items, run, keys)
+					_flush_move(items, run, keys, mods)
 					run = {}
 				if run.is_empty():
 					run = {"t0": t, "t1": t, "x0": e["x"], "y0": e["y"]}
@@ -117,7 +117,7 @@ static func _items(events: Array) -> Array:
 				run["x"] = e["x"]
 				run["y"] = e["y"]
 			"d":
-				_flush_move(items, run, keys)
+				_flush_move(items, run, keys, mods)
 				run = {}
 				_touch(buttons, keys, mods, true)
 				var d := {"t": t, "x": e["x"], "y": e["y"], "x2": e["x"], "y2": e["y"], "other": false}
@@ -128,6 +128,10 @@ static func _items(events: Array) -> Array:
 			"u":
 				if not buttons.has(e["button"]):
 					continue
+				# Motion so far is before the release (what comes after it is
+				# not the press's: a Move ending past the drop would drag on).
+				_flush_move(items, run, keys, mods)
+				run = {}
 				var d: Dictionary = buttons[e["button"]]
 				buttons.erase(e["button"])
 				var base := {"button": e["button"], "x": d["x"], "y": d["y"]}
@@ -145,7 +149,7 @@ static func _items(events: Array) -> Array:
 				else:
 					items.append(_item("click", d["t"], t, base))
 			"w":
-				_flush_move(items, run, keys)
+				_flush_move(items, run, keys, mods)
 				run = {}
 				_touch(buttons, keys, mods, true)
 				var delta: int = e["delta"]
@@ -170,7 +174,8 @@ static func _items(events: Array) -> Array:
 				if MODIFIERS.has(vk):
 					if e["down"]:
 						if not mods.has(vk):
-							mods[vk] = {"t": t, "used": false, "mouse": false}
+							# (Down during a press: held for the mouse, a Ctrl-drag.)
+							mods[vk] = {"t": t, "used": not buttons.is_empty(), "mouse": not buttons.is_empty()}
 							# Held across it, a key or button is a down ... up (so the
 							# modifier lands between them as it did).
 							for b in buttons.values():
@@ -193,8 +198,11 @@ static func _items(events: Array) -> Array:
 					continue
 				if e["down"]:
 					if keys.has(vk):
-						continue   # the keyboard's own repeat
-					_flush_move(items, run, keys)
+						# The keyboard's own repeat: counted (a held Backspace
+						# deletes a character per repeat, see the key's up).
+						keys[vk]["repeats"] = int(keys[vk].get("repeats", 0)) + 1
+						continue
+					_flush_move(items, run, keys, mods)
 					run = {}
 					_touch(buttons, keys, mods, false)
 					var letters := ""
@@ -204,7 +212,7 @@ static func _items(events: Array) -> Array:
 					keys[vk] = {"t": t, "mods": letters, "other": false, "extended": e["extended"], "ch": e.get("ch", 0)}
 				elif keys.has(vk):
 					# Motion still under way happened during the hold: it counts.
-					_flush_move(items, run, keys)
+					_flush_move(items, run, keys, mods)
 					run = {}
 					var k: Dictionary = keys[vk]
 					keys.erase(vk)
@@ -215,13 +223,22 @@ static func _items(events: Array) -> Array:
 					if k["other"]:
 						items.append(_item("keydown", k["t"], k["t"], {"text": text}))
 						items.append(_item("keyup", t, t, {"text": text}))
+					elif int(k.get("repeats", 0)) > 0 and text.ends_with("}") and text.contains("{") and not text.ends_with("{}}"):
+						# A named key held till it repeated (Backspace, an arrow):
+						# the presses it made, counted - injected input does not
+						# repeat by itself, and a hold would press it once.
+						var n := mini(int(k["repeats"]) + 1, KeyStrokesT.REPEAT_MAX)
+						items.append(_item("key", k["t"], t, {"text": text.left(text.length() - 1) + " %d}" % n}))
 					elif t - int(k["t"]) >= HOLD_MS:
 						items.append(_item("keyhold", k["t"], t, {"text": text}))
 					else:
 						# Typed: a letter as the layout has it (Cyrillic, Greek),
 						# where a held one stays the key it is (W to walk).
-						items.append(_item("key", k["t"], t, {"text": _stroke(vk, k["mods"], e["extended"], k["ch"], true)}))
-	_flush_move(items, run, keys)
+						# (Only plain typing: a shortcut, Ctrl+C in a Russian
+						# window, is the key - it works on any layout.)
+						var plain: bool = k["mods"] == "" or k["mods"] == "s"
+						items.append(_item("key", k["t"], t, {"text": _stroke(vk, k["mods"], e["extended"], k["ch"], plain)}))
+	_flush_move(items, run, keys, mods)
 	if not wheel.is_empty():
 		_end_wheel(items, wheel)
 	# Still down when the recording ended: pressed, never let go.
@@ -254,7 +271,7 @@ static func _item(kind: String, t0: int, t1: int, data: Dictionary) -> Dictionar
 ## The motion run as a Move item, unless it is a hand at rest. A real move
 ## is "other input" for every key held meanwhile (W held while the mouse
 ## steers is a Key down … up, not a hold).
-static func _flush_move(items: Array, run: Dictionary, keys: Dictionary) -> void:
+static func _flush_move(items: Array, run: Dictionary, keys: Dictionary, mods: Dictionary = {}) -> void:
 	if run.is_empty():
 		return
 	var dist := Vector2i(run["x0"], run["y0"]).distance_to(Vector2i(run["x"], run["y"]))
@@ -263,6 +280,11 @@ static func _flush_move(items: Array, run: Dictionary, keys: Dictionary) -> void
 	items.append(_item("move", run["t0"], run["t1"], {"x": run["x"], "y": run["y"]}))
 	for k in keys.values():
 		k["other"] = true
+	# A modifier held while the mouse moved (Shift to sprint and look) is a
+	# down ... up around the move, not a hold before it.
+	for m in mods.values():
+		m["used"] = true
+		m["mouse"] = true
 
 
 ## Something happened: every button and key held right now becomes a

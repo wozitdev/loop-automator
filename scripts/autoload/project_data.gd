@@ -54,13 +54,55 @@ var _session_projects_by_id: Dictionary = {}
 var _pending_by_id: Dictionary = {}
 
 
+## The process id of the copy of Loop Automator using the data folder, for
+## a second copy to find (see _ready).
+const INSTANCE_PATH := "user://running.pid"
+## Set when another copy is running: this one touches nothing and quits.
+var another_instance := false
+
+
 func _ready() -> void:
+	# One copy at a time: two would give new loops the same number (one's
+	# file written over the other's), each write its own list of loops over
+	# the other's, and the second's F8 would start or stop the first's run.
+	var other := int(FileAccess.get_file_as_string(INSTANCE_PATH).strip_edges())
+	if other > 0 and other != OS.get_process_id() and _is_this_app(other):
+		another_instance = true
+		OS.alert("Loop Automator is already running. Use that window: a second copy would write over its loops.", "Loop Automator")
+		get_tree().quit()
+		return
+	var f := FileAccess.open(INSTANCE_PATH, FileAccess.WRITE)
+	if f != null:
+		f.store_string(str(OS.get_process_id()))
+		f.close()
 	_ensure_store_dirs()
 	_load_or_init_store()
 	if loop_stack.is_empty():
 		create_loop(true)
 	elif not open_loop(active_loop_id):
 		open_loop(loop_stack[0].get("id", -1))
+
+
+## Whether process `pid` is running and is this program (the same exe name:
+## a number a crashed copy left may belong to something else by now).
+## Asked of tasklist, from System32 by its full path (OS.is_process_running
+## knows only the processes this one started).
+static func _is_this_app(pid: int) -> bool:
+	if OS.get_name() != "Windows":
+		return false
+	var tasklist := OS.get_environment("SystemRoot").path_join("System32").path_join("tasklist.exe")
+	if not FileAccess.file_exists(tasklist):
+		return false
+	var out: Array = []
+	if OS.execute(tasklist, PackedStringArray(["/FI", "PID eq %d" % pid, "/FO", "CSV", "/NH"]), out) != 0 or out.is_empty():
+		return false
+	var line := String(out[0]).strip_edges()
+	return line.to_lower().begins_with("\"%s\"," % OS.get_executable_path().get_file().to_lower())
+
+
+func _exit_tree() -> void:
+	if not another_instance and int(FileAccess.get_file_as_string(INSTANCE_PATH).strip_edges()) == OS.get_process_id():
+		DirAccess.remove_absolute(ProjectSettings.globalize_path(INSTANCE_PATH))
 
 
 # ---------------------------------------------------------------- selection

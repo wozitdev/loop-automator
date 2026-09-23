@@ -151,6 +151,11 @@ var _image_preview: AcceptDialog
 
 
 func _ready() -> void:
+	# Another copy is running (see ProjectData._ready): quitting, nothing built.
+	if ProjectData.another_instance:
+		set_process(false)
+		set_process_input(false)
+		return
 	# Closing asks first while loops have changes not saved (see _notification).
 	get_tree().set_auto_accept_quit(false)
 	_configure_window()

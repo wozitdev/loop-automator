@@ -353,24 +353,6 @@ function Types-Modifiers([string]$text) {
   }
   return $false
 }
-# Holds a key down for $ms as a keyboard does: after the repeat delay it
-# sends the key again at the repeat rate (Windows' own settings) - a held
-# Backspace deletes a character per repeat, a held arrow walks a list;
-# injected input does not repeat by itself. Abortable (see Nap).
-function Hold-Repeating([int]$vk, [int]$ext, [int]$ms) {
-  Add-Type -AssemblyName System.Windows.Forms
-  $delay = ([System.Windows.Forms.SystemInformation]::KeyboardDelay + 1) * 250
-  $every = [int](1000 / (2.5 + [System.Windows.Forms.SystemInformation]::KeyboardSpeed * 27.5 / 31))
-  if ($ms -le $delay) { Nap $ms; return }
-  Nap $delay
-  $left = $ms - $delay
-  while ($left -gt 0) {
-    Key-Event $vk $ext
-    $step = [math]::Min($every, $left)
-    Nap $step
-    $left -= $step
-  }
-}
 # Modifier letters in one order (c s a w), or n for none: a press is known
 # by them whatever order its text had them in.
 function Order-Mods([string]$mods) {
@@ -542,7 +524,12 @@ function Ghost-Start {
   [Win32In]::ShowWindow($h, 4) | Out-Null
   [System.Windows.Forms.Application]::DoEvents()
   # Now blank every system cursor so the real one is invisible while it works,
-  # keeping a copy of each so they can be put straight back afterwards.
+  # keeping a copy of each so they can be put straight back afterwards. A
+  # marker says so while they are blank: a helper killed meanwhile (the app
+  # ended from Task Manager with its helpers) cannot put them back, and the
+  # next start does (see WindowsBackend._restore_cursors_left_blank).
+  $script:ghostFlag = Join-Path (Split-Path -Parent $PSCommandPath) ('ghost-' + $PID + '.flag')
+  try { [System.IO.File]::WriteAllText($script:ghostFlag, '') } catch { }
   $cw = [Win32In]::GetSystemMetrics(13); $ch = [Win32In]::GetSystemMetrics(14)
   $bytes = [int][math]::Floor(($cw + 7) / 8) * $ch
   foreach ($id in $script:cursorIds) {
@@ -569,6 +556,7 @@ function Ghost-Stop {
     $script:cursorCopies = @{}
     if ($missed) { [Win32In]::SystemParametersInfo(0x57, 0, [IntPtr]::Zero, 0) | Out-Null }
     $script:hidden = $false
+    try { if ($script:ghostFlag -ne '' -and [System.IO.File]::Exists($script:ghostFlag)) { [System.IO.File]::Delete($script:ghostFlag) } } catch { }
   }
   if ($script:ghost -ne [IntPtr]::Zero) { [Win32In]::DestroyWindow($script:ghost) | Out-Null; $script:ghost = [IntPtr]::Zero }
   if ($script:ghostBmp -ne [IntPtr]::Zero) { [Win32In]::DeleteObject($script:ghostBmp) | Out-Null; $script:ghostBmp = [IntPtr]::Zero }
@@ -576,6 +564,12 @@ function Ghost-Stop {
 # Waits until the stopwatch reads $due ms, keeping the real cursor pinned and
 # the ghost on the user's hand meanwhile (every ~1 ms, so each display frame
 # gets the freshest position).
+# True once the app this helper serves has exited (a crash, ended from Task
+# Manager): what it is in the middle of ends as a stop would end it, rather
+# than the cursor staying pinned for the rest of a dwell with no F8 left.
+$script:appProc = $null
+$script:ghostFlag = ''
+function App-Gone { return ($null -ne $script:appProc -and $script:appProc.HasExited) }
 function Wait-Until($sw, [int]$due) {
   do {
     # A stop asks for the action to end by creating the abort file (see
@@ -583,7 +577,7 @@ function Wait-Until($sw, [int]$due) {
     # the button in place, shows the cursors again and restores the cursor
     # at once, rather than the helper being killed with all of that undone.
     $script:tick++
-    if ($script:abortFile -ne '' -and ($script:tick % 8) -eq 0 -and [System.IO.File]::Exists($script:abortFile)) { throw 'aborted' }
+    if (($script:tick % 8) -eq 0 -and (($script:abortFile -ne '' -and [System.IO.File]::Exists($script:abortFile)) -or (App-Gone))) { throw 'aborted' }
     Read-Motion
     if ($script:ghost -ne [IntPtr]::Zero) {
       Ghost-Move
@@ -598,7 +592,7 @@ function Wait-Ms([int]$ms) { Wait-Until ([System.Diagnostics.Stopwatch]::StartNe
 function Nap([int]$ms) {
   $sw = [System.Diagnostics.Stopwatch]::StartNew()
   while ($sw.ElapsedMilliseconds -lt $ms) {
-    if ($script:abortFile -ne '' -and [System.IO.File]::Exists($script:abortFile)) { throw 'aborted' }
+    if (($script:abortFile -ne '' -and [System.IO.File]::Exists($script:abortFile)) -or (App-Gone)) { throw 'aborted' }
     [System.Threading.Thread]::Sleep([math]::Max(1, [math]::Min(5, $ms - $sw.ElapsedMilliseconds)))
   }
 }
@@ -936,7 +930,7 @@ switch ($cmd) {
         $cur = @($vk, $ext, $shift)
         if ($shift) { Key-Event 0x10 0 }
         Key-Event $vk $ext
-        Hold-Repeating $vk $ext $hold
+        Nap $hold
         Key-Event $vk ($ext -bor 2)
         if ($shift) { Key-Event 0x10 2 }
         $cur = $null
@@ -1318,6 +1312,8 @@ public class Scan {
 [Scan]::SetProcessDPIAware() | Out-Null
 $out = [Console]::Out
 $script:abortFile = Join-Path (Split-Path -Parent $PSCommandPath) ('abort-' + $PID + '.flag')
+# serve <app pid>: see App-Gone.
+if ($a.Count -ge 2) { try { $script:appProc = [System.Diagnostics.Process]::GetProcessById([int]$a[1]) } catch { } }
 [Scan]::AbortFile = $script:abortFile
 if ([System.IO.File]::Exists($script:abortFile)) { [System.IO.File]::Delete($script:abortFile) }
 $out.WriteLine('ready'); $out.Flush()
@@ -1364,6 +1360,25 @@ func _init() -> void:
 	# Written once here so an unwritable location is known up front; every
 	# launch rewrites it again (see _spawn_args).
 	_helper_real_path = PowerShellHostT.write_script(HELPER_FILE, HELPER_SCRIPT)
+	_restore_cursors_left_blank()
+
+
+## A helper killed while its ghost cursor was up (the app ended from Task
+## Manager, helpers and all) left every system cursor blank - for the whole
+## session, not just this app's: its marker says so, and the scheme is
+## reloaded here. (A marker of a helper still running is left alone.)
+func _restore_cursors_left_blank() -> void:
+	if _helper_real_path.is_empty():
+		return
+	var dir := _helper_real_path.get_base_dir()
+	for file in DirAccess.get_files_at(dir):
+		if not (file.begins_with("ghost-") and file.ends_with(".flag")):
+			continue
+		var pid := file.trim_prefix("ghost-").trim_suffix(".flag")
+		if pid.is_valid_int() and OS.is_process_running(int(pid)):
+			continue
+		_run_once(PackedStringArray(["cursors-restore"]))
+		DirAccess.remove_absolute(dir.path_join(file))
 
 
 func backend_name() -> String:
@@ -1741,7 +1756,7 @@ func _server_ready(gen: int = -1, releasing: bool = false) -> bool:
 
 ## Starts the server for _server_ready (a worker thread, with the lock).
 func _start_server(gen: int, releasing: bool) -> bool:
-	var args := _spawn_args(PackedStringArray(["serve"]))
+	var args := _spawn_args(PackedStringArray(["serve", str(OS.get_process_id())]))
 	var started := OS.execute_with_pipe(PowerShellHostT.executable(), args, false) if not args.is_empty() else {}
 	if started.is_empty():
 		push_warning("WindowsBackend: could not start the read server; using one-shot reads.")
