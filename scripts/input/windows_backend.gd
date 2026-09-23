@@ -306,21 +306,22 @@ function Send-Keys([string]$t) {
   try { [System.Windows.Forms.SendKeys]::SendWait($t) }
   catch { Clear-SendKeys; throw }
 }
-# The modifier letters of a key command (c / s / a / w: Ctrl, Shift, Alt,
-# Win) as virtual keys, in the order they go down.
 # Whether a press this helper still holds (see 'kdown') has modifier `vk`
 # down: as one of its modifiers, as the key itself ({SHIFT}, {CTRL}...), or
 # - Shift - as a character that needs it.
 function Held-Needs([int]$vk) {
   $fam = switch ($vk) { 0x10 { @('s', 16, 160, 161) } 0x11 { @('c', 17, 162, 163) } 0x12 { @('a', 18, 164, 165) } default { @('w', 91, 92) } }
-  foreach ($id in @($script:ShiftedBy.Keys)) {
+  foreach ($id in @($script:HeldPresses.Keys)) {
     $m, $k = $id.Split('|', 2)
     if ($m -ne 'n' -and $m.Contains($fam[0])) { return $true }
     if ($k.StartsWith('v') -and $fam -contains [int]$k.Substring(1)) { return $true }
     if ($vk -eq 0x10 -and $script:HeldShift[$id]) { return $true }
   }
   return $false
-}function Mod-Vks([string]$mods) {
+}
+# The modifier letters of a key command (c / s / a / w: Ctrl, Shift, Alt,
+# Win) as virtual keys, in the order they go down.
+function Mod-Vks([string]$mods) {
   $d = @()
   if ($mods.Contains('c')) { $d += 0x11 }
   if ($mods.Contains('s')) { $d += 0x10 }
@@ -372,10 +373,12 @@ $script:pinned = $false; $script:px = 0; $script:py = 0
 $script:pathBuf = ''
 # The server's abort file (see Wait-Until): set once it is serving.
 $script:abortFile = ''; $script:tick = 0
-# Per key a 'kdown' pressed: whether it put Shift down with it (see 'kup').
-$script:ShiftedBy = @{}
-# ...and, but for the modifier keys, whether it is held under Shift (see 'kdown').
+# The presses 'kdown' holds, by "mods|key" (see Held-Needs, 'kup').
+$script:HeldPresses = @{}
+# ...and, but for the modifier keys, whether each is held under Shift (see 'kdown').
 $script:HeldShift = @{}
+# Whether a Shift down now is the helper's, put down for held characters.
+$script:OwnShift = $false
 $script:ModVks = @(0x10, 0x11, 0x12, 0x5B, 0x5C, 0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5)
 function Read-Motion {
   $p = Read-Cursor
@@ -857,7 +860,7 @@ switch ($cmd) {
       if ($null -ne $pk[1] -and $script:ModVks -notcontains $pk[1].vk) { $shifts += ($mods.Contains('s') -or [bool]$pk[1].shift) }
     }
     if (@($shifts | Select-Object -Unique).Count -gt 1) { throw 'keys held together need Shift and no Shift' }
-    $pressed = @(); $owned = @{}
+    $pressed = @(); $ownsShift = $false
     try {
       foreach ($m in (Mod-Vks $mods)) { Key-Event $m 0; $pressed += $m }
       foreach ($pk in $plan) {
@@ -866,22 +869,22 @@ switch ($cmd) {
           [Win32In]::TypeUnicode([char][int]([string]$pk[0]).Substring(1))
           continue
         }
-        # A Shift already down (another held key's, a {SHIFT} held on
-        # purpose) is not pressed again: this press does not own it.
+        # A Shift already down (the helper's own for another held key, a
+        # {SHIFT} held on purpose, the user's) is not pressed again.
         $own = $r.shift -and (([Win32In]::GetAsyncKeyState(0x10) -band 0x8000) -eq 0)
-        if ($own) { Key-Event 0x10 0; $pressed += 0x10 }
-        $owned[$pk[0]] = $own
+        if ($own) { Key-Event 0x10 0; $pressed += 0x10; $ownsShift = $true }
         Key-Event $r.vk $r.ext; $pressed += $r.vk
       }
       $pressed = @()
-      # Which presses put a Shift down, for 'kup' to let go of that one and
-      # no other (one held by a Key Down of {SHIFT}, or by the user); and
-      # which are held under Shift. Only once all of it is down: what a
-      # failure let go of again is not held.
+      # The presses held (for 'kup' to know what still needs a modifier), and
+      # which are held under Shift; and whether the helper now holds a Shift
+      # of its own for them. Only once all of it is down: what a failure let
+      # go of again is not held.
+      if ($ownsShift) { $script:OwnShift = $true }
       foreach ($pk in $plan) {
         $r = $pk[1]
         if ($null -eq $r) { continue }
-        $script:ShiftedBy["$mods|$($pk[0])"] = [bool]$owned[$pk[0]]
+        $script:HeldPresses["$mods|$($pk[0])"] = $true
         if ($script:ModVks -notcontains $r.vk) { $script:HeldShift["$mods|$($pk[0])"] = ($mods.Contains('s') -or [bool]$r.shift) }
       }
     } finally {
@@ -893,6 +896,11 @@ switch ($cmd) {
     # kup <mods|n> <keys>: lets go of what kdown pressed, keys first (last
     # down first), then the modifiers. Never refused (see Guarded): a key
     # left down would be far worse than a release landing on this app.
+    # A modifier - Shift, Ctrl, Alt, Win, as a modifier or as the key held
+    # ({SHIFT}) - stays down while another held press needs it (Held-Needs);
+    # the Shift the helper put down for characters ("A", "B") comes up with
+    # the last press that needs it, and not one it did not put down (the
+    # user's own).
     $mods = [string]$a[1]; $keys = ([string]$a[2]).Split(',')
     [array]::Reverse($keys)
     # Key by key, each on its own: one that cannot be read (a code past
@@ -900,31 +908,36 @@ switch ($cmd) {
     foreach ($k in $keys) {
       try { $r = Resolve-Key $k $mods } catch { continue }
       if ($null -eq $r) { continue }
-      Key-Event $r.vk ($r.ext -bor 2)
-      # Shift only if this press put it down: not one held by a Key Down of
-      # {SHIFT} or by the user. What this resolve says only for a press
-      # this helper did not make (a new one after a kill).
       $id = "$mods|$k"
-      $shifted = [bool]$r.shift
-      if ($script:ShiftedBy.ContainsKey($id)) { $shifted = $script:ShiftedBy[$id]; $script:ShiftedBy.Remove($id) }
-      $script:HeldShift.Remove($id)
-      # One Shift for every held key that needs it ("A", then "B"): it stays
-      # down while another does, and the next of them lets go of it.
-      if ($shifted -and (Held-Needs 0x10)) {
-        $shifted = $false
-        foreach ($other in @($script:HeldShift.Keys)) {
-          if ($script:HeldShift[$other] -and -not $other.Split('|')[0].Contains('s')) { $script:ShiftedBy[$other] = $true }
-        }
+      $known = $script:HeldPresses.ContainsKey($id)
+      $script:HeldPresses.Remove($id); $script:HeldShift.Remove($id)
+      $fam = switch ($r.vk) { { $_ -in 16, 160, 161 } { 0x10 } { $_ -in 17, 162, 163 } { 0x11 } { $_ -in 18, 164, 165 } { 0x12 } { $_ -in 91, 92 } { 0x5B } default { 0 } }
+      if ($fam -ne 0 -and (Held-Needs $fam)) {
+        # A modifier key held another press still needs: kept, and a Shift
+        # kept so is the helper's to let go of with the last of them.
+        if ($fam -eq 0x10) { $script:OwnShift = $true }
+        continue
       }
-      if ($shifted) { Key-Event 0x10 2 }
+      Key-Event $r.vk ($r.ext -bor 2)
+      if ($fam -eq 0x10) { $script:OwnShift = $false; continue }
+      # (A press this helper did not make - a new one after a kill - by
+      # what the layout says it needed.)
+      if (($script:OwnShift -or (-not $known -and $r.shift)) -and -not (Held-Needs 0x10)) {
+        Key-Event 0x10 2
+        $script:OwnShift = $false
+      }
     }
-    # A modifier another held press still has down ("^a" held, then "^b"
-    # held and let go; {CTRL} held on purpose) stays down.
     $down = @(Mod-Vks $mods)
     [array]::Reverse($down)
-    foreach ($m in $down) { if (-not (Held-Needs $m)) { Key-Event $m 2 } }
-  }
-  'kupall' {
+    foreach ($m in $down) {
+      if (Held-Needs $m) {
+        if ($m -eq 0x10) { $script:OwnShift = $true }
+      } else {
+        Key-Event $m 2
+        if ($m -eq 0x10) { $script:OwnShift = $false }
+      }
+    }
+  }  'kupall' {
     # Lets go of every key that is down (not the mouse buttons): the
     # one-shot form of a stop's kup, whose key list would say on a command
     # line what a Key Down typed.
@@ -937,7 +950,7 @@ switch ($cmd) {
         Key-Event $vk $f
       }
     }
-    $script:ShiftedBy.Clear(); $script:HeldShift.Clear()
+    $script:HeldPresses.Clear(); $script:HeldShift.Clear(); $script:OwnShift = $false
   }
   'cursor' {
     # Where the real cursor is right now, as "x,y" (Capture actions).

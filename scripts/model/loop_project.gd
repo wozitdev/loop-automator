@@ -28,10 +28,11 @@ var loop_delay_ms_max: int = 250
 ## a pass: the toolbar's "~Delay ms" checkbox.
 var delay_after_each_action: bool = false
 var layers: Array[LoopLayerT] = []
-## Not saved: read from a file older than version 3 on a desktop whose two
-## ways of counting differ (a screen left of or above the primary), so its
-## points may be off by that much - which of them, the file cannot tell
-## (recorded ones were Windows', picked ones Godot's). The app says so.
+## Read from a file older than version 3 on a desktop whose two ways of
+## counting differ (a screen left of or above the primary), so its points may
+## be off by that much - which of them, the file cannot tell (recorded ones
+## were Windows', picked ones Godot's). Kept in the file until a Live run is
+## confirmed with it (see main), so no save, export or copy drops it.
 var points_unsure := Vector2i.ZERO
 
 
@@ -52,7 +53,7 @@ func to_dict() -> Dictionary:
 		"loop_delay_ms_max": loop_delay_ms_max,
 		"delay_after_each_action": delay_after_each_action,
 		"layers": arr,
-	}
+	}.merged({} if points_unsure == Vector2i.ZERO else {"points_unsure": [points_unsure.x, points_unsure.y]})
 
 
 static func from_dict(d: Dictionary) -> Self:
@@ -78,6 +79,10 @@ static func from_dict(d: Dictionary) -> Self:
 			p.layers[i].name = "Layer %d" % (i + 1)
 	if LoopActionT.read_int(d, "version", 1) < 3:
 		p.points_unsure = DisplayServer.screen_get_position(DisplayServer.get_primary_screen())
+	else:
+		var off: Variant = d.get("points_unsure", [])
+		if typeof(off) == TYPE_ARRAY and (off as Array).size() == 2 and typeof(off[0]) in [TYPE_INT, TYPE_FLOAT] and typeof(off[1]) in [TYPE_INT, TYPE_FLOAT]:
+			p.points_unsure = Vector2i(clampi(int(off[0]), -100000, 100000), clampi(int(off[1]), -100000, 100000))
 	if LoopActionT.read_int(d, "version", 1) < 2:
 		# "$" used to be a plain character; it is the Win modifier now.
 		for layer in p.layers:

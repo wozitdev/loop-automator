@@ -162,6 +162,7 @@ func _ready() -> void:
 	_create_overlay()
 	_refresh_edit_lock()
 	_show_splash()
+	_warn_points_unsure.call_deferred()
 
 
 ## How long the splash stays before it fades, and how long the fade takes.
@@ -584,11 +585,13 @@ func _build_action_panel() -> Control:
 	action_list.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	action_list.allow_reselect = true
 	action_list.item_selected.connect(func(i): ProjectData.set_selected_action(i))
-	# A Key row is fitted to the list's width (see _row_text): again when that changes.
+	# Rows are fitted to the list's width (see _row_text): again when that changes.
 	action_list.resized.connect(func():
-		if not _refit_queued:
+		# Once the width has settled (a drag of the window's edge, a panel
+		# that flickers a few pixels and back): a list of tens of thousands.
+		if not _refit_queued and int(action_list.size.x) != _fit_width:
 			_refit_queued = true
-			_refit_key_rows.call_deferred())
+			get_tree().create_timer(0.25).timeout.connect(_refit_rows))
 	vb.add_child(action_list)
 
 	var btns := HBoxContainer.new()
@@ -736,9 +739,17 @@ func _on_project_replaced() -> void:
 	_rebuild_editor()
 	_refresh_overlay_label()
 	_refresh_loop_stack_ui()
-	var off: Vector2i = ProjectData.project.points_unsure
-	if off != Vector2i.ZERO:
-		status_label.text = "This loop is from an older version, which counted points from the main screen: some of its points may be off by (%d, %d) - check them on the overlay before a Live run." % [off.x, off.y]
+	_warn_points_unsure(false)
+
+
+## The loop's points may be off (see LoopProject.points_unsure): said on
+## the status line, after whatever it says already.
+func _warn_points_unsure(after: bool = true) -> void:
+	var off: Vector2i = ProjectData.project.points_unsure if ProjectData.project != null else Vector2i.ZERO
+	if off == Vector2i.ZERO:
+		return
+	var warn := "This loop is from an older version, which counted points from the main screen: some of its points may be off by (%d, %d) - check them on the overlay before a Live run." % [off.x, off.y]
+	status_label.text = warn if status_label.text.is_empty() or not after else status_label.text + " " + warn
 
 
 ## The tint behind the step (and the layer) a run is on. The selection is
@@ -842,42 +853,118 @@ func _refresh_actions() -> void:
 var _shown_layer: LoopLayerT = null
 
 
-## Action `a`'s row (number `i`) in the list. A Key's text is fitted to the
-## list's width, measured: the list would otherwise cut the row at its right
-## edge - a text's end, what it types last (Win+R, Enter), gone behind an
-## ellipsis that reads like the rest of a long harmless text. Too wide, it
-## is cut in the middle instead, both ends kept.
+## Action `a`'s row (number `i`) in the list, fitted to the list's width,
+## measured: the list would otherwise cut it at its right edge - a Key
+## text's end, what it types last (Win+R, Enter), or a detect's "no skip",
+## gone behind an ellipsis that reads like the rest of a long harmless row.
+## Too wide, it is cut in the middle of what it describes, both ends kept
+## (see _fit_row).
 func _row_text(i: int, a: LoopActionT) -> String:
 	var row := "%d. %s" % [i + 1, a.describe()]
-	if a.type != LoopActionT.Type.KEY:
-		return row
+	var width := int(action_list.size.x)
+	if width != _fit_width:
+		_fit_width = width
+		_fit_cache.clear()
+	if _fit_cache.has(row):
+		return _fit_cache[row]
+	var fitted := _fit_row(row, a.type == LoopActionT.Type.KEY)
+	if _fit_cache.size() > FIT_CACHE_MAX:
+		_fit_cache.clear()
+	_fit_cache[row] = fitted
+	return fitted
+
+
+## Rows fitted at `_fit_width` (the list's width they were fitted to).
+var _fit_cache := {}
+var _fit_width := -1
+## The widest plain character's width (see _fit_row), measured once.
+var _fit_w_px := 0.0
+const FIT_CACHE_MAX := 100000
+
+
+## `row` as it is if it fits the list, else cut in the middle: its number
+## and kind ("12. Key hold 500 ms: \"") and a Key's closing quote are never
+## cut, and what is between gets as much of its start and its end as fits,
+## by width - never through a {…} key or a modifier and the key it is on.
+func _fit_row(row: String, key: bool) -> String:
 	var font := action_list.get_theme_font("font")
 	var font_size := action_list.get_theme_font_size("font_size")
 	# The icon, the margins and the scroll bar take some of the width.
 	var max_px := action_list.size.x - 64.0
-	if font == null or max_px <= 0.0 or font.get_string_size(row, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x <= max_px:
+	if font == null or max_px <= 0.0:
 		return row
-	var lo := 1
-	var hi := row.length() / 2
+	if _plain_ascii == null:
+		_plain_ascii = RegEx.create_from_string("\\A[\\x{20}-\\x{7E}]*\\z")
+	# Most rows are short and plain: no need to measure what cannot be wide.
+	if _fit_w_px <= 0.0:
+		_fit_w_px = font.get_string_size("W", HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x
+	if row.length() * _fit_w_px <= max_px and _plain_ascii.search(row) != null:
+		return row
+	if font.get_string_size(row, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x <= max_px:
+		return row
+	var head := row.substr(0, row.find(". ") + 2)
+	var body := row.substr(head.length())
+	var tail := ""
+	if key and row.ends_with("\"") and row.find("\"") < row.length() - 1:
+		head = row.left(row.find("\"") + 1)
+		body = row.substr(head.length(), row.length() - head.length() - 1)
+		tail = "\""
+	# Direction marks either side: a right-to-left letter the cut leaves
+	# last would otherwise take the joiner - and what follows it - its way.
+	var joiner := char(0x200E) + " … " + char(0x200E)
+	var room := max_px - font.get_string_size(head + joiner + tail, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x
+	var start := _fitting(body, room / 2.0, false, font, font_size)
+	var end := _fitting(body, room - font.get_string_size(start, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x, true, font, font_size)
+	if key:
+		# Not through a key: "…TER}" is no key at all. The end, what is typed
+		# last, gets the whole of the key it starts in if that fits in all the
+		# room there is, the start making way; else it starts after the key.
+		var close := end.find("}")
+		if close >= 0 and (end.find("{") < 0 or end.find("{") > close):
+			var group := body.rfind("{", body.length() - end.length())
+			var whole := body.substr(group) if group >= 0 else ""
+			if group >= 0 and font.get_string_size(whole, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x <= room:
+				end = whole
+				start = _fitting(body.left(group), room - font.get_string_size(end, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x, false, font, font_size)
+			else:
+				end = end.substr(close + 1)
+		# ...and the start ends before one: "{ENT" … is no key, "^" … no Ctrl+.
+		var open := start.rfind("{")
+		if open >= 0 and start.find("}", open) < 0:
+			start = start.left(open)
+		while not start.is_empty() and start.right(1) in ["^", "+", "%", "$"]:
+			start = start.left(start.length() - 1)
+	return head + start + joiner + end + tail
+static var _plain_ascii: RegEx = null
+
+
+## As much of `text` as is at most `px` wide, from its start (or its end).
+func _fitting(text: String, px: float, from_end: bool, font: Font, font_size: int) -> String:
+	var lo := 0
+	var hi := text.length()
 	while lo < hi:
 		var mid := (lo + hi + 1) / 2
-		if font.get_string_size(row.left(mid) + " … " + row.right(mid), HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x <= max_px:
+		var part := text.right(mid) if from_end else text.left(mid)
+		if font.get_string_size(part, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x <= px:
 			lo = mid
 		else:
 			hi = mid - 1
-	return row.left(lo) + " … " + row.right(lo)
+	return text.right(lo) if from_end else text.left(lo)
 
 
-var _refit_queued := false
-func _refit_key_rows() -> void:
+## The list's rows again when its width has changed (a height change, or a
+## width back to what the rows were fitted to, changes nothing).
+func _refit_rows() -> void:
 	_refit_queued = false
+	if int(action_list.size.x) == _fit_width:
+		return
 	var l := ProjectData.active_layer()
 	if l == null or l != _shown_layer or l.actions.size() != action_list.item_count:
 		return
 	for i in l.actions.size():
-		var a: LoopActionT = l.actions[i]
-		if a.type == LoopActionT.Type.KEY:
-			action_list.set_item_text(i, _row_text(i, a))
+		action_list.set_item_text(i, _row_text(i, l.actions[i]))
+
+var _refit_queued := false
 
 
 ## A layer change (a rename, a colour, Visible / Enabled / Solo - a colour
@@ -2441,6 +2528,15 @@ func _on_play_pressed() -> void:
 		status_label.text = "Not started: a pick or a screen read is still under way."
 		return
 	_commit_pending_edits()
+	# A Live run of a loop whose points may be off (see _warn_points_unsure)
+	# is asked about first; confirmed, its points count as checked.
+	if not Playback.is_running and Playback.backend != null and Playback.backend.is_real() and ProjectData.project.points_unsure != Vector2i.ZERO:
+		var off: Vector2i = ProjectData.project.points_unsure
+		_confirm("This loop is from an older version, which counted points from the main screen. With your screens as they are, some of its points may be off by (%d, %d) - clicks landing somewhere else.\n\nRun it Live anyway? Its points will count as checked from now on." % [off.x, off.y], func():
+			ProjectData.project.points_unsure = Vector2i.ZERO
+			ProjectData.notify_layer_modified()
+			Playback.toggle(), "Run")
+		return
 	Playback.toggle()
 
 
@@ -2758,6 +2854,7 @@ func _ask_import(path: String) -> void:
 		_switch_to_safe_backend_if_needed()
 		ProjectData.import_loop(source)
 		status_label.text = "Imported %s as loop %d." % [_quoted(ProjectData.active_loop_display_name()), _active_loop_number()]
+	_warn_points_unsure()
 	_confirm(text, do_import, "Import")
 
 
