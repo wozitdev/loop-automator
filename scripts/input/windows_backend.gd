@@ -185,6 +185,21 @@ function Key-Event([int]$vk, [int]$flags) {
   $scan = [Win32In]::MapVirtualKeyW([uint32]$vk, 0) -band 0xFF
   [Win32In]::keybd_event([byte]$vk, [byte]$scan, [uint32]$flags, [IntPtr]::Zero)
 }
+# SendKeys.SendWait with nothing left over. When SendKeys refuses a text,
+# what it had parsed of it so far stays in its private queue, and the next
+# SendWait in this long-running helper - another Key, another loop - sends
+# it first (a Ctrl+A, an Alt+F4, a modifier left down): the queue is
+# emptied before every send and after a refused one.
+function Clear-SendKeys {
+  $q = [System.Windows.Forms.SendKeys].GetField('events', [Reflection.BindingFlags]'NonPublic,Static')
+  if ($null -ne $q) { $v = $q.GetValue($null); if ($null -ne $v) { $v.Clear() } }
+}
+function Send-Keys([string]$t) {
+  Add-Type -AssemblyName System.Windows.Forms
+  Clear-SendKeys
+  try { [System.Windows.Forms.SendKeys]::SendWait($t) }
+  catch { Clear-SendKeys; throw }
+}
 # The modifier letters of a key command (c / s / a / w: Ctrl, Shift, Alt,
 # Win) as virtual keys, in the order they go down.
 function Mod-Vks([string]$mods) {
@@ -539,7 +554,7 @@ switch ($cmd) {
     # refused whole, nothing typed. Its message quotes what it did not
     # like ('Keyword \"PASSWORD\" is not valid.') and the answer ends up in
     # Loop Automator's log, so the quoted part is left out of it.
-    try { [System.Windows.Forms.SendKeys]::SendWait($text) }
+    try { Send-Keys $text }
     catch {
       $why = $_.Exception.Message
       if ($null -ne $_.Exception.InnerException) { $why = $_.Exception.InnerException.Message }
@@ -575,7 +590,7 @@ switch ($cmd) {
           if ($scan -eq -1 -or ((($scan -shr 8) -band 6) -ne 0)) {
             Add-Type -AssemblyName System.Windows.Forms
             $t = [string]$ch; if ('+^%~(){}[]'.Contains($t)) { $t = '{' + $t + '}' }
-            [System.Windows.Forms.SendKeys]::SendWait($t)
+            Send-Keys $t
             if ($i -lt $keys.Count - 1) { [System.Threading.Thread]::Sleep($gap) }
             continue
           }
@@ -615,7 +630,7 @@ switch ($cmd) {
         if ($null -eq $r) {
           Add-Type -AssemblyName System.Windows.Forms
           $t = [string][char][int]([string]$pk[0]).Substring(1); if ('+^%~(){}[]'.Contains($t)) { $t = '{' + $t + '}' }
-          [System.Windows.Forms.SendKeys]::SendWait($t)
+          Send-Keys $t
           continue
         }
         if ($r.shift) { Key-Event 0x10 0; $pressed += 0x10 }

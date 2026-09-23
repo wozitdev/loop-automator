@@ -246,7 +246,7 @@ static func plain_text(raw: String, max_chars: int) -> String:
 		# C0 / C1 control characters, line / paragraph separators, bidi marks
 		# and overrides. One RegEx pass: a file of thousands of 8K texts is
 		# read, not stepped through a character at a time.
-		_not_plain = RegEx.create_from_string("[\\x{0}-\\x{1F}\\x{7F}-\\x{9F}\\x{2028}\\x{2029}\\x{200E}\\x{200F}\\x{202A}-\\x{202E}\\x{2066}-\\x{2069}]")
+		_not_plain = RegEx.create_from_string("[\\x{0}-\\x{1F}\\x{7F}-\\x{9F}\\x{2028}\\x{2029}\\x{061C}\\x{200E}\\x{200F}\\x{202A}-\\x{202E}\\x{2066}-\\x{2069}]")
 	return _not_plain.sub(raw.left(max_chars * 2), "", true).left(max_chars)
 static var _not_plain: RegEx = null
 

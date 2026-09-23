@@ -863,6 +863,9 @@ const KEY_TRAIL_MAX_MS := 60
 ## A group "(abc…)" longer than this is one helper call too long to stop;
 ## SendKeys sends it instead.
 const KEY_GROUP_MAX := 32
+## ~Keys: a group's keys go to the helper this many to a command (about a
+## second at the slowest), so a stop lands within one.
+const KEY_PACED_GROUP := 4
 
 
 ## How long a key SendKeys cannot send (see KeyStrokes.EXTRA) is held when
@@ -977,11 +980,21 @@ func _type_paced(action: LoopActionT) -> void:
 			if whole:
 				await _off_thread(b.send_keys.bind(stroke))   # SendKeys sends it as it is
 			else:
-				var lead := randi_range(KEY_LEAD_MIN_MS, KEY_LEAD_MAX_MS)
-				var hold := randi_range(KEY_HOLD_MIN_MS, KEY_HOLD_MAX_MS)
-				var gap := randi_range(KEY_PAUSE_MIN_MS, KEY_PAUSE_MAX_MS)
-				var trail := randi_range(KEY_TRAIL_MIN_MS, KEY_TRAIL_MAX_MS)
-				await _off_thread(b.hold_keys.bind(parsed["mods"], parsed["keys"], lead, hold, gap, trail))
+				# A group goes KEY_PACED_GROUP keys to a command: each key is held
+				# and paced here, so a whole group in one would keep pressing
+				# (its modifiers down) for seconds after a stop.
+				var keys: PackedStringArray = parsed["keys"]
+				for at in range(0, keys.size(), KEY_PACED_GROUP):
+					if at > 0 and (not is_running or gen != _generation):
+						return
+					var lead := randi_range(KEY_LEAD_MIN_MS, KEY_LEAD_MAX_MS)
+					var hold := randi_range(KEY_HOLD_MIN_MS, KEY_HOLD_MAX_MS)
+					var gap := randi_range(KEY_PAUSE_MIN_MS, KEY_PAUSE_MAX_MS)
+					var trail := randi_range(KEY_TRAIL_MIN_MS, KEY_TRAIL_MAX_MS)
+					await _off_thread(b.hold_keys.bind(parsed["mods"], keys.slice(at, at + KEY_PACED_GROUP), lead, hold, gap, trail))
+					if not _typed_on(action, b):
+						return
+				continue
 			if not _typed_on(action, b):
 				return
 

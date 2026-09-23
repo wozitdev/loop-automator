@@ -1138,6 +1138,9 @@ func _add_keys_field(a: LoopActionT) -> void:
 	var le := LineEdit.new()
 	le.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	le.max_length = LoopActionT.KEYS_MAX_CHARS
+	# Left to right whatever it holds: SendKeys text is read in the order it
+	# is typed, and a right-to-left run would show "%{F4}" as "{F4}%".
+	le.text_direction = Control.TEXT_DIRECTION_LTR
 	le.text = a.keys
 	le.placeholder_text = "e.g. abc, {ENTER}, ^c"
 	le.text_changed.connect(func(t: String):
