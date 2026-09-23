@@ -782,6 +782,8 @@ func _ensure_store_dirs() -> void:
 ## Set when the loop list on disk could not be read, nor kept aside: it is
 ## not written over this session (see _load_or_init_store).
 var _store_index_unreadable := false
+## What the app should say about the loop list at start-up, "" if nothing.
+var store_notice := ""
 
 
 func _load_or_init_store() -> void:
@@ -799,6 +801,7 @@ func _load_or_init_store() -> void:
 		# next time. The loops' own files are untouched either way.
 		push_warning("ProjectData: the loop list could not be opened (error %d); it is left as it is." % FileAccess.get_open_error())
 		_store_index_unreadable = true
+		store_notice = "The list of loops could not be opened (another program has it?): loops made or imported now are saved, but will not be listed after a restart - close that program and restart Loop Automator."
 		loop_stack = []
 		active_loop_id = -1
 		_next_loop_id = 1
@@ -812,9 +815,11 @@ func _load_or_init_store() -> void:
 		var aside := "%s.broken-%d" % [STORE_INDEX_PATH, int(Time.get_unix_time_from_system())]
 		if DirAccess.rename_absolute(ProjectSettings.globalize_path(STORE_INDEX_PATH), ProjectSettings.globalize_path(aside)) == OK:
 			push_warning("ProjectData: the loop list was not readable; kept as %s." % aside.get_file())
+			store_notice = "The list of loops was damaged and has been set aside as %s; your loop files are still in the loops folder - bring them back with Import." % aside.get_file()
 		else:
 			push_warning("ProjectData: the loop list was not readable, and could not be kept aside; it is left as it is.")
 			_store_index_unreadable = true
+		store_notice = "The list of loops could not be opened (another program has it?): loops made or imported now are saved, but will not be listed after a restart - close that program and restart Loop Automator."
 		loop_stack = []
 		active_loop_id = -1
 		_next_loop_id = 1

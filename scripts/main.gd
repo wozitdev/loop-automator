@@ -164,6 +164,8 @@ func _ready() -> void:
 	_refresh_edit_lock()
 	_show_splash()
 	_warn_points_unsure.call_deferred()
+	if not ProjectData.store_notice.is_empty():
+		(func(): status_label.text = ProjectData.store_notice).call_deferred()
 
 
 ## How long the splash stays before it fades, and how long the fade takes.
@@ -873,7 +875,7 @@ func _row_text(i: int, a: LoopActionT) -> String:
 	if not _fit_cache.has(key):
 		if _fit_cache.size() > FIT_CACHE_MAX:
 			_fit_cache.clear()
-		_fit_cache[key] = _fit_described(described, room, a.type == LoopActionT.Type.KEY)
+		_fit_cache[key] = _fit_described(described, room, a)
 	return number + _fit_cache[key]
 
 
@@ -904,19 +906,25 @@ func _px(text: String) -> float:
 ## (KeyStrokes.split, what typing goes by: "$r" is never an "r", "{ENTER}"
 ## never "TER}"); anything else between characters. As much of the start
 ## and of the end as fits, by width.
-func _fit_described(described: String, room: float, key: bool) -> String:
+func _fit_described(described: String, room: float, a: LoopActionT) -> String:
+	var key := a.type == LoopActionT.Type.KEY
 	var head := ""
-	var body := described
 	var tail := ""
+	var pieces := PackedStringArray()
 	if key and described.ends_with("\"") and described.find("\"") < described.length() - 1:
 		head = described.left(described.find("\"") + 1)
-		body = described.substr(head.length(), described.length() - head.length() - 1)
 		tail = "\""
-	var pieces := PackedStringArray()
-	if key:
-		pieces = KeyStrokesT.split(body)
+		# The text before its direction marks (they would read as keys), a
+		# cut describe made kept as one piece between its two ends: neither
+		# end is split again across it.
+		var parts := a.described_key_parts()
+		for i in parts.size():
+			if i > 0:
+				pieces.append(" … ")
+			pieces.append_array(KeyStrokesT.split(parts[i]))
 	else:
-		for c in body:
+		key = false
+		for c in described:
 			pieces.append(c)
 	var widths := PackedFloat32Array()
 	var total := _px(head) + _px(tail)
@@ -930,32 +938,78 @@ func _fit_described(described: String, room: float, key: bool) -> String:
 	var joiner := char(0x200E) + " … " + char(0x200E)
 	var left := room - _px(head) - _px(tail) - _px(joiner)
 	var n := pieces.size()
-	# A keystroke from each end in turn, while one fits: neither end is
-	# left out for the other's sake (a wide "{ENTER}" last, a wide start).
+	# A keystroke at either end wider than half the room (a long group) is
+	# shown squeezed - its start, where its modifiers are, and its end, what
+	# it types last - rather than left out, which would hide a modifier or
+	# the whole end; that end then takes nothing more.
 	var used := 0.0
-	var first := 0
-	var last := n
+	var lo := 0
+	var hi := n
+	var start := ""
+	var end := ""
+	var start_done := false
+	var end_done := false
+	if n > 0 and widths[0] > left / 2.0 and (widths[0] > left or pieces[0].length() > SQUEEZE_CHARS):
+		start = _squeezed(pieces[0], left / 2.0)
+		used += _px(start)
+		lo = 1
+		start_done = true
+	if hi > lo and widths[hi - 1] > left / 2.0 and (widths[hi - 1] > left or pieces[hi - 1].length() > SQUEEZE_CHARS):
+		end = _squeezed(pieces[hi - 1], left / 2.0)
+		used += _px(end)
+		hi -= 1
+		end_done = true
+	# Then a keystroke from each end in turn, while one fits: neither end is
+	# left out for the other's sake (a wide "{ENTER}" last, a wide start).
+	var first := lo
+	var last := hi
 	var grew := true
 	while grew and first < last:
 		grew = false
-		if used + widths[first] <= left:
+		if not start_done and used + widths[first] <= left:
 			used += widths[first]
 			first += 1
 			grew = true
-		if first < last and used + widths[last - 1] <= left:
+		if not end_done and first < last and used + widths[last - 1] <= left:
 			used += widths[last - 1]
 			last -= 1
 			grew = true
-	var start := "".join(pieces.slice(0, first))
-	var end := "".join(pieces.slice(last))
-	# A keystroke wider than the room left (a long group) is shown by its
-	# start, where its modifiers are, rather than not at all.
-	if last > first and left - used > _px("…"):
-		var part := _part_fitting(pieces[first], left - used - _px("…"))
-		if not part.is_empty():
-			start += part + "…"
+	if not start_done:
+		start = "".join(pieces.slice(0, first))
+	if not end_done:
+		end = "".join(pieces.slice(last))
+	if key:
+		start = LoopActionT.ltr_marked(start)
+		end = LoopActionT.ltr_marked(end)
 	return head + start + joiner + end + tail
 
+
+## A keystroke this long (a group) is squeezed rather than kept whole at a
+## row's end when it takes more than half the room; a key's name ("{ENTER}")
+## only when it does not fit at all.
+const SQUEEZE_CHARS := 12
+
+
+## `text` in at most `px`: as much of its start and of its end as fits,
+## "…" between (all of it if it fits).
+func _squeezed(text: String, px: float) -> String:
+	if _px(text) <= px:
+		return text
+	var half := maxf(0.0, (px - _px("…")) / 2.0)
+	return _part_fitting(text, half) + "…" + _end_fitting(text, half)
+
+
+## As much of `text`'s end as is at most `px` wide.
+func _end_fitting(text: String, px: float) -> String:
+	var lo := 0
+	var hi := text.length()
+	while lo < hi:
+		var mid := (lo + hi + 1) / 2
+		if _px(text.right(mid)) <= px:
+			lo = mid
+		else:
+			hi = mid - 1
+	return text.right(lo)
 
 ## As much of `text`'s start as is at most `px` wide.
 func _part_fitting(text: String, px: float) -> String:
@@ -2449,23 +2503,27 @@ func _load_setting(key: String, default: Variant) -> Variant:
 
 ## The settings file, read. Godot's format can say Object(…) and Resource(…),
 ## which reading alone builds - a script's code run, from a file anyone may
-## drop in the data folder: such a file is not read (the defaults stand, and
-## the next change of a setting writes a clean one).
+## drop in the data folder - and its parser skips comments and control
+## characters where a check for those words would not look. So the file is
+## read only if every line is one this app writes: "[ui]", or a name set to
+## true, false, a whole number or a Vector2i. Anything else, and it is not
+## read at all (the defaults stand; the next change of a setting writes a
+## clean one).
 func _settings() -> ConfigFile:
 	var cfg := ConfigFile.new()
 	var text := FileAccess.get_file_as_string(SETTINGS_PATH)
 	if text.is_empty():
 		return cfg
-	if _unsafe_setting == null:
-		_unsafe_setting = RegEx.create_from_string("(?i)\\b(Object|Resource|SubResource|ExtResource|Callable|Signal)\\s*\\(")
-	if _unsafe_setting.search(text) != null:
-		push_warning("Settings file not read: it holds more than plain values.")
-		return cfg
+	if _plain_setting == null:
+		_plain_setting = RegEx.create_from_string("^[ \\t]*(\\[ui\\]|[A-Za-z0-9_]+[ \\t]*=[ \\t]*(true|false|-?[0-9]{1,10}|Vector2i\\([ \\t]*-?[0-9]{1,10}[ \\t]*,[ \\t]*-?[0-9]{1,10}[ \\t]*\\)))?[ \\t]*$")
+	for line in text.replace("\r\n", "\n").split("\n"):
+		if _plain_setting.search(line) == null:
+			push_warning("Settings file not read: it holds more than plain values.")
+			return cfg
 	if cfg.parse(text) != OK:
 		return ConfigFile.new()
 	return cfg
-static var _unsafe_setting: RegEx = null
-
+static var _plain_setting: RegEx = null
 
 ## A yes / no setting. The file is the user's to edit, so a value that is
 ## not one (a word, a number) is the default, not a type error at start-up.

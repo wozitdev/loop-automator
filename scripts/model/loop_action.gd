@@ -671,7 +671,12 @@ func describe() -> String:
 					var ends := stroke_ends(keys, DESCRIBE_KEYS_CHARS / 2, DESCRIBE_KEYS_CHARS / 2 - 3)
 					var head: String = ends[0]
 					var tail: String = ends[1]
-					shown = plain_text(_narrow(head), DESCRIBE_KEYS_CHARS) + " … " + plain_text(_narrow(tail), DESCRIBE_KEYS_CHARS)
+					head = plain_text(_narrow(head), DESCRIBE_KEYS_CHARS)
+					tail = plain_text(_narrow(tail), DESCRIBE_KEYS_CHARS)
+					shown = head + " … " + tail
+					_described_parts = [head, tail]
+				else:
+					_described_parts = [shown]
 				_described_keys = keys
 				_described_shown = ltr_marked(shown)
 			return "Key%s: \"%s\"" % [" " + press if not press.is_empty() else "", _described_shown]
@@ -701,6 +706,15 @@ func describe() -> String:
 	return "Action"
 
 
+## A Key's text as its list row shows it (see describe), before the marks
+## ltr_marked adds: [all of it], or [its start, its end] when describe cut
+## it between them. For fitting the row further (main's _fit_described),
+## which cuts it between keystrokes - the marks would read as keys there.
+func described_key_parts() -> Array:
+	describe()
+	return _described_parts
+var _described_parts: Array = []
+
 ## `text`'s start and end, at most about `head_chars` and `tail_chars`
 ## long, cut only between keystrokes (KeyStrokes.split, what typing goes
 ## by): "$r" is never an "r", "{ENTER}" never "TER}". A keystroke longer than
@@ -723,7 +737,9 @@ static func stroke_ends(text: String, head_chars: int, tail_chars: int) -> Array
 		tail = strokes[last - 1] + tail
 		last -= 1
 	if tail.is_empty() and last > first:
-		tail = strokes[last - 1].left(tail_chars) + "…"
+		# Its start and its end: what it types last as well.
+		var one := strokes[last - 1]
+		tail = one.left(tail_chars / 2) + "…" + one.right(tail_chars - tail_chars / 2 - 1)
 	elif tail.is_empty() and strokes.size() == 1:
 		tail = "…" + strokes[0].right(tail_chars - 1)
 	return [head, tail]

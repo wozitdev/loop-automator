@@ -321,6 +321,29 @@ function Held-Needs([int]$vk) {
   }
   return $false
 }
+# Whether a press this helper holds keeps a modifier down (see Held-Needs),
+# or its own Shift for a held character.
+function Holds-Modifier {
+  if ($script:OwnShift) { return $true }
+  foreach ($vk in 0x10, 0x11, 0x12, 0x5B, 0x5C) { if (Held-Needs $vk) { return $true } }
+  return $false
+}
+# A mouse button argument as the one it presses ('1' right, '2' middle,
+# anything else left - see Down-Flag).
+function Button-Id([string]$btn) { if ($btn -eq '1' -or $btn -eq '2') { $btn } else { '0' } }
+# Lets go of everything this helper holds down itself: the presses 'kdown'
+# made (keys, then their modifiers), its own Shift, the buttons 'down' /
+# 'bdown' pressed. Not 'kupall': that would take what the user holds too.
+function Release-Own {
+  foreach ($id in @($script:HeldPresses.Keys)) {
+    $m, $k = $id.Split('|', 2)
+    try { $r = Resolve-Key $k $m; if ($null -ne $r) { Key-Event $r.vk ($r.ext -bor 2) } } catch { }
+    foreach ($v in @(Mod-Vks $m)) { Key-Event $v 2 }
+  }
+  if ($script:OwnShift) { Key-Event 0x10 2 }
+  foreach ($b in @($script:HeldButtons.Keys)) { [Win32In]::ButtonOnly((Up-Flag $b)) }
+  $script:HeldPresses.Clear(); $script:HeldShift.Clear(); $script:OwnShift = $false; $script:HeldButtons.Clear()
+}
 # The modifier letters of a key command (c / s / a / w: Ctrl, Shift, Alt,
 # Win) as virtual keys, in the order they go down.
 function Mod-Vks([string]$mods) {
@@ -381,6 +404,8 @@ $script:HeldPresses = @{}
 $script:HeldShift = @{}
 # Whether a Shift down now is the helper's, put down for held characters.
 $script:OwnShift = $false
+# The mouse buttons 'down' / 'bdown' pressed and nothing has let go of yet.
+$script:HeldButtons = @{}
 $script:ModVks = @(0x10, 0x11, 0x12, 0x5B, 0x5C, 0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5)
 function Read-Motion {
   $p = Read-Cursor
@@ -586,11 +611,13 @@ switch ($cmd) {
     $at = On-Screen ([int]$a[1]) ([int]$a[2])
     if (Guarded-Point $at[0] $at[1]) { Write-Output 'skipped'; break }
     [Win32In]::MouseAt($at[0],$at[1],(Down-Flag $a[3]))
+    $script:HeldButtons[(Button-Id $a[3])] = $true
   }
   'up' {
     $at = On-Screen ([int]$a[1]) ([int]$a[2])
     if (Guarded-Point $at[0] $at[1]) { Write-Output 'skipped'; break }
     [Win32In]::MouseAt($at[0],$at[1],(Up-Flag $a[3]))
+    $script:HeldButtons.Remove((Button-Id $a[3]))
   }
   'release' {
     # release <button>: lets go of a mouse button where the cursor is,
@@ -598,6 +625,7 @@ switch ($cmd) {
     # left pressed, so the cursor never jumps back to where it went down.
     # Never refused (see Guarded): the press was allowed where it happened.
     [Win32In]::ButtonOnly((Up-Flag $a[1]))
+    $script:HeldButtons.Remove((Button-Id $a[1]))
   }
   'tap' {
     # tap / bdown / bup <button>: a click, a press or a release where the
@@ -611,11 +639,13 @@ switch ($cmd) {
     $c = Read-Cursor
     if (Guarded-Point $c.X $c.Y) { Write-Output 'skipped'; break }
     [Win32In]::ButtonOnly((Down-Flag $a[1]))
+    $script:HeldButtons[(Button-Id $a[1])] = $true
   }
   'bup' {
     $c = Read-Cursor
     if (Guarded-Point $c.X $c.Y) { Write-Output 'skipped'; break }
     [Win32In]::ButtonOnly((Up-Flag $a[1]))
+    $script:HeldButtons.Remove((Button-Id $a[1]))
   }
   'wheel' {
     # wheel <up|down|left|right> <n> <ms> <uneven 0|1>: the wheel turns n
@@ -733,6 +763,10 @@ switch ($cmd) {
     # WindowsBackend.send_keys): one argument with no spaces or line breaks,
     # so nothing in it can ever be read as a command of its own.
     if (Guarded ([Win32In]::GetForegroundWindow())) { Write-Output 'skipped'; break }
+    # SendKeys lets go of every modifier it presses and puts Shift down for
+    # capitals itself: with a Key Down holding one (\"^\", {SHIFT}, a capital's
+    # Shift) it would take that from it, or type \"{DEL}\" as Shift+Del.
+    if (Holds-Modifier) { throw 'a Key Down holds a modifier: typing now would change or release it' }
     Add-Type -AssemblyName System.Windows.Forms
     $text = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([string]$a[1]))
     # Text SendKeys cannot read (a stray brace, an unknown {keyword}) is
@@ -773,6 +807,10 @@ switch ($cmd) {
     # $trail ms after the last the modifiers come up. A character the
     # layout has no key for is typed as itself instead (TypeUnicode).
     if (Guarded ([Win32In]::GetForegroundWindow())) { Write-Output 'skipped'; break }
+    # The Shift the helper holds for a held character (a Key Down of \"A\")
+    # would turn what is typed now into something else (\"b\" into \"B\",
+    # \"^w\" into Ctrl+Shift+W, {DEL} into Shift+Del).
+    if ($script:OwnShift) { throw 'a Key Down holds Shift for its character: typing now would type something else' }
     $mods = [string]$a[1]; $keys = ([string]$a[2]).Split(',')
     $lead = [int]$a[3]; $hold = [int]$a[4]; $gap = [int]$a[5]; $trail = [int]$a[6]
     $down = @()
@@ -822,6 +860,12 @@ switch ($cmd) {
         $ext = 0; if (($vk -ge 0x21 -and $vk -le 0x28) -or $vk -eq 0x2D -or $vk -eq 0x2E) { $ext = 1 }
         # (Nor a Shift already down, as above.)
         if ($shift -and ([Win32In]::GetAsyncKeyState(0x10) -band 0x8000) -ne 0) { $shift = $false }
+        # A modifier key a Key Down holds ({SHIFT} held, then {SHIFT} typed)
+        # is left down: pressed and let go here, it would be let go of.
+        if ($vk -in 16, 17, 18, 91, 92 -and ([Win32In]::GetAsyncKeyState($vk) -band 0x8000) -ne 0) {
+          if ($i -lt $keys.Count - 1) { Nap $gap }
+          continue
+        }
         $cur = @($vk, $ext, $shift)
         if ($shift) { Key-Event 0x10 0 }
         Key-Event $vk $ext
@@ -1178,6 +1222,10 @@ $script:abortFile = Join-Path (Split-Path -Parent $PSCommandPath) ('abort-' + $P
 [Scan]::AbortFile = $script:abortFile
 if ([System.IO.File]::Exists($script:abortFile)) { [System.IO.File]::Delete($script:abortFile) }
 $out.WriteLine('ready'); $out.Flush()
+# Whatever way the loop ends - stdin closed because Loop Automator crashed or
+# was ended from Task Manager, where no release of its own comes - what this
+# helper holds down is let go of (see Release-Own).
+try {
 while ($true) {
   $line = [Console]::In.ReadLine()
   if ($null -eq $line -or $line -eq 'quit') { break }
@@ -1205,6 +1253,7 @@ while ($true) {
   }
   $out.Flush()
 }
+} finally { Release-Own }
 """
 
 

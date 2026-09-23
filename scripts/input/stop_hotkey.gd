@@ -45,6 +45,11 @@ public class StopKey {
       Console.Out.WriteLine(\"error F8 is already registered by another program\"); Console.Out.Flush();
       return 1;
     }
+    // F8 with any of Shift, Ctrl, Alt, Win down too: a hotkey fires only on
+    // its exact modifiers, and a loop holding one (a Key Down of "^", a
+    // capital's Shift) would make plain F8 stop nothing. A combination
+    // another program owns is left to it.
+    for (uint mods = 1; mods < 16; mods++) RegisterHotKey(IntPtr.Zero, 1 + (int)mods, 0x4000 | mods, vk);
     Console.Out.WriteLine(\"ready\"); Console.Out.Flush();
     // Stdin closing (or 'quit') ends the loop: the parent is gone or done.
     Thread reader = new Thread(delegate() {
@@ -59,7 +64,7 @@ public class StopKey {
           if (m.message == 0x0312) { Console.Out.WriteLine(\"stop\"); Console.Out.Flush(); }  // WM_HOTKEY
         Thread.Sleep(10);
       }
-    } finally { UnregisterHotKey(IntPtr.Zero, 1); }
+    } finally { for (int id = 1; id <= 16; id++) UnregisterHotKey(IntPtr.Zero, id); }
     return 0;
   }
 }

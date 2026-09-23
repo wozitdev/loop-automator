@@ -192,6 +192,8 @@ public class Rec : NativeWindow {
     // there instead - a hotkey's key is not reported as input either.
     hotkey = RegisterHotKey(IntPtr.Zero, 1, 0x4000, 0x77);  // MOD_NOREPEAT, VK_F8
     if (!hotkey) Out(\"nohotkey\");
+    // ...with any modifiers down too, as the run's does (see StopHotkey).
+    else for (uint mods = 1; mods < 16; mods++) RegisterHotKey(IntPtr.Zero, 1 + (int)mods, 0x4000 | mods, 0x77);
     sw = System.Diagnostics.Stopwatch.StartNew();
     Out(\"ready\");
     // Stdin closing (or 'quit') ends the loop: the parent is gone or done.
@@ -211,7 +213,7 @@ public class Rec : NativeWindow {
         Thread.Sleep(1);
       }
     } finally {
-      if (hotkey) UnregisterHotKey(IntPtr.Zero, 1);
+      if (hotkey) for (int id = 1; id <= 16; id++) UnregisterHotKey(IntPtr.Zero, id);
       w.DestroyHandle();
       if (timer) timeEndPeriod(1);
     }
