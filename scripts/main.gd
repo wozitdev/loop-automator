@@ -25,6 +25,9 @@ var _recording: bool = false
 ## Bumped when a recording starts or stops, so a countdown still running
 ## for an earlier one does nothing.
 var _record_gen: int = 0
+## The layer (and its loop) a recording was asked about and goes into.
+var _record_layer = null
+var _record_loop_id: int = -1
 ## The Rec dot: grey until pressed, then red with a slow breath while the
 ## recording is on.
 const REC_IDLE_COLOR := Color(0.5, 0.5, 0.5)
@@ -147,6 +150,8 @@ var _image_preview: AcceptDialog
 
 
 func _ready() -> void:
+	# Closing asks first while loops have changes not saved (see _notification).
+	get_tree().set_auto_accept_quit(false)
 	_configure_window()
 	_build_ui()
 	_connect_signals()
@@ -1959,6 +1964,9 @@ func _start_recording() -> void:
 		return
 	_commit_pending_edits()
 	_close_key_capture()
+	# What was asked about is where it goes (see _stop_recording).
+	_record_layer = ProjectData.active_layer()
+	_record_loop_id = ProjectData.active_loop_id
 	_recording = true
 	_record_armed = false
 	_record_gen += 1
@@ -2024,12 +2032,22 @@ func _stop_recording(reason: String = "", from_builder: bool = false) -> void:
 		status_label.text = reason
 		return
 	var actions := RecordingT.to_actions(events)
-	var layer_name := ProjectData.active_layer().name if ProjectData.active_layer() != null else ""
 	if actions.is_empty():
 		status_label.text = "Recorded nothing."
 		return
-	ProjectData.append_actions(actions)
-	status_label.text = "Recorded %d action%s into %s." % [actions.size(), "" if actions.size() == 1 else "s", _quoted(layer_name)]
+	# Into the layer the recording was asked about, not whichever is open
+	# now (the builder stays usable with ~Edit): back to its loop and layer.
+	if ProjectData.active_loop_id != _record_loop_id:
+		ProjectData.open_loop(_record_loop_id)
+	var at: int = ProjectData.project.layers.find(_record_layer) if ProjectData.project != null and ProjectData.active_loop_id == _record_loop_id else -1
+	if at < 0:
+		status_label.text = "Recording not kept: the layer it was for is gone."
+		return
+	ProjectData.set_active_layer(at)
+	var added := ProjectData.append_actions(actions)
+	status_label.text = "Recorded %d action%s into %s." % [added, "" if added == 1 else "s", _quoted(_record_layer.name)]
+	if added < actions.size():
+		status_label.text += " The loop is full (%d actions): the rest was not kept." % ProjectData.LOOP_ACTIONS_MAX
 	if _recorder.limit_reached:
 		status_label.text += " The recording limit was reached, so it ended there."
 
@@ -2227,6 +2245,40 @@ func _process(_dt: float) -> void:
 ## Runs on the worker thread: one synchronous PowerShell pixel read.
 func _read_pixel_threaded(sampler: InputBackend, p: Vector2i) -> Color:
 	return sampler.get_pixel(p)
+
+
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_WM_CLOSE_REQUEST:
+		_on_close_requested()
+
+
+## Closing the window: edits live in memory until Save, so with any loop
+## changed and not saved the user is asked first (Cancel keeps the app open
+## to save them). A recording in progress counts too: it would be lost.
+var _quit_dialog: ConfirmationDialog = null
+func _on_close_requested() -> void:
+	if _quit_dialog != null and is_instance_valid(_quit_dialog):
+		_quit_dialog.grab_focus()
+		return
+	_commit_pending_edits()
+	var n := ProjectData.pending_loop_count()
+	if n == 0 and not _recording:
+		get_tree().quit()
+		return
+	var what := "%d loop%s ha%s changes that are not saved" % [n, "" if n == 1 else "s", "s" if n == 1 else "ve"]
+	if _recording:
+		what = "A recording is in progress" if n == 0 else what + ", and a recording is in progress"
+	_quit_dialog = ConfirmationDialog.new()
+	_quit_dialog.title = "Quit"
+	_quit_dialog.exclusive = false
+	_quit_dialog.dialog_text = "%s. Quit anyway and lose %s?" % [what, "them" if n > 1 or (n == 1 and _recording) else "it"]
+	_quit_dialog.ok_button_text = "Quit without saving"
+	_quit_dialog.confirmed.connect(func(): get_tree().quit())
+	_quit_dialog.canceled.connect(func():
+		_quit_dialog.queue_free()
+		_quit_dialog = null)
+	add_child(_quit_dialog)
+	_quit_dialog.popup_centered()
 
 
 func _exit_tree() -> void:

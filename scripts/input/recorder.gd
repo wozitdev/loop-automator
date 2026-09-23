@@ -322,16 +322,19 @@ static func parse_line(line: String) -> Dictionary:
 	if p.size() < 2 or not p[1].is_valid_int():
 		return {}
 	var t := int(p[1])
+	# The helper reports Windows' coordinates; the app works in Godot's (see
+	# WindowsBackend._origin).
+	var o := DisplayServer.screen_get_position(DisplayServer.get_primary_screen())
 	match p[0]:
 		"m":
 			if p.size() >= 4:
-				return {"kind": "m", "t": t, "x": int(p[2]), "y": int(p[3])}
+				return {"kind": "m", "t": t, "x": int(p[2]) + o.x, "y": int(p[3]) + o.y}
 		"d", "u":
 			if p.size() >= 5:
-				return {"kind": p[0], "t": t, "button": int(p[2]), "x": int(p[3]), "y": int(p[4])}
+				return {"kind": p[0], "t": t, "button": int(p[2]), "x": int(p[3]) + o.x, "y": int(p[4]) + o.y}
 		"w":
 			if p.size() >= 6:
-				return {"kind": "w", "t": t, "delta": int(p[2]), "horizontal": p[3] == "1", "x": int(p[4]), "y": int(p[5])}
+				return {"kind": "w", "t": t, "delta": int(p[2]), "horizontal": p[3] == "1", "x": int(p[4]) + o.x, "y": int(p[5]) + o.y}
 		"k":
 			if p.size() >= 5:
 				return {"kind": "k", "t": t, "vk": int(p[2]), "down": p[3] == "1", "extended": p[4] == "1"}

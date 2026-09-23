@@ -350,6 +350,9 @@ $script:pathBuf = ''
 $script:abortFile = ''; $script:tick = 0
 # Per key a 'kdown' pressed: whether it put Shift down with it (see 'kup').
 $script:ShiftedBy = @{}
+# ...and, but for the modifier keys, whether it is held under Shift (see 'kdown').
+$script:HeldShift = @{}
+$script:ModVks = @(0x10, 0x11, 0x12, 0x5B, 0x5C, 0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5)
 function Read-Motion {
   $p = Read-Cursor
   $script:ux += $p.X - $script:lx; $script:uy += $p.Y - $script:ly
@@ -819,10 +822,17 @@ switch ($cmd) {
     # turn it - and every click and key of other actions meanwhile - into
     # something else (a sprint, Shift+Del).
     $plan = @(); foreach ($k in $keys) { $plan += ,@($k, (Resolve-Key $k $mods)) }
-    # Keys held together share one Shift: "(Ab)" would hold A's Shift over
-    # b as well, and B would be what repeats. Such a group is refused.
-    $shifts = @($plan | Where-Object { $null -ne $_[1] -and $_[0].StartsWith('c') } | ForEach-Object { [bool]$_[1].shift } | Select-Object -Unique)
-    if ($shifts.Count -gt 1) { throw 'keys held together need Shift and no Shift' }
+    # Keys held together share one Shift: "(Ab)" - or a Down of "A" then
+    # one of "b", or of "A{DEL}" - would hold A's Shift over b as well (B
+    # what repeats; Shift+Del, which deletes for good). A press whose keys,
+    # with those this helper holds, would need Shift and no Shift is
+    # refused. The modifier keys themselves ({SHIFT} held on purpose) are
+    # neither.
+    $shifts = @($script:HeldShift.Values)
+    foreach ($pk in $plan) {
+      if ($null -ne $pk[1] -and $script:ModVks -notcontains $pk[1].vk) { $shifts += ($mods.Contains('s') -or [bool]$pk[1].shift) }
+    }
+    if (@($shifts | Select-Object -Unique).Count -gt 1) { throw 'keys held together need Shift and no Shift' }
     $pressed = @()
     try {
       foreach ($m in (Mod-Vks $mods)) { Key-Event $m 0; $pressed += $m }
@@ -834,11 +844,18 @@ switch ($cmd) {
         }
         if ($r.shift) { Key-Event 0x10 0; $pressed += 0x10 }
         Key-Event $r.vk $r.ext; $pressed += $r.vk
-        # Which presses put a Shift down, for 'kup' to let go of that one
-        # and no other (one held by a Key Down of {SHIFT}, or by the user).
-        $script:ShiftedBy["$mods|$($pk[0])"] = [bool]$r.shift
       }
       $pressed = @()
+      # Which presses put a Shift down, for 'kup' to let go of that one and
+      # no other (one held by a Key Down of {SHIFT}, or by the user); and
+      # which are held under Shift. Only once all of it is down: what a
+      # failure let go of again is not held.
+      foreach ($pk in $plan) {
+        $r = $pk[1]
+        if ($null -eq $r) { continue }
+        $script:ShiftedBy["$mods|$($pk[0])"] = [bool]$r.shift
+        if ($script:ModVks -notcontains $r.vk) { $script:HeldShift["$mods|$($pk[0])"] = ($mods.Contains('s') -or [bool]$r.shift) }
+      }
     } finally {
       [array]::Reverse($pressed)
       foreach ($v in $pressed) { Key-Event $v 2 }
@@ -862,6 +879,7 @@ switch ($cmd) {
       $id = "$mods|$k"
       $shifted = [bool]$r.shift
       if ($script:ShiftedBy.ContainsKey($id)) { $shifted = $script:ShiftedBy[$id]; $script:ShiftedBy.Remove($id) }
+      $script:HeldShift.Remove($id)
       if ($shifted) { Key-Event 0x10 2 }
     }
     $down = @(Mod-Vks $mods)
@@ -881,7 +899,7 @@ switch ($cmd) {
         Key-Event $vk $f
       }
     }
-    $script:ShiftedBy.Clear()
+    $script:ShiftedBy.Clear(); $script:HeldShift.Clear()
   }
   'cursor' {
     # Where the real cursor is right now, as "x,y" (Capture actions).
@@ -1742,15 +1760,45 @@ static func _parse_point(line: String, offset: int = 0) -> Vector2i:
 	return Vector2i(-1, -1)
 
 
+## Where Windows puts a point of Godot's: Godot counts from the whole
+## desktop's top-left corner, Windows from the primary screen's (a screen
+## left of or above it has negative coordinates there). Every point and rect
+## going to the helper is turned into Windows' (_win), and every one coming
+## back into Godot's (_godot); the rest of the app - picks, the overlay,
+## loops - works in Godot's.
+static func _origin() -> Vector2i:
+	return DisplayServer.screen_get_position(DisplayServer.get_primary_screen())
+
+
+static func _win(pos: Vector2i) -> Vector2i:
+	return pos - _origin()
+
+
+## A point from the helper, (-1, -1) (none) left as it is.
+static func _godot(pos: Vector2i) -> Vector2i:
+	return pos if pos == Vector2i(-1, -1) else pos + _origin()
+
+
+static func _win_path(path: PackedVector2Array) -> PackedVector2Array:
+	var o := Vector2(_origin())
+	var out := PackedVector2Array()
+	out.resize(path.size())
+	for i in path.size():
+		out[i] = path[i] - o
+	return out
+
+
 func move_to(pos: Vector2i) -> void:
 	_last_pos = pos
-	_run_sync(PackedStringArray(["move", str(pos.x), str(pos.y)]))
+	var w := _win(pos)
+	_run_sync(PackedStringArray(["move", str(w.x), str(w.y)]))
 
 
 func mouse_button(button: int, pressed: bool, pos: Vector2i) -> void:
 	_last_pos = pos
 	var verb := "down" if pressed else "up"
-	_run_sync(PackedStringArray([verb, str(pos.x), str(pos.y), str(button)]))
+	var w := _win(pos)
+	_run_sync(PackedStringArray([verb, str(w.x), str(w.y), str(button)]))
 
 
 ## A click is two commands, each guarded: the window under the point can
@@ -1801,7 +1849,7 @@ func move_path(path: PackedVector2Array, ms: int) -> void:
 	if path.is_empty():
 		return
 	_last_pos = Vector2i(path[path.size() - 1].round())
-	_run_sync(PackedStringArray(["path", MousePathT.encode(path), str(ms)]), ms + SERVER_READ_TIMEOUT_MS)
+	_run_sync(PackedStringArray(["path", MousePathT.encode(_win_path(path)), str(ms)]), ms + SERVER_READ_TIMEOUT_MS)
 
 
 func run_captured(kind: String, button: int, from: Vector2i, to: Vector2i, ms: int, ghost: bool, path: PackedVector2Array) -> Array:
@@ -1811,9 +1859,9 @@ func run_captured(kind: String, button: int, from: Vector2i, to: Vector2i, ms: i
 	var gen := scan_generation
 	var cmd := PackedStringArray([
 		"cap", kind, "1" if ghost else "0", str(button),
-		str(from.x), str(from.y), str(to.x), str(to.y), str(ms)])
+		str(_win(from).x), str(_win(from).y), str(_win(to).x), str(_win(to).y), str(ms)])
 	if path.size() > 2:
-		var arg := _path_arg(MousePathT.encode(path), gen)
+		var arg := _path_arg(MousePathT.encode(_win_path(path)), gen)
 		if arg.is_empty():
 			# The server went away while the path was on its way (a stop's
 			# interrupt): the action is not run on a fresh one.
@@ -1825,8 +1873,8 @@ func run_captured(kind: String, button: int, from: Vector2i, to: Vector2i, ms: i
 	last_cut_off = line.is_empty() and not last_skipped and not _last_error and not _last_dropped
 	if last_skipped:
 		return []
-	var saved := _parse_point(line, 0)
-	var restored := _parse_point(line, 2)
+	var saved := _godot(_parse_point(line, 0))
+	var restored := _godot(_parse_point(line, 2))
 	if saved == Vector2i(-1, -1) or restored == Vector2i(-1, -1):
 		# An empty answer is what an interrupt() leaves; anything else is a fault.
 		if not line.is_empty():
@@ -1930,14 +1978,14 @@ func press_keys(mods: String, keys: PackedStringArray, pressed: bool) -> void:
 func get_cursor_pos() -> Vector2i:
 	if _helper_real_path.is_empty():
 		return Vector2i(-1, -1)
-	var served := _parse_point(_server_read("cursor"))
+	var served := _godot(_parse_point(_server_read("cursor")))
 	if served != Vector2i(-1, -1):
 		return served
 	var first_error := ""
 	for attempt in 2:
 		var once := _run_once(PackedStringArray(["cursor"]))
 		var line: String = once["line"]
-		var pos := _parse_point(line)
+		var pos := _godot(_parse_point(line))
 		if int(once["code"]) == 0 and pos != Vector2i(-1, -1):
 			return pos
 		if attempt == 0:
@@ -1958,7 +2006,8 @@ static func _parse_rgb(line: String) -> Color:
 func get_pixel(pos: Vector2i) -> Color:
 	if _helper_real_path.is_empty():
 		return Color(0, 0, 0, 0)
-	var served := _parse_rgb(_server_read("pixel %d %d" % [pos.x, pos.y]))
+	var w := _win(pos)
+	var served := _parse_rgb(_server_read("pixel %d %d" % [w.x, w.y]))
 	if served.a > 0.0:
 		return served
 	# A read occasionally comes back empty (PowerShell start-up hiccup, or the
@@ -1966,7 +2015,7 @@ func get_pixel(pos: Vector2i) -> Color:
 	# and a failure that survives the retry is logged so it can be diagnosed.
 	var first_error := ""
 	for attempt in 2:
-		var once := _run_once(PackedStringArray(["pixel", str(pos.x), str(pos.y)]))
+		var once := _run_once(PackedStringArray(["pixel", str(w.x), str(w.y)]))
 		var line: String = once["line"]
 		var parts := line.split(",")
 		if int(once["code"]) == 0 and parts.size() >= 3:
@@ -2002,7 +2051,7 @@ func find_color(rect: Rect2i, color: Color, tolerance: int, step: int) -> Dictio
 	# Automator window is skipped (see the helper's Scan.Guarded), so a detect
 	# never triggers on the app running it; 0 (~Self on) reads everything.
 	var call := _server_call("find %d %d %d %d %d %d %d %d %d %d" % [
-		rect.position.x, rect.position.y, maxi(1, rect.size.x), maxi(1, rect.size.y),
+		_win(rect.position).x, _win(rect.position).y, maxi(1, rect.size.x), maxi(1, rect.size.y),
 		color.r8, color.g8, color.b8, tolerance, maxi(1, step), avoid_pid], SERVER_READ_TIMEOUT_MS, gen)
 	var line: String = call["line"]
 	if line.begins_with("none,"):
@@ -2010,7 +2059,7 @@ func find_color(rect: Rect2i, color: Color, tolerance: int, step: int) -> Dictio
 		if centre.a > 0.0:
 			return {"hit": Vector2i(-1, -1), "centre": centre}
 	else:
-		var hit := _parse_point(line)
+		var hit := _godot(_parse_point(line))
 		if hit != Vector2i(-1, -1):
 			return {"hit": hit, "centre": color}
 	# A served scan that got no answer (a stop ended it, or it stuck) is not
@@ -2042,7 +2091,7 @@ func find_image(rect: Rect2i, png: PackedByteArray, tolerance: int, grey: bool =
 	sha.update(png)
 	var id := sha.finish().hex_encode()
 	var cmd := "image %d %d %d %d %s %d %d %d %d %d" % [
-		rect.position.x, rect.position.y, maxi(1, rect.size.x), maxi(1, rect.size.y),
+		_win(rect.position).x, _win(rect.position).y, maxi(1, rect.size.x), maxi(1, rect.size.y),
 		id, tolerance, avoid_pid, 1 if grey else 0, mismatch, edge]
 	var call := _server_call(cmd, IMAGE_SCAN_TIMEOUT_MS, gen)
 	if not call["served"]:
@@ -2054,7 +2103,7 @@ func find_image(rect: Rect2i, png: PackedByteArray, tolerance: int, grey: bool =
 		line = String(_server_call(cmd, IMAGE_SCAN_TIMEOUT_MS, gen)["line"])
 	if line == "none":
 		return {"hit": Vector2i(-1, -1)}
-	var hit := _parse_point(line)
+	var hit := _godot(_parse_point(line))
 	if hit != Vector2i(-1, -1):
 		return {"hit": hit}
 	return {}
@@ -2080,7 +2129,7 @@ func read_rect(rect: Rect2i) -> Image:
 		return null
 	var first_error := ""
 	for attempt in 2:
-		var once := _run_once(PackedStringArray(["rect", str(rect.position.x), str(rect.position.y), str(rect.size.x), str(rect.size.y)]))
+		var once := _run_once(PackedStringArray(["rect", str(_win(rect.position).x), str(_win(rect.position).y), str(rect.size.x), str(rect.size.y)]))
 		var line: String = once["line"]
 		if int(once["code"]) == 0 and not line.is_empty():
 			var img := Image.new()

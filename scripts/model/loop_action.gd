@@ -301,12 +301,12 @@ static func plain_text(raw: String, max_chars: int) -> String:
 		# across the joiners between them.
 		_stacked = RegEx.create_from_string("((?:\\p{M}[\\x{200C}\\x{200D}]?){8})[\\p{M}\\x{200C}\\x{200D}]+")
 		# \A and \z: "$" would also match before a final line break.
-		# A combining mark on an ASCII symbol or space: it hides or changes
+		# A combining mark on an ASCII symbol or on a blank of any width: it hides or changes
 		# what the symbol looks like (a "~" struck through reads as another
 		# sign) while SendKeys reads the symbol - Enter, Ctrl, the Windows
 		# key - all the same. (A keycap's selector and enclosing mark, which
 		# follow the digit or # * through U+FE0F, are not on the symbol.)
-		_mark_on_symbol = RegEx.create_from_string("(?<=[\\x{20}-\\x{2F}\\x{3A}-\\x{40}\\x{5B}-\\x{60}\\x{7B}-\\x{7E}])(?![\\x{FE0E}\\x{FE0F}])[\\p{M}\\x{200C}\\x{200D}]+")
+		_mark_on_symbol = RegEx.create_from_string("(?<=[\\x{20}-\\x{2F}\\x{3A}-\\x{40}\\x{5B}-\\x{60}\\x{7B}-\\x{7E}\\p{Zs}\\x{2800}])(?![\\x{FE0E}\\x{FE0F}])[\\p{M}\\x{200C}\\x{200D}]+")
 		_printable_ascii = RegEx.create_from_string("\\A[\\x{20}-\\x{7E}]*\\z")
 		_joining = RegEx.create_from_string("[\\x{200C}\\x{200D}\\x{FE0E}\\x{FE0F}\\p{M}]")
 	var head := raw.left(max_chars * 2)
@@ -657,29 +657,15 @@ func describe() -> String:
 			# Worked out once per text (a list of tens of thousands is
 			# described whole on every rebuild; comparing is far cheaper).
 			if keys != _described_keys or _described_shown.is_empty():
-				# Only its two ends are worked on (see _shown_parts): a text can
-				# have thousands of runs of spaces, and a list tens of thousands
-				# of texts.
-				var head := _shown_parts(keys, DESCRIBE_KEYS_CHARS + 1)
-				var whole := "".join(head[0])
-				var shown := plain_text(whole, DESCRIBE_KEYS_CHARS)
-				if whole.length() > DESCRIBE_KEYS_CHARS:
+				# Only its two ends, each blank as a plain space (see _narrow):
+				# an ideographic or em space is four times as wide, and a few
+				# dozen would push what follows past the row's edge unseen.
+				var shown := plain_text(_narrow(keys.left(DESCRIBE_KEYS_CHARS + 1)), DESCRIBE_KEYS_CHARS)
+				if keys.length() > DESCRIBE_KEYS_CHARS:
 					# Its start and its end, both within a row: what runs last in a
-					# long text is as much a part of it as what runs first. Cut
-					# between whole counts (never "⟨12" of "⟨1234 spaces⟩"), and
-					# the end taken from past what the start shows, so no part of
-					# the text is shown twice.
-					var start := _fit_parts(head, DESCRIBE_KEYS_CHARS / 2, false)
+					# long text is as much a part of it as what runs first.
 					var keep := DESCRIBE_KEYS_CHARS / 2 - 3
-					# The end from where a run of blanks it starts in begins, so
-					# the run is counted whole.
-					var from := maxi(0, keys.length() - keep)
-					var before := _blank_tail.search(keys.left(from))
-					if before != null:
-						from = before.get_start()
-					from = maxi(from, start[1])
-					var end := _fit_parts(_shown_parts(keys.substr(from), -1), keep, true)
-					shown = plain_text(start[0], DESCRIBE_KEYS_CHARS) + " … " + plain_text(end[0], DESCRIBE_KEYS_CHARS)
+					shown = plain_text(_narrow(keys.left(DESCRIBE_KEYS_CHARS / 2)), DESCRIBE_KEYS_CHARS) + " … " + plain_text(_narrow(keys.right(keep)), DESCRIBE_KEYS_CHARS)
 				_described_keys = keys
 				_described_shown = ltr_marked(shown)
 			return "Key%s: \"%s\"" % [" " + press if not press.is_empty() else "", _described_shown]
@@ -736,85 +722,15 @@ static func ltr_marked(text: String) -> String:
 	return _rtl_letter.sub(marked, "$1" + char(0x200E), true)
 static var _rtl: RegEx = null
 static var _special: RegEx = null
-static var _blank_run: RegEx = null
-static var _blank_tail: RegEx = null
-static var _bracket: RegEx = null
+static var _blank: RegEx = null
 
 
-## Text as the action list shows it, from its start until it is at least
-## [param limit] long (all of it if -1), in parts: [the parts, where each
-## ends in `text`, whether each is whole (a count, not to be cut)]. Every
-## blank is a plain space: an ideographic or em space is four times as wide,
-## and a few dozen (in runs or between letters) would push what follows past
-## the row's edge unseen; and a run of 4 or more is its count, " ⟨N spaces⟩ "
-## (a mark on its last blank goes with it: on a plain space it would show on
-## nothing). Unless the text has an angle bracket of its own, which would make
-## a count it spells out look like one: its runs are a few plain spaces then.
-static func _shown_parts(text: String, limit: int) -> Array:
-	if _blank_run == null:
-		_blank_run = RegEx.create_from_string("([\\p{Zs}\\x{2800}]+)\\p{M}*")
-		# Tried only where a run starts: from inside one, every start would scan
-		# the rest of the run again (a long one would cost its length squared).
-		_blank_tail = RegEx.create_from_string("(?<![\\p{Zs}\\x{2800}])[\\p{Zs}\\x{2800}]+\\p{M}*\\z")
-		_bracket = RegEx.create_from_string("[\\x{27E8}\\x{27E9}\\x{2329}\\x{232A}\\x{3008}\\x{3009}\\x{27EA}\\x{27EB}\\x{29FC}\\x{29FD}]")
-	var counted := _bracket.search(text) == null
-	var parts := PackedStringArray()
-	var ends := PackedInt32Array()
-	var whole := PackedByteArray()
-	var size := 0
-	var pos := 0
-	while pos < text.length() and (limit < 0 or size < limit):
-		var m := _blank_run.search(text, pos)
-		var upto := m.get_start() if m != null else text.length()
-		if limit >= 0:
-			upto = mini(upto, pos + limit - size)
-		if upto > pos:
-			parts.append(text.substr(pos, upto - pos))
-			ends.append(upto)
-			whole.append(0)
-			size += upto - pos
-			pos = upto
-			continue
-		var run := m.get_string(1).length()
-		var shown := " ⟨%d spaces⟩ " % run if counted and run >= 4 else " ".repeat(mini(run, 3))
-		parts.append(shown)
-		ends.append(m.get_end())
-		whole.append(1)
-		size += shown.length()
-		pos = m.get_end()
-	return [parts, ends, whole]
-
-
-## About `keep` characters of `shown` (from _shown_parts), from its start or
-## (`from_end`) its end: a count is kept whole or left out, never cut. Returns
-## [the text, where in the text it was taken to (from its start) or from].
-static func _fit_parts(shown: Array, keep: int, from_end: bool) -> Array:
-	var parts: PackedStringArray = shown[0]
-	var ends: PackedInt32Array = shown[1]
-	var whole: PackedByteArray = shown[2]
-	var taken := PackedStringArray()
-	var size := 0
-	var at := 0 if not from_end else (ends[ends.size() - 1] if not ends.is_empty() else 0)
-	var order := range(parts.size())
-	if from_end:
-		order.reverse()
-	for i in order:
-		if size >= keep:
-			break
-		var part := parts[i]
-		var begin := ends[i - 1] if i > 0 else 0
-		if whole[i] == 1:
-			taken.append(part)
-			size += part.length()
-			at = begin if from_end else ends[i]
-			continue
-		var take := mini(part.length(), keep - size)
-		taken.append(part.right(take) if from_end else part.left(take))
-		size += take
-		at = ends[i] - take if from_end else begin + take
-	if from_end:
-		taken.reverse()
-	return ["".join(taken), at]
+## `text` with every blank (a space of any width, the Braille blank) a plain
+## space, for the action list.
+static func _narrow(text: String) -> String:
+	if _blank == null:
+		_blank = RegEx.create_from_string("[\\p{Zs}\\x{2800}]")
+	return _blank.sub(text, " ", true)
 
 static var _rtl_letter: RegEx = null
 

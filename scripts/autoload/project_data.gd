@@ -239,18 +239,27 @@ func add_action(type: int) -> void:
 
 
 ## Puts `actions` on the end of the active layer (a recording) and selects
-## the first of them.
-func append_actions(actions: Array) -> void:
+## the first of them. As many as the loop has room for (LOOP_ACTIONS_MAX: a
+## loop past it would save, and export, as a file no Import takes); returns
+## how many that was.
+func append_actions(actions: Array) -> int:
 	var layer := active_layer()
 	if layer == null or actions.is_empty():
-		return
+		return 0
+	var total := 0
+	for l in project.layers:
+		total += l.actions.size()
+	var room := maxi(0, LOOP_ACTIONS_MAX - total)
+	if room == 0:
+		return 0
 	var first := layer.actions.size()
-	for a in actions:
+	for a in actions.slice(0, room):
 		layer.actions.append(a)
 	selected_action_index = first
 	_mark_pending()
 	emit_signal("actions_changed", active_layer_index)
 	emit_signal("selection_changed")
+	return mini(room, actions.size())
 
 
 func remove_action(index: int) -> void:
@@ -655,6 +664,15 @@ func active_loop_is_pending() -> bool:
 	if active_loop_id < 0:
 		return false
 	return bool(_pending_by_id.get(str(active_loop_id), false))
+
+
+## How many loops of the list have changes not saved (see main's close).
+func pending_loop_count() -> int:
+	var n := 0
+	for entry in loop_stack:
+		if loop_is_pending(int(entry.get("id", -1))):
+			n += 1
+	return n
 
 
 func loop_is_pending(loop_id: int) -> bool:
