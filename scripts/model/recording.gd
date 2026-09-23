@@ -291,7 +291,9 @@ static func _stroke(vk: int, mods: String, _extended: bool, ch: int = 0) -> Stri
 	# character its code is named for.
 	if ch < 0:
 		ch = -ch
-		if ch <= 0x20:
+		# With a modifier it was a shortcut on that key, which no replay can
+		# press (the accent would be typed instead): left out, counted.
+		if ch <= 0x20 or not mods.is_empty():
 			return ""
 	if vk >= 0x41 and vk <= 0x5A:
 		key = char(vk).to_lower()

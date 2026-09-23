@@ -110,6 +110,13 @@ static func parse(stroke: String) -> Dictionary:
 	# and the import question make of it.
 	if has_repeated_modifier(stroke):
 		return {}
+	# One order whatever the text's ("+^a" is "^+a"): a Key Up finds the Key
+	# Down it lets go of by it.
+	var ordered := ""
+	for letter in "csaw":
+		if mods.contains(letter):
+			ordered += letter
+	mods = ordered
 	var rest := stroke.substr(i)
 	var keys := PackedStringArray()
 	var repeat := 1

@@ -591,6 +591,8 @@ func _execute_action(action: LoopActionT) -> int:
 			var p := action.roll_point()
 			var p2 := action.roll_point2()
 			if _off_screens(action, [p, p2]):
+				# (The cursor is not where the Drag would have left it.)
+				_cursor_unplaced = true
 				return LoopActionT.OnFail.CONTINUE
 			_set_tracker(p, true, "DRAG START")
 			backend.mouse_button(action.button, true, p)

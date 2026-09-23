@@ -353,6 +353,13 @@ function Types-Modifiers([string]$text) {
   }
   return $false
 }
+# Modifier letters in one order (c s a w), or n for none: a press is known
+# by them whatever order its text had them in.
+function Order-Mods([string]$mods) {
+  $o = ''
+  foreach ($c in 'c', 's', 'a', 'w') { if ($mods.Contains($c)) { $o += $c } }
+  if ($o -eq '') { 'n' } else { $o }
+}
 # Whether a press this helper holds keeps a modifier down (see Held-Needs),
 # or its own Shift for a held character.
 function Holds-Modifier {
@@ -369,7 +376,9 @@ function Button-Id([string]$btn) { if ($btn -eq '1' -or $btn -eq '2') { $btn } e
 function Release-Own {
   foreach ($id in @($script:HeldPresses.Keys)) {
     $m, $k = $id.Split('|', 2)
-    try { $r = Resolve-Key $k $m; if ($null -ne $r) { Key-Event $r.vk ($r.ext -bor 2) } } catch { }
+    $r = $script:HeldPresses[$id]
+    if ($r -isnot [hashtable]) { try { $r = Resolve-Key $k $m } catch { $r = $null } }
+    if ($null -ne $r) { Key-Event $r.vk ($r.ext -bor 2) }
     foreach ($v in @(Mod-Vks $m)) { Key-Event $v 2 }
   }
   if ($script:OwnShift) { Key-Event 0x10 2 }
@@ -873,6 +882,10 @@ switch ($cmd) {
           # No key for it, or one that needs Ctrl / Alt (AltGr) on this
           # layout: typed as the character itself.
           if (No-Plain-Key $scan $ch) {
+            # A shortcut on it (\"^`\" where ` waits for a letter, \"^\" + a
+            # character the layout lacks) cannot be pressed: typed as itself
+            # under Ctrl it would be a character, not the shortcut shown.
+            if ($mods -match '[csaw]') { throw 'no-key: a modifier on a character with no key of its own' }
             [Win32In]::TypeUnicode($ch)
             if ($i -lt $keys.Count - 1) { Nap $gap }
             continue
@@ -927,7 +940,7 @@ switch ($cmd) {
     # its Hold; 'kup' is the reverse. A character the layout has no key for
     # cannot be held: it is typed once instead (TypeUnicode).
     if (Guarded ([Win32In]::GetForegroundWindow())) { Write-Output 'skipped'; break }
-    $mods = [string]$a[1]; $keys = ([string]$a[2]).Split(',')
+    $mods = Order-Mods ([string]$a[1]); $keys = ([string]$a[2]).Split(',')
     # Every key is resolved before anything goes down, so a bad one is an
     # error and not a modifier left pressed; and what did go down before a
     # failure comes back up.
@@ -936,6 +949,9 @@ switch ($cmd) {
     # turn it - and every click and key of other actions meanwhile - into
     # something else (a sprint, Shift+Del).
     $plan = @(); foreach ($k in $keys) { $plan += ,@($k, (Resolve-Key $k $mods)) }
+    # (Held with a modifier, a character with no key would be typed as
+    # itself under it, not pressed as the shortcut shown: see 'hold'.)
+    if ($mods -match '[csaw]') { foreach ($pk in $plan) { if ($null -eq $pk[1]) { throw 'no-key: a modifier on a character with no key of its own' } } }
     # Keys held together share one Shift: "(Ab)" - or a Down of "A" then
     # one of "b", or of "A{DEL}" - would hold A's Shift over b as well (B
     # what repeats; Shift+Del, which deletes for good). A press whose keys,
@@ -971,7 +987,9 @@ switch ($cmd) {
       foreach ($pk in $plan) {
         $r = $pk[1]
         if ($null -eq $r) { continue }
-        $script:HeldPresses["$mods|$($pk[0])"] = $true
+        # (The key as pressed: its release is the same key even if the layout
+        # changes meanwhile.)
+        $script:HeldPresses["$mods|$($pk[0])"] = $r
         if ($script:ModVks -notcontains $r.vk) { $script:HeldShift["$mods|$($pk[0])"] = ($mods.Contains('s') -or [bool]$r.shift) }
       }
     } finally {
@@ -988,7 +1006,8 @@ switch ($cmd) {
     # the Shift the helper put down for characters ("A", "B") comes up with
     # the last press that needs it, and not one it did not put down (the
     # user's own).
-    $mods = [string]$a[1]; $keys = ([string]$a[2]).Split(',')
+    $mods = Order-Mods ([string]$a[1]); $keys = ([string]$a[2]).Split(',')
+    $upMods = $mods
     [array]::Reverse($keys)
     # Key by key, each on its own: one that cannot be read (a code past
     # U+FFFF) must not keep the rest - and the modifiers - down.
@@ -997,6 +1016,28 @@ switch ($cmd) {
       if ($null -eq $r) { continue }
       $id = "$mods|$k"
       $known = $script:HeldPresses.ContainsKey($id)
+      if (-not $known) {
+        # Written otherwise than its Key Down (\"a\" for \"A\", \"A\" for
+        # \"+a\"): the held press of the same key under the same modifiers,
+        # a character's own Shift counted - and its modifiers let go of.
+        $want = Order-Mods ($mods + $(if ($r.shift) { 's' } else { '' }))
+        foreach ($other in @($script:HeldPresses.Keys)) {
+          $held = $script:HeldPresses[$other]
+          $om = $other.Split('|')[0]
+          if ($held -is [hashtable] -and $held.vk -eq $r.vk -and (Order-Mods ($om + $(if ($held.shift) { 's' } else { '' }))) -eq $want) {
+            $id = $other; $known = $true; $upMods = $om; break
+          }
+        }
+        # (Or the same key under the modifiers written: \"a\" lets go of the
+        # key \"A\" holds, and its Shift with it.)
+        if (-not $known) {
+          foreach ($other in @($script:HeldPresses.Keys)) {
+            $held = $script:HeldPresses[$other]
+            if ($held -is [hashtable] -and $held.vk -eq $r.vk -and $other.Split('|')[0] -eq $mods) { $id = $other; $known = $true; break }
+          }
+        }
+      }
+      if ($known -and $script:HeldPresses[$id] -is [hashtable]) { $r = $script:HeldPresses[$id] }
       $script:HeldPresses.Remove($id); $script:HeldShift.Remove($id)
       $fam = if ($r.vk -in 16, 17, 18, 91, 92) { $r.vk } else { 0 }
       if ($fam -ne 0 -and (Held-Needs $fam)) {
@@ -1018,7 +1059,7 @@ switch ($cmd) {
         $script:OwnShift = $false
       }
     }
-    $down = @(Mod-Vks $mods)
+    $down = @(Mod-Vks $upMods)
     [array]::Reverse($down)
     foreach ($m in $down) {
       if (Held-Needs $m) {
@@ -1567,6 +1608,16 @@ func _server_call(cmd: String, timeout_ms: int = SERVER_READ_TIMEOUT_MS, gen: in
 		_abort_mutex.unlock()
 		io.store_line(cmd)
 		var line := _server_read_line(timeout_ms)
+		# A scan or a press that ran past its time (a big image scan) is asked
+		# to end, as a stop asks (see interrupt), rather than its helper
+		# killed: a new one would know nothing of the keys and buttons this
+		# one holds, and let go of none of them if the app then went away.
+		var kept := false
+		if line.is_empty() and not _cut_short and _in_verb in ABORTABLE_COMMANDS and OS.is_process_running(_server_pid):
+			var flag := FileAccess.open(_abort_file(_server_pid), FileAccess.WRITE)
+			if flag != null:
+				flag.close()
+				kept = not _server_read_line(ABORT_GRACE_MS).is_empty()
 		_abort_mutex.lock()
 		_in_cap = false
 		_in_verb = ""
@@ -1574,7 +1625,9 @@ func _server_call(cmd: String, timeout_ms: int = SERVER_READ_TIMEOUT_MS, gen: in
 		_abort_mutex.unlock()
 		# An empty answer is the interrupt this thread was waiting through
 		# (not a fault), or the helper stuck.
-		if line.is_empty():
+		if line.is_empty() and kept:
+			push_warning("WindowsBackend: %s ran past its time and was ended." % _verb(cmd))
+		elif line.is_empty():
 			if not _cut_short:
 				push_warning("WindowsBackend: helper server did not answer %s; restarting it on the next call." % JSON.stringify(_loggable(cmd)))
 			_stop_server()
@@ -1820,7 +1873,7 @@ func _run_sync(extra: PackedStringArray, timeout_ms: int = SERVER_READ_TIMEOUT_M
 			# piece of what the loop types; the log is what gets attached to
 			# bug reports (see _loggable). None of it is logged.
 			# (The helper's own refusals, which quote nothing, are: "held-modifier: …".)
-			if extra[0] in ["key", "hold", "kdown", "kup", "kupall"] and not why.begins_with("held-modifier: "):
+			if extra[0] in ["key", "hold", "kdown", "kup", "kupall"] and not why.begins_with("held-modifier: ") and not why.begins_with("no-key: "):
 				why = "(the message is not logged: it may quote what was typed)"
 			# A captured action a stop asked to end (see interrupt) answers
 			# "error aborted": meant, not a fault.
