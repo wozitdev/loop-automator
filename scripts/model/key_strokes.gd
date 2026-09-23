@@ -277,9 +277,49 @@ static func pieces(text: String, max_bytes: int, max_events: int = 0) -> PackedS
 		piece += stroke
 		piece_bytes += bytes
 		piece_events += count
+		# SendKeys keeps a modifier down past "~" ("%~{F4}" is Alt+Enter and
+		# Alt+F4): a piece ends there, and the modifier with it - as the text
+		# is shown and as paced typing presses it (Alt+Enter, then F4).
+		if is_modified_enter(stroke):
+			out.append(piece)
+			piece = ""
+			piece_bytes = 0
+			piece_events = 0
 	if not piece.is_empty():
 		out.append(piece)
 	return out
+
+
+## Whether `stroke` is modifiers and a bare "~" (Enter): see pieces.
+static func is_modified_enter(stroke: String) -> bool:
+	var i := 0
+	while i < stroke.length() and stroke[i] in "^+%$":
+		i += 1
+	return i > 0 and stroke.substr(i) == "~"
+
+
+## Whether `stroke` is a group with a modifier or another group inside it
+## ("(a%{F4})", "%((){F4})"): SendKeys reads those as more than the group's
+## first modifiers apply to (and nests groups where split does not), so
+## what the text shows cut short would not say what it presses.
+static func has_inner_modifier(stroke: String) -> bool:
+	var i := 0
+	while i < stroke.length() and stroke[i] in "^+%$":
+		i += 1
+	if i >= stroke.length() or stroke[i] != "(":
+		return false
+	i += 1
+	while i < stroke.length():
+		var ch := stroke[i]
+		if ch == "{":
+			i = _brace_end(stroke, i)
+			continue
+		if ch == ")":
+			return false
+		if ch in "(^+%$":
+			return true
+		i += 1
+	return false
 
 
 ## Whether `text` has a "$" outside braced keys (the Windows key, a name of

@@ -2098,6 +2098,10 @@ func send_keys(text: String) -> void:
 		keys_refused = true
 		return
 	for stroke in KeyStrokesT.split(clean):
+		if KeyStrokesT.has_inner_modifier(stroke):
+			push_warning("WindowsBackend: key text not sent: a (…) group has a modifier or another group inside it.")
+			keys_refused = true
+			return
 		if KeyStrokesT.has_repeated_modifier(stroke):
 			push_warning("WindowsBackend: key text not sent: a keystroke names the same modifier twice.")
 			keys_refused = true

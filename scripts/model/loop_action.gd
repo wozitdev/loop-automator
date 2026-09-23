@@ -722,7 +722,21 @@ var _described_parts: Array = []
 ## "…"; the whole text one such keystroke, by its end too. The two never
 ## overlap: for a text longer than both together.
 static func stroke_ends(text: String, head_chars: int, tail_chars: int) -> Array:
-	var strokes := KeyStrokesT.split(text)
+	# With no braces or groups every keystroke is its modifiers and one
+	# character, so the two ends are split on their own (a text of 8K is
+	# otherwise split whole to show 60 characters, per text, per list):
+	# the piece at each inner edge, maybe cut short, is left out.
+	if text.length() > head_chars + tail_chars + 32 and not text.contains("{") and not text.contains("("):
+		var front := KeyStrokesT.split(text.left(head_chars + 16))
+		front.remove_at(front.size() - 1)
+		var back := KeyStrokesT.split(text.right(tail_chars + 16))
+		back.remove_at(0)
+		front.append_array(back)
+		return _ends_of(front, head_chars, tail_chars)
+	return _ends_of(KeyStrokesT.split(text), head_chars, tail_chars)
+
+
+static func _ends_of(strokes: PackedStringArray, head_chars: int, tail_chars: int) -> Array:
 	var head := ""
 	var first := 0
 	while first < strokes.size() and head.length() + strokes[first].length() <= head_chars:

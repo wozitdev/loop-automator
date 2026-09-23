@@ -944,6 +944,16 @@ func _fit_described(described: String, room: float, a: LoopActionT) -> String:
 	# last would otherwise take the joiner - and what follows it - its way.
 	var joiner := char(0x200E) + " … " + char(0x200E)
 	var left := room - _px(head) - _px(tail) - _px(joiner)
+	# A long "Key hold 1000–25000 ms: " leaves too little for the text: the
+	# text comes first, the numbers (in the editor) give way - and all of the
+	# text, if it fits then.
+	if key and left < _px("^%(WWW)…") * 2 and head.contains(" ms: "):
+		var body := described.substr(head.length(), described.length() - head.length() - tail.length())
+		var text_px := total - _px(head)   # the text and its closing quote
+		head = head.left(head.find(" ", 4)) + "…: \""
+		left = room - _px(head) - _px(tail) - _px(joiner)
+		if _px(head) + text_px <= room:
+			return head + body + tail
 	var n := pieces.size()
 	# A keystroke at either end wider than half the room (a long group) is
 	# shown squeezed - its start, where its modifiers are, and its end, what
@@ -977,7 +987,7 @@ func _fit_described(described: String, room: float, a: LoopActionT) -> String:
 			hi -= 1
 			end_done = true
 		if widths[lo] > half:
-			start = _squeezed(pieces[lo], left - used if widths[hi] <= half else half)
+			start = _squeezed(pieces[lo], left - used)
 			used += _px(start)
 			lo += 1
 			start_done = true

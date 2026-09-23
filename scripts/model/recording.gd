@@ -292,7 +292,7 @@ static func _stroke(vk: int, mods: String, _extended: bool, ch: int = 0) -> Stri
 			prefix = ""
 	elif vk >= 0x30 and vk <= 0x39:
 		# The layout's character for the key (a French keyboard's top row is
-		# "&", "Ã©", ... unshifted), the digit where the helper said none.
+		# "&", "é", ... unshifted), the digit where the helper said none.
 		key = char(ch).to_lower() if ch > 0x20 else char(vk)
 	elif vk >= 0x60 and vk <= 0x69:
 		key = char(vk - 0x60 + 0x30)   # numpad digits
