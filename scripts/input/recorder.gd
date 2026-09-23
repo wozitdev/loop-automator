@@ -161,7 +161,11 @@ public class Rec : NativeWindow {
       }
     }
   }
+  [DllImport(\"user32.dll\")] static extern bool SetProcessDPIAware();
   public static int Run(uint guardPid, bool anyInput) {
+    // Screen pixels as Godot counts them (it is DPI aware; powershell.exe
+    // is not): scaled units would put every recorded point off.
+    SetProcessDPIAware();
     guard = guardPid; any = anyInput;
     buf = Marshal.AllocHGlobal(BUF);
     Thread writer = new Thread(Writer); writer.IsBackground = true; writer.Start();

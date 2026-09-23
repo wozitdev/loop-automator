@@ -22,6 +22,7 @@ const IMPORTED_BASE_CHARS := 60
 signal project_replaced                  ## A whole new project was loaded/created
 signal layers_changed                    ## Layers added/removed/reordered/renamed
 signal actions_changed(layer_index: int) ## Action list of a layer changed
+signal limit_reached(message: String)    ## An add or duplicate refused: the loop is full
 signal action_modified(layer_index: int, action_index: int)
 signal selection_changed                 ## Active layer / action selection changed
 signal overlay_view_changed              ## Overlay layer / show-all toggled
@@ -95,6 +96,8 @@ func selected_action() -> LoopActionT:
 
 # ------------------------------------------------------------------- layers
 func add_layer() -> void:
+	if not _has_room(0, 1):
+		return
 	var l := LoopLayerT.make("Layer %d" % (project.layers.size() + 1), project.layers.size())
 	project.layers.append(l)
 	active_layer_index = project.layers.size() - 1
@@ -147,6 +150,8 @@ func duplicate_layer(index: int) -> void:
 	if index < 0 or index >= project.layers.size():
 		return
 	var source: LoopLayerT = project.layers[index]
+	if not _has_room(source.actions.size(), 1):
+		return
 	# Through the file format, so nothing is shared with the original.
 	var copy := LoopLayerT.from_dict(source.to_dict())
 	var taken: Array = []
@@ -161,6 +166,22 @@ func duplicate_layer(index: int) -> void:
 	_view_follows_active()
 	emit_signal("layers_changed")
 	emit_signal("selection_changed")
+
+
+## Whether the open loop has room for `actions` more actions and `layers`
+## more layers (LOOP_ACTIONS_MAX, LOOP_LAYERS_MAX): a loop past them saves,
+## and exports, as a file no Import takes. Says so (limit_reached) if not.
+func _has_room(actions: int, layers: int = 0) -> bool:
+	var total := 0
+	for l in project.layers:
+		total += l.actions.size()
+	if total + actions > LOOP_ACTIONS_MAX:
+		emit_signal("limit_reached", "The loop is full: %d actions at most." % LOOP_ACTIONS_MAX)
+		return false
+	if project.layers.size() + layers > LOOP_LAYERS_MAX:
+		emit_signal("limit_reached", "The loop is full: %d layers at most." % LOOP_LAYERS_MAX)
+		return false
+	return true
 
 
 func move_layer(index: int, delta: int) -> void:
@@ -229,7 +250,7 @@ func loop_names() -> Array:
 # ------------------------------------------------------------------ actions
 func add_action(type: int) -> void:
 	var layer := active_layer()
-	if layer == null:
+	if layer == null or not _has_room(1):
 		return
 	layer.actions.append(LoopActionT.new_of_type(type))
 	selected_action_index = layer.actions.size() - 1
@@ -238,16 +259,22 @@ func add_action(type: int) -> void:
 	emit_signal("selection_changed")
 
 
-## Puts `actions` on the end of the active layer (a recording) and selects
-## the first of them. As many as the loop has room for (LOOP_ACTIONS_MAX: a
-## loop past it would save, and export, as a file no Import takes); returns
-## how many that was.
-func append_actions(actions: Array) -> int:
-	var layer := active_layer()
-	if layer == null or actions.is_empty():
+## Puts `actions` on the end of `layer` of loop `loop_id` (a recording, into
+## the layer it was asked about) - which need not be the one open: nothing
+## is switched to, so a question open meanwhile about another layer or loop
+## still means what it says. As many as that loop has room for
+## (LOOP_ACTIONS_MAX: a loop past it would save, and export, as a file no
+## Import takes). Returns how many that was, or -1 if the loop or the layer
+## is gone.
+func append_actions(loop_id: int, layer: LoopLayerT, actions: Array) -> int:
+	var key := str(loop_id)
+	var p: LoopProjectT = project if loop_id == active_loop_id else _session_projects_by_id.get(key)
+	if p == null or layer == null or not p.layers.has(layer) or _loop_index_from_id(loop_id) < 0:
+		return -1
+	if actions.is_empty():
 		return 0
 	var total := 0
-	for l in project.layers:
+	for l in p.layers:
 		total += l.actions.size()
 	var room := maxi(0, LOOP_ACTIONS_MAX - total)
 	if room == 0:
@@ -255,12 +282,18 @@ func append_actions(actions: Array) -> int:
 	var first := layer.actions.size()
 	for a in actions.slice(0, room):
 		layer.actions.append(a)
-	selected_action_index = first
-	_mark_pending()
-	emit_signal("actions_changed", active_layer_index)
-	emit_signal("selection_changed")
+	if loop_id == active_loop_id:
+		_mark_pending()
+		var at := p.layers.find(layer)
+		if at == active_layer_index:
+			selected_action_index = first
+		emit_signal("actions_changed", at)
+		emit_signal("selection_changed")
+	else:
+		_session_projects_by_id[key] = p
+		_pending_by_id[key] = true
+		emit_signal("loop_stack_changed")
 	return mini(room, actions.size())
-
 
 func remove_action(index: int) -> void:
 	var layer := active_layer()
@@ -275,7 +308,7 @@ func remove_action(index: int) -> void:
 
 func duplicate_action(index: int) -> void:
 	var layer := active_layer()
-	if layer == null or index < 0 or index >= layer.actions.size():
+	if layer == null or index < 0 or index >= layer.actions.size() or not _has_room(1):
 		return
 	layer.actions.insert(index + 1, layer.actions[index].duplicate_action())
 	selected_action_index = index + 1

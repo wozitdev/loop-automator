@@ -584,6 +584,11 @@ func _build_action_panel() -> Control:
 	action_list.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	action_list.allow_reselect = true
 	action_list.item_selected.connect(func(i): ProjectData.set_selected_action(i))
+	# A Key row is fitted to the list's width (see _row_text): again when that changes.
+	action_list.resized.connect(func():
+		if not _refit_queued:
+			_refit_queued = true
+			_refit_key_rows.call_deferred())
 	vb.add_child(action_list)
 
 	var btns := HBoxContainer.new()
@@ -643,6 +648,7 @@ func _build_editor_panel() -> Control:
 #  Signals
 # ======================================================================
 func _connect_signals() -> void:
+	ProjectData.limit_reached.connect(func(message: String): status_label.text = message)
 	ProjectData.layers_changed.connect(_refresh_layers)
 	ProjectData.layers_changed.connect(_refresh_layer_props)
 	ProjectData.layers_changed.connect(_refresh_actions_for_layers)
@@ -730,6 +736,9 @@ func _on_project_replaced() -> void:
 	_rebuild_editor()
 	_refresh_overlay_label()
 	_refresh_loop_stack_ui()
+	var off: Vector2i = ProjectData.project.points_unsure
+	if off != Vector2i.ZERO:
+		status_label.text = "This loop is from an older version, which counted points from the main screen: some of its points may be off by (%d, %d) - check them on the overlay before a Live run." % [off.x, off.y]
 
 
 ## The tint behind the step (and the layer) a run is on. The selection is
@@ -818,7 +827,7 @@ func _refresh_actions() -> void:
 		actions_header.text = "Actions — %s" % _quoted(l.name)
 		for i in l.actions.size():
 			var a: LoopActionT = l.actions[i]
-			action_list.add_item("%d. %s" % [i + 1, a.describe()], UiIconsT.mark(a.enabled))
+			action_list.add_item(_row_text(i, a), UiIconsT.mark(a.enabled))
 			if not a.comment.is_empty():
 				action_list.set_item_tooltip(i, a.comment)
 	else:
@@ -831,6 +840,44 @@ func _refresh_actions() -> void:
 
 
 var _shown_layer: LoopLayerT = null
+
+
+## Action `a`'s row (number `i`) in the list. A Key's text is fitted to the
+## list's width, measured: the list would otherwise cut the row at its right
+## edge - a text's end, what it types last (Win+R, Enter), gone behind an
+## ellipsis that reads like the rest of a long harmless text. Too wide, it
+## is cut in the middle instead, both ends kept.
+func _row_text(i: int, a: LoopActionT) -> String:
+	var row := "%d. %s" % [i + 1, a.describe()]
+	if a.type != LoopActionT.Type.KEY:
+		return row
+	var font := action_list.get_theme_font("font")
+	var font_size := action_list.get_theme_font_size("font_size")
+	# The icon, the margins and the scroll bar take some of the width.
+	var max_px := action_list.size.x - 64.0
+	if font == null or max_px <= 0.0 or font.get_string_size(row, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x <= max_px:
+		return row
+	var lo := 1
+	var hi := row.length() / 2
+	while lo < hi:
+		var mid := (lo + hi + 1) / 2
+		if font.get_string_size(row.left(mid) + " … " + row.right(mid), HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x <= max_px:
+			lo = mid
+		else:
+			hi = mid - 1
+	return row.left(lo) + " … " + row.right(lo)
+
+
+var _refit_queued := false
+func _refit_key_rows() -> void:
+	_refit_queued = false
+	var l := ProjectData.active_layer()
+	if l == null or l != _shown_layer or l.actions.size() != action_list.item_count:
+		return
+	for i in l.actions.size():
+		var a: LoopActionT = l.actions[i]
+		if a.type == LoopActionT.Type.KEY:
+			action_list.set_item_text(i, _row_text(i, a))
 
 
 ## A layer change (a rename, a colour, Visible / Enabled / Solo - a colour
@@ -858,7 +905,7 @@ func _update_list_item(layer_index: int, index: int) -> void:
 	if layer_index != _shown_layer_index or index < 0 or index >= action_list.item_count:
 		return
 	var a: LoopActionT = ProjectData.project.layers[layer_index].actions[index]
-	action_list.set_item_text(index, "%d. %s" % [index + 1, a.describe()])
+	action_list.set_item_text(index, _row_text(index, a))
 	action_list.set_item_icon(index, UiIconsT.mark(a.enabled))
 
 
@@ -2036,15 +2083,11 @@ func _stop_recording(reason: String = "", from_builder: bool = false) -> void:
 		status_label.text = "Recorded nothing."
 		return
 	# Into the layer the recording was asked about, not whichever is open
-	# now (the builder stays usable with ~Edit): back to its loop and layer.
-	if ProjectData.active_loop_id != _record_loop_id:
-		ProjectData.open_loop(_record_loop_id)
-	var at: int = ProjectData.project.layers.find(_record_layer) if ProjectData.project != null and ProjectData.active_loop_id == _record_loop_id else -1
-	if at < 0:
+	# now (the builder stays usable with ~Edit) - without switching to it.
+	var added := ProjectData.append_actions(_record_loop_id, _record_layer, actions)
+	if added < 0:
 		status_label.text = "Recording not kept: the layer it was for is gone."
 		return
-	ProjectData.set_active_layer(at)
-	var added := ProjectData.append_actions(actions)
 	status_label.text = "Recorded %d action%s into %s." % [added, "" if added == 1 else "s", _quoted(_record_layer.name)]
 	if added < actions.size():
 		status_label.text += " The loop is full (%d actions): the rest was not kept." % ProjectData.LOOP_ACTIONS_MAX

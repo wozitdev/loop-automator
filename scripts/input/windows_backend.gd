@@ -264,8 +264,20 @@ public class Win32In {
     inp[0].mi.dwFlags = horizontal ? 0x01000u : 0x0800u;  // HWHEEL | WHEEL
     SendInput(1,inp,Marshal.SizeOf(typeof(Win32Input)));
   }
+  [DllImport(\"user32.dll\")] public static extern bool SetProcessDPIAware();
 }
 \"@
+# Screen pixels as Godot counts them (it is DPI aware): powershell.exe is
+# not, and on a display scaled past 100% every point, cursor read and screen
+# grab here would be in scaled units - a click landing off its pick. Before
+# any window or screen use.
+[Win32In]::SetProcessDPIAware() | Out-Null
+} else {
+Add-Type @\"
+using System.Runtime.InteropServices;
+public class Win32Dpi { [DllImport(\"user32.dll\")] public static extern bool SetProcessDPIAware(); }
+\"@
+[Win32Dpi]::SetProcessDPIAware() | Out-Null
 }
 # Button flags for MouseAt: down / up for left, right ('1'), middle ('2').
 function Down-Flag([string]$btn) { switch ($btn) { '1' { 0x0008 } '2' { 0x0020 } default { 0x0002 } } }
@@ -296,7 +308,19 @@ function Send-Keys([string]$t) {
 }
 # The modifier letters of a key command (c / s / a / w: Ctrl, Shift, Alt,
 # Win) as virtual keys, in the order they go down.
-function Mod-Vks([string]$mods) {
+# Whether a press this helper still holds (see 'kdown') has modifier `vk`
+# down: as one of its modifiers, as the key itself ({SHIFT}, {CTRL}...), or
+# - Shift - as a character that needs it.
+function Held-Needs([int]$vk) {
+  $fam = switch ($vk) { 0x10 { @('s', 16, 160, 161) } 0x11 { @('c', 17, 162, 163) } 0x12 { @('a', 18, 164, 165) } default { @('w', 91, 92) } }
+  foreach ($id in @($script:ShiftedBy.Keys)) {
+    $m, $k = $id.Split('|', 2)
+    if ($m -ne 'n' -and $m.Contains($fam[0])) { return $true }
+    if ($k.StartsWith('v') -and $fam -contains [int]$k.Substring(1)) { return $true }
+    if ($vk -eq 0x10 -and $script:HeldShift[$id]) { return $true }
+  }
+  return $false
+}function Mod-Vks([string]$mods) {
   $d = @()
   if ($mods.Contains('c')) { $d += 0x11 }
   if ($mods.Contains('s')) { $d += 0x10 }
@@ -833,7 +857,7 @@ switch ($cmd) {
       if ($null -ne $pk[1] -and $script:ModVks -notcontains $pk[1].vk) { $shifts += ($mods.Contains('s') -or [bool]$pk[1].shift) }
     }
     if (@($shifts | Select-Object -Unique).Count -gt 1) { throw 'keys held together need Shift and no Shift' }
-    $pressed = @()
+    $pressed = @(); $owned = @{}
     try {
       foreach ($m in (Mod-Vks $mods)) { Key-Event $m 0; $pressed += $m }
       foreach ($pk in $plan) {
@@ -842,7 +866,11 @@ switch ($cmd) {
           [Win32In]::TypeUnicode([char][int]([string]$pk[0]).Substring(1))
           continue
         }
-        if ($r.shift) { Key-Event 0x10 0; $pressed += 0x10 }
+        # A Shift already down (another held key's, a {SHIFT} held on
+        # purpose) is not pressed again: this press does not own it.
+        $own = $r.shift -and (([Win32In]::GetAsyncKeyState(0x10) -band 0x8000) -eq 0)
+        if ($own) { Key-Event 0x10 0; $pressed += 0x10 }
+        $owned[$pk[0]] = $own
         Key-Event $r.vk $r.ext; $pressed += $r.vk
       }
       $pressed = @()
@@ -853,7 +881,7 @@ switch ($cmd) {
       foreach ($pk in $plan) {
         $r = $pk[1]
         if ($null -eq $r) { continue }
-        $script:ShiftedBy["$mods|$($pk[0])"] = [bool]$r.shift
+        $script:ShiftedBy["$mods|$($pk[0])"] = [bool]$owned[$pk[0]]
         if ($script:ModVks -notcontains $r.vk) { $script:HeldShift["$mods|$($pk[0])"] = ($mods.Contains('s') -or [bool]$r.shift) }
       }
     } finally {
@@ -880,11 +908,21 @@ switch ($cmd) {
       $shifted = [bool]$r.shift
       if ($script:ShiftedBy.ContainsKey($id)) { $shifted = $script:ShiftedBy[$id]; $script:ShiftedBy.Remove($id) }
       $script:HeldShift.Remove($id)
+      # One Shift for every held key that needs it ("A", then "B"): it stays
+      # down while another does, and the next of them lets go of it.
+      if ($shifted -and (Held-Needs 0x10)) {
+        $shifted = $false
+        foreach ($other in @($script:HeldShift.Keys)) {
+          if ($script:HeldShift[$other] -and -not $other.Split('|')[0].Contains('s')) { $script:ShiftedBy[$other] = $true }
+        }
+      }
       if ($shifted) { Key-Event 0x10 2 }
     }
+    # A modifier another held press still has down ("^a" held, then "^b"
+    # held and let go; {CTRL} held on purpose) stays down.
     $down = @(Mod-Vks $mods)
     [array]::Reverse($down)
-    foreach ($m in $down) { Key-Event $m 2 }
+    foreach ($m in $down) { if (-not (Held-Needs $m)) { Key-Event $m 2 } }
   }
   'kupall' {
     # Lets go of every key that is down (not the mouse buttons): the
@@ -971,6 +1009,7 @@ Add-Type -ReferencedAssemblies System.Drawing @\"
 using System; using System.Drawing; using System.Drawing.Imaging; using System.Runtime.InteropServices;
 using System.Collections.Generic; using System.IO;
 public class Scan {
+  [DllImport(\"user32.dll\")] public static extern bool SetProcessDPIAware();
   static byte[] buf = new byte[0];
   // Templates for 'image', as 32bpp BGRA rows (stride w * 4), by id.
   class Tpl { public int w; public int h; public byte[] px; }
@@ -1112,6 +1151,8 @@ public class Scan {
   }
 }
 \"@
+# Screen pixels as Godot counts them (see the input helper).
+[Scan]::SetProcessDPIAware() | Out-Null
 $out = [Console]::Out
 $script:abortFile = Join-Path (Split-Path -Parent $PSCommandPath) ('abort-' + $PID + '.flag')
 [Scan]::AbortFile = $script:abortFile
@@ -1764,7 +1805,7 @@ static func _parse_point(line: String, offset: int = 0) -> Vector2i:
 ## desktop's top-left corner, Windows from the primary screen's (a screen
 ## left of or above it has negative coordinates there). Every point and rect
 ## going to the helper is turned into Windows' (_win), and every one coming
-## back into Godot's (_godot); the rest of the app - picks, the overlay,
+## back into Godot's (_parse_godot); the rest of the app - picks, the overlay,
 ## loops - works in Godot's.
 static func _origin() -> Vector2i:
 	return DisplayServer.screen_get_position(DisplayServer.get_primary_screen())
@@ -1774,9 +1815,14 @@ static func _win(pos: Vector2i) -> Vector2i:
 	return pos - _origin()
 
 
-## A point from the helper, (-1, -1) (none) left as it is.
-static func _godot(pos: Vector2i) -> Vector2i:
-	return pos if pos == Vector2i(-1, -1) else pos + _origin()
+## The first point of an "x,y[,...]" line from the helper (see _parse_point)
+## as Godot's, or (-1, -1): Godot's are never negative, where Windows' (-1,
+## -1) can be a real pixel (a screen left of and above the primary's corner).
+static func _parse_godot(line: String, offset: int = 0) -> Vector2i:
+	var parts := line.split(",")
+	if parts.size() >= offset + 2 and parts[offset].is_valid_int() and parts[offset + 1].is_valid_int():
+		return Vector2i(int(parts[offset]), int(parts[offset + 1])) + _origin()
+	return Vector2i(-1, -1)
 
 
 static func _win_path(path: PackedVector2Array) -> PackedVector2Array:
@@ -1873,8 +1919,8 @@ func run_captured(kind: String, button: int, from: Vector2i, to: Vector2i, ms: i
 	last_cut_off = line.is_empty() and not last_skipped and not _last_error and not _last_dropped
 	if last_skipped:
 		return []
-	var saved := _godot(_parse_point(line, 0))
-	var restored := _godot(_parse_point(line, 2))
+	var saved := _parse_godot(line, 0)
+	var restored := _parse_godot(line, 2)
 	if saved == Vector2i(-1, -1) or restored == Vector2i(-1, -1):
 		# An empty answer is what an interrupt() leaves; anything else is a fault.
 		if not line.is_empty():
@@ -1978,14 +2024,14 @@ func press_keys(mods: String, keys: PackedStringArray, pressed: bool) -> void:
 func get_cursor_pos() -> Vector2i:
 	if _helper_real_path.is_empty():
 		return Vector2i(-1, -1)
-	var served := _godot(_parse_point(_server_read("cursor")))
+	var served := _parse_godot(_server_read("cursor"))
 	if served != Vector2i(-1, -1):
 		return served
 	var first_error := ""
 	for attempt in 2:
 		var once := _run_once(PackedStringArray(["cursor"]))
 		var line: String = once["line"]
-		var pos := _godot(_parse_point(line))
+		var pos := _parse_godot(line)
 		if int(once["code"]) == 0 and pos != Vector2i(-1, -1):
 			return pos
 		if attempt == 0:
@@ -2059,7 +2105,7 @@ func find_color(rect: Rect2i, color: Color, tolerance: int, step: int) -> Dictio
 		if centre.a > 0.0:
 			return {"hit": Vector2i(-1, -1), "centre": centre}
 	else:
-		var hit := _godot(_parse_point(line))
+		var hit := _parse_godot(line)
 		if hit != Vector2i(-1, -1):
 			return {"hit": hit, "centre": color}
 	# A served scan that got no answer (a stop ended it, or it stuck) is not
@@ -2103,7 +2149,7 @@ func find_image(rect: Rect2i, png: PackedByteArray, tolerance: int, grey: bool =
 		line = String(_server_call(cmd, IMAGE_SCAN_TIMEOUT_MS, gen)["line"])
 	if line == "none":
 		return {"hit": Vector2i(-1, -1)}
-	var hit := _godot(_parse_point(line))
+	var hit := _parse_godot(line)
 	if hit != Vector2i(-1, -1):
 		return {"hit": hit}
 	return {}
