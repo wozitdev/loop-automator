@@ -310,7 +310,9 @@ function Send-Keys([string]$t) {
 # down: as one of its modifiers, as the key itself ({SHIFT}, {CTRL}...), or
 # - Shift - as a character that needs it.
 function Held-Needs([int]$vk) {
-  $fam = switch ($vk) { 0x10 { @('s', 16, 160, 161) } 0x11 { @('c', 17, 162, 163) } 0x12 { @('a', 18, 164, 165) } default { @('w', 91, 92) } }
+  # (Left and right Win are two keys, each let go of on its own: {RWIN} held
+  # does not keep the $ modifier's left Win down, or it would stay down.)
+  $fam = switch ($vk) { 0x10 { @('s', 16) } 0x11 { @('c', 17) } 0x12 { @('a', 18) } 0x5C { @('-', 92) } default { @('w', 91) } }
   foreach ($id in @($script:HeldPresses.Keys)) {
     $m, $k = $id.Split('|', 2)
     if ($m -ne 'n' -and $m.Contains($fam[0])) { return $true }
@@ -778,6 +780,9 @@ switch ($cmd) {
     if ($mods.Contains('s')) { $down += 0x10 }
     if ($mods.Contains('a')) { $down += 0x12 }
     if ($mods.Contains('w')) { $down += 0x5B }
+    # A modifier already down (a Key Down's, the user's) is neither pressed
+    # nor let go of here: typing must not take it from what holds it.
+    $down = @($down | Where-Object { ([Win32In]::GetAsyncKeyState($_) -band 0x8000) -eq 0 })
     # The key (and the Shift for it) down right now, for the finally: a stop
     # asks this command to end (Nap throws), and what it has down is let go
     # of here, at once, rather than by a helper started after a kill.
@@ -815,6 +820,8 @@ switch ($cmd) {
         }
         # KEYEVENTF_EXTENDEDKEY for the navigation keys, as the keyboard sends them.
         $ext = 0; if (($vk -ge 0x21 -and $vk -le 0x28) -or $vk -eq 0x2D -or $vk -eq 0x2E) { $ext = 1 }
+        # (Nor a Shift already down, as above.)
+        if ($shift -and ([Win32In]::GetAsyncKeyState(0x10) -band 0x8000) -ne 0) { $shift = $false }
         $cur = @($vk, $ext, $shift)
         if ($shift) { Key-Event 0x10 0 }
         Key-Event $vk $ext
@@ -911,7 +918,7 @@ switch ($cmd) {
       $id = "$mods|$k"
       $known = $script:HeldPresses.ContainsKey($id)
       $script:HeldPresses.Remove($id); $script:HeldShift.Remove($id)
-      $fam = switch ($r.vk) { { $_ -in 16, 160, 161 } { 0x10 } { $_ -in 17, 162, 163 } { 0x11 } { $_ -in 18, 164, 165 } { 0x12 } { $_ -in 91, 92 } { 0x5B } default { 0 } }
+      $fam = if ($r.vk -in 16, 17, 18, 91, 92) { $r.vk } else { 0 }
       if ($fam -ne 0 -and (Held-Needs $fam)) {
         # A modifier key held another press still needs: kept, and a Shift
         # kept so is the helper's to let go of with the last of them.

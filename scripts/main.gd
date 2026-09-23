@@ -15,6 +15,7 @@ const LoopLayerT := preload("res://scripts/model/loop_layer.gd")
 const LoopProjectT := preload("res://scripts/model/loop_project.gd")
 const RecorderT := preload("res://scripts/input/recorder.gd")
 const RecordingT := preload("res://scripts/model/recording.gd")
+const KeyStrokesT := preload("res://scripts/model/key_strokes.gd")
 
 ## Record (the Rec button): what the user does is recorded by a helper
 ## that listens system-wide (see Recorder) until F8, then turned into actions
@@ -589,7 +590,7 @@ func _build_action_panel() -> Control:
 	action_list.resized.connect(func():
 		# Once the width has settled (a drag of the window's edge, a panel
 		# that flickers a few pixels and back): a list of tens of thousands.
-		if not _refit_queued and int(action_list.size.x) != _fit_width:
+		if not _refit_queued and int(action_list.size.x) != _rows_fit_width:
 			_refit_queued = true
 			get_tree().create_timer(0.25).timeout.connect(_refit_rows))
 	vb.add_child(action_list)
@@ -833,6 +834,7 @@ func _refresh_layer_props() -> void:
 
 func _refresh_actions() -> void:
 	action_list.clear()
+	_rows_fit_width = int(action_list.size.x)
 	var l := ProjectData.active_layer()
 	if l != null:
 		actions_header.text = "Actions — %s" % _quoted(l.name)
@@ -858,111 +860,131 @@ var _shown_layer: LoopLayerT = null
 ## text's end, what it types last (Win+R, Enter), or a detect's "no skip",
 ## gone behind an ellipsis that reads like the rest of a long harmless row.
 ## Too wide, it is cut in the middle of what it describes, both ends kept
-## (see _fit_row).
+## (see _fit_described).
 func _row_text(i: int, a: LoopActionT) -> String:
-	var row := "%d. %s" % [i + 1, a.describe()]
-	var width := int(action_list.size.x)
-	if width != _fit_width:
-		_fit_width = width
-		_fit_cache.clear()
-	if _fit_cache.has(row):
-		return _fit_cache[row]
-	var fitted := _fit_row(row, a.type == LoopActionT.Type.KEY)
-	if _fit_cache.size() > FIT_CACHE_MAX:
-		_fit_cache.clear()
-	_fit_cache[row] = fitted
-	return fitted
-
-
-## Rows fitted at `_fit_width` (the list's width they were fitted to).
-var _fit_cache := {}
-var _fit_width := -1
-## The widest plain character's width (see _fit_row), measured once.
-var _fit_w_px := 0.0
-const FIT_CACHE_MAX := 100000
-
-
-## `row` as it is if it fits the list, else cut in the middle: its number
-## and kind ("12. Key hold 500 ms: \"") and a Key's closing quote are never
-## cut, and what is between gets as much of its start and its end as fits,
-## by width - never through a {…} key or a modifier and the key it is on.
-func _fit_row(row: String, key: bool) -> String:
-	var font := action_list.get_theme_font("font")
-	var font_size := action_list.get_theme_font_size("font_size")
+	var number := "%d. " % (i + 1)
+	var described := a.describe()
 	# The icon, the margins and the scroll bar take some of the width.
 	var max_px := action_list.size.x - 64.0
-	if font == null or max_px <= 0.0:
-		return row
-	if _plain_ascii == null:
-		_plain_ascii = RegEx.create_from_string("\\A[\\x{20}-\\x{7E}]*\\z")
-	# Most rows are short and plain: no need to measure what cannot be wide.
-	if _fit_w_px <= 0.0:
-		_fit_w_px = font.get_string_size("W", HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x
-	if row.length() * _fit_w_px <= max_px and _plain_ascii.search(row) != null:
-		return row
-	if font.get_string_size(row, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x <= max_px:
-		return row
-	var head := row.substr(0, row.find(". ") + 2)
-	var body := row.substr(head.length())
+	if action_list.get_theme_font("font") == null or max_px <= 0.0:
+		return number + described
+	var room := max_px - _px(number)
+	var key := "%d\n%s" % [int(room), described]
+	if not _fit_cache.has(key):
+		if _fit_cache.size() > FIT_CACHE_MAX:
+			_fit_cache.clear()
+		_fit_cache[key] = _fit_described(described, room, a.type == LoopActionT.Type.KEY)
+	return number + _fit_cache[key]
+
+
+## Fitted rows by room and text (not by row number: a row inserted near the
+## top would miss every one below it), and each piece's width.
+var _fit_cache := {}
+var _px_cache := {}
+const FIT_CACHE_MAX := 100000
+## The list's width its rows were last fitted to (see _refit_rows).
+var _rows_fit_width := -1
+
+
+## `text`'s width in the list's font, from a cache (the same keys, digits
+## and words come back row after row).
+func _px(text: String) -> float:
+	if _px_cache.has(text):
+		return _px_cache[text]
+	if _px_cache.size() > FIT_CACHE_MAX:
+		_px_cache.clear()
+	var w := action_list.get_theme_font("font").get_string_size(text, HORIZONTAL_ALIGNMENT_LEFT, -1, action_list.get_theme_font_size("font_size")).x
+	_px_cache[text] = w
+	return w
+
+
+## `described` (see LoopAction.describe) as it is if it is at most `room`
+## wide, else cut in the middle: a Key's kind ("Key hold 500 ms: \"") and
+## closing quote are never cut, and its text is cut only between keystrokes
+## (KeyStrokes.split, what typing goes by: "$r" is never an "r", "{ENTER}"
+## never "TER}"); anything else between characters. As much of the start
+## and of the end as fits, by width.
+func _fit_described(described: String, room: float, key: bool) -> String:
+	var head := ""
+	var body := described
 	var tail := ""
-	if key and row.ends_with("\"") and row.find("\"") < row.length() - 1:
-		head = row.left(row.find("\"") + 1)
-		body = row.substr(head.length(), row.length() - head.length() - 1)
+	if key and described.ends_with("\"") and described.find("\"") < described.length() - 1:
+		head = described.left(described.find("\"") + 1)
+		body = described.substr(head.length(), described.length() - head.length() - 1)
 		tail = "\""
+	var pieces := PackedStringArray()
+	if key:
+		pieces = KeyStrokesT.split(body)
+	else:
+		for c in body:
+			pieces.append(c)
+	var widths := PackedFloat32Array()
+	var total := _px(head) + _px(tail)
+	for p in pieces:
+		widths.append(_px(p))
+		total += widths[widths.size() - 1]
+	if total <= room:
+		return described
 	# Direction marks either side: a right-to-left letter the cut leaves
 	# last would otherwise take the joiner - and what follows it - its way.
 	var joiner := char(0x200E) + " … " + char(0x200E)
-	var room := max_px - font.get_string_size(head + joiner + tail, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x
-	var start := _fitting(body, room / 2.0, false, font, font_size)
-	var end := _fitting(body, room - font.get_string_size(start, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x, true, font, font_size)
-	if key:
-		# Not through a key: "…TER}" is no key at all. The end, what is typed
-		# last, gets the whole of the key it starts in if that fits in all the
-		# room there is, the start making way; else it starts after the key.
-		var close := end.find("}")
-		if close >= 0 and (end.find("{") < 0 or end.find("{") > close):
-			var group := body.rfind("{", body.length() - end.length())
-			var whole := body.substr(group) if group >= 0 else ""
-			if group >= 0 and font.get_string_size(whole, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x <= room:
-				end = whole
-				start = _fitting(body.left(group), room - font.get_string_size(end, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x, false, font, font_size)
-			else:
-				end = end.substr(close + 1)
-		# ...and the start ends before one: "{ENT" … is no key, "^" … no Ctrl+.
-		var open := start.rfind("{")
-		if open >= 0 and start.find("}", open) < 0:
-			start = start.left(open)
-		while not start.is_empty() and start.right(1) in ["^", "+", "%", "$"]:
-			start = start.left(start.length() - 1)
+	var left := room - _px(head) - _px(tail) - _px(joiner)
+	var n := pieces.size()
+	# A keystroke from each end in turn, while one fits: neither end is
+	# left out for the other's sake (a wide "{ENTER}" last, a wide start).
+	var used := 0.0
+	var first := 0
+	var last := n
+	var grew := true
+	while grew and first < last:
+		grew = false
+		if used + widths[first] <= left:
+			used += widths[first]
+			first += 1
+			grew = true
+		if first < last and used + widths[last - 1] <= left:
+			used += widths[last - 1]
+			last -= 1
+			grew = true
+	var start := "".join(pieces.slice(0, first))
+	var end := "".join(pieces.slice(last))
+	# A keystroke wider than the room left (a long group) is shown by its
+	# start, where its modifiers are, rather than not at all.
+	if last > first and left - used > _px("…"):
+		var part := _part_fitting(pieces[first], left - used - _px("…"))
+		if not part.is_empty():
+			start += part + "…"
 	return head + start + joiner + end + tail
-static var _plain_ascii: RegEx = null
 
 
-## As much of `text` as is at most `px` wide, from its start (or its end).
-func _fitting(text: String, px: float, from_end: bool, font: Font, font_size: int) -> String:
+## As much of `text`'s start as is at most `px` wide.
+func _part_fitting(text: String, px: float) -> String:
 	var lo := 0
 	var hi := text.length()
 	while lo < hi:
 		var mid := (lo + hi + 1) / 2
-		var part := text.right(mid) if from_end else text.left(mid)
-		if font.get_string_size(part, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x <= px:
+		if _px(text.left(mid)) <= px:
 			lo = mid
 		else:
 			hi = mid - 1
-	return text.right(lo) if from_end else text.left(lo)
+	return text.left(lo)
 
 
-## The list's rows again when its width has changed (a height change, or a
-## width back to what the rows were fitted to, changes nothing).
+## The list's rows again when its width has changed since they were last
+## fitted (a height change, or a width back to what they were fitted to,
+## changes nothing).
 func _refit_rows() -> void:
 	_refit_queued = false
-	if int(action_list.size.x) == _fit_width:
+	var width := int(action_list.size.x)
+	if width == _rows_fit_width:
 		return
 	var l := ProjectData.active_layer()
 	if l == null or l != _shown_layer or l.actions.size() != action_list.item_count:
 		return
+	_rows_fit_width = width
 	for i in l.actions.size():
 		action_list.set_item_text(i, _row_text(i, l.actions[i]))
+
 
 var _refit_queued := false
 
@@ -2422,10 +2444,27 @@ func _exit_tree() -> void:
 
 # ------------------------------------------------------- UI preferences
 func _load_setting(key: String, default: Variant) -> Variant:
+	return _settings().get_value("ui", key, default)
+
+
+## The settings file, read. Godot's format can say Object(…) and Resource(…),
+## which reading alone builds - a script's code run, from a file anyone may
+## drop in the data folder: such a file is not read (the defaults stand, and
+## the next change of a setting writes a clean one).
+func _settings() -> ConfigFile:
 	var cfg := ConfigFile.new()
-	if cfg.load(SETTINGS_PATH) != OK:
-		return default
-	return cfg.get_value("ui", key, default)
+	var text := FileAccess.get_file_as_string(SETTINGS_PATH)
+	if text.is_empty():
+		return cfg
+	if _unsafe_setting == null:
+		_unsafe_setting = RegEx.create_from_string("(?i)\\b(Object|Resource|SubResource|ExtResource|Callable|Signal)\\s*\\(")
+	if _unsafe_setting.search(text) != null:
+		push_warning("Settings file not read: it holds more than plain values.")
+		return cfg
+	if cfg.parse(text) != OK:
+		return ConfigFile.new()
+	return cfg
+static var _unsafe_setting: RegEx = null
 
 
 ## A yes / no setting. The file is the user's to edit, so a value that is
@@ -2436,8 +2475,7 @@ func _load_bool_setting(key: String, default: bool) -> bool:
 
 
 func _save_setting(key: String, value: Variant) -> void:
-	var cfg := ConfigFile.new()
-	cfg.load(SETTINGS_PATH)  # missing file is fine: start empty
+	var cfg := _settings()  # missing (or refused) is fine: start empty
 	cfg.set_value("ui", key, value)
 	cfg.save(SETTINGS_PATH)
 
@@ -2841,8 +2879,9 @@ func _ask_import(path: String) -> void:
 			if k.length() > IMPORT_KEY_CHARS:
 				# Its start and its end, and how long it is: what runs last
 				# in a long text is as much a part of it as what runs first.
-				var half := IMPORT_KEY_CHARS / 2
-				line = "%s … %s  (%d characters)" % [_quoted(LoopActionT.ltr_marked(k.left(half))), _quoted(LoopActionT.ltr_marked(k.right(half))), k.length()]
+				# Cut between keystrokes (see LoopAction.stroke_ends): "$r" is never an "r".
+				var ends := LoopActionT.stroke_ends(k, IMPORT_KEY_CHARS / 2, IMPORT_KEY_CHARS / 2)
+				line = "%s … %s  (%d characters)" % [_quoted(LoopActionT.ltr_marked(ends[0])), _quoted(LoopActionT.ltr_marked(ends[1])), k.length()]
 			text += "    •  %s\n" % line
 		if shown.size() > IMPORT_KEYS_SHOWN:
 			text += "    •  … and %d more\n" % (shown.size() - IMPORT_KEYS_SHOWN)
@@ -2854,7 +2893,7 @@ func _ask_import(path: String) -> void:
 		_switch_to_safe_backend_if_needed()
 		ProjectData.import_loop(source)
 		status_label.text = "Imported %s as loop %d." % [_quoted(ProjectData.active_loop_display_name()), _active_loop_number()]
-	_warn_points_unsure()
+		_warn_points_unsure()
 	_confirm(text, do_import, "Import")
 
 

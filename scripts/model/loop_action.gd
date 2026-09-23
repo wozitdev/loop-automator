@@ -7,6 +7,7 @@ class_name LoopAction
 ## script is compiled very early (e.g. as part of an autoload dependency chain),
 ## before the global `class_name` registry is ready.
 const Self := preload("res://scripts/model/loop_action.gd")
+const KeyStrokesT := preload("res://scripts/model/key_strokes.gd")
 
 enum Type {
 	MOVE,          ## Move the cursor to (x, y)
@@ -663,9 +664,14 @@ func describe() -> String:
 				var shown := plain_text(_narrow(keys.left(DESCRIBE_KEYS_CHARS + 1)), DESCRIBE_KEYS_CHARS)
 				if keys.length() > DESCRIBE_KEYS_CHARS:
 					# Its start and its end, both within a row: what runs last in a
-					# long text is as much a part of it as what runs first.
-					var keep := DESCRIBE_KEYS_CHARS / 2 - 3
-					shown = plain_text(_narrow(keys.left(DESCRIBE_KEYS_CHARS / 2)), DESCRIBE_KEYS_CHARS) + " … " + plain_text(_narrow(keys.right(keep)), DESCRIBE_KEYS_CHARS)
+					# long text is as much a part of it as what runs first. Cut
+					# between keystrokes (KeyStrokes.split, what typing goes by):
+					# "$r" cut to "r" would pass for a plain r, "{ENTER}" to
+					# "TER}" for no key at all.
+					var ends := stroke_ends(keys, DESCRIBE_KEYS_CHARS / 2, DESCRIBE_KEYS_CHARS / 2 - 3)
+					var head: String = ends[0]
+					var tail: String = ends[1]
+					shown = plain_text(_narrow(head), DESCRIBE_KEYS_CHARS) + " … " + plain_text(_narrow(tail), DESCRIBE_KEYS_CHARS)
 				_described_keys = keys
 				_described_shown = ltr_marked(shown)
 			return "Key%s: \"%s\"" % [" " + press if not press.is_empty() else "", _described_shown]
@@ -693,6 +699,34 @@ func describe() -> String:
 				return "Find %s in %s×%s @ cursor%s" % [what, range_text(w, w_max), range_text(h, h_max), detect_suffix()]
 			return "Find %s in [%s, %s, %s×%s]%s" % [what, xs, ys, range_text(w, w_max), range_text(h, h_max), detect_suffix()]
 	return "Action"
+
+
+## `text`'s start and end, at most about `head_chars` and `tail_chars`
+## long, cut only between keystrokes (KeyStrokes.split, what typing goes
+## by): "$r" is never an "r", "{ENTER}" never "TER}". A keystroke longer than
+## that (a long group) is shown by its start, where its modifiers are, then
+## "…"; the whole text one such keystroke, by its end too. The two never
+## overlap: for a text longer than both together.
+static func stroke_ends(text: String, head_chars: int, tail_chars: int) -> Array:
+	var strokes := KeyStrokesT.split(text)
+	var head := ""
+	var first := 0
+	while first < strokes.size() and head.length() + strokes[first].length() <= head_chars:
+		head += strokes[first]
+		first += 1
+	if head.is_empty() and not strokes.is_empty():
+		head = strokes[0].left(head_chars) + "…"
+		first = 1
+	var tail := ""
+	var last := strokes.size()
+	while last > first and tail.length() + strokes[last - 1].length() <= tail_chars:
+		tail = strokes[last - 1] + tail
+		last -= 1
+	if tail.is_empty() and last > first:
+		tail = strokes[last - 1].left(tail_chars) + "…"
+	elif tail.is_empty() and strokes.size() == 1:
+		tail = "…" + strokes[0].right(tail_chars - 1)
+	return [head, tail]
 
 
 ## The Key's text as the list and the import question show it: in the order

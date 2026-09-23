@@ -779,6 +779,11 @@ func _ensure_store_dirs() -> void:
 	DirAccess.make_dir_recursive_absolute(abs_dir)
 
 
+## Set when the loop list on disk could not be read, nor kept aside: it is
+## not written over this session (see _load_or_init_store).
+var _store_index_unreadable := false
+
+
 func _load_or_init_store() -> void:
 	_recover_tmp(STORE_INDEX_PATH)
 	if not FileAccess.file_exists(STORE_INDEX_PATH):
@@ -789,6 +794,11 @@ func _load_or_init_store() -> void:
 		return
 	var f := FileAccess.open(STORE_INDEX_PATH, FileAccess.READ)
 	if f == null:
+		# Held by another program (a backup, a sync): not written over this
+		# session (see _save_store_index) - the list of loops is still there
+		# next time. The loops' own files are untouched either way.
+		push_warning("ProjectData: the loop list could not be opened (error %d); it is left as it is." % FileAccess.get_open_error())
+		_store_index_unreadable = true
 		loop_stack = []
 		active_loop_id = -1
 		_next_loop_id = 1
@@ -797,6 +807,14 @@ func _load_or_init_store() -> void:
 	f.close()
 	var parsed: Variant = JSON.parse_string(text)
 	if typeof(parsed) != TYPE_DICTIONARY:
+		# Not a list of loops (cut short, edited by hand): kept aside, as a
+		# loop file is (see _read_project_file), before a new one is written.
+		var aside := "%s.broken-%d" % [STORE_INDEX_PATH, int(Time.get_unix_time_from_system())]
+		if DirAccess.rename_absolute(ProjectSettings.globalize_path(STORE_INDEX_PATH), ProjectSettings.globalize_path(aside)) == OK:
+			push_warning("ProjectData: the loop list was not readable; kept as %s." % aside.get_file())
+		else:
+			push_warning("ProjectData: the loop list was not readable, and could not be kept aside; it is left as it is.")
+			_store_index_unreadable = true
 		loop_stack = []
 		active_loop_id = -1
 		_next_loop_id = 1
@@ -826,6 +844,8 @@ func _load_or_init_store() -> void:
 
 
 func _save_store_index() -> void:
+	if _store_index_unreadable:
+		return
 	var payload := {
 		"version": STORE_VERSION,
 		"next_loop_id": _next_loop_id,
