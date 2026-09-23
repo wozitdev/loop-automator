@@ -81,6 +81,18 @@ static func _brace_end(text: String, i: int) -> int:
 	return text.length() if close < 0 else close + 1
 
 
+## Whether stroke's modifiers (^ + % $ in front) name one of them twice.
+static func has_repeated_modifier(stroke: String) -> bool:
+	var seen := ""
+	for ch in stroke:
+		if not ch in "^+%$":
+			return false
+		if seen.contains(ch):
+			return true
+		seen += ch
+	return false
+
+
 ## One stroke as keys to press: {"mods": letters of c (Ctrl), s (Shift),
 ## a (Alt), w (Win) to hold throughout; "keys": the keys in order, "c<code>" for a
 ## character (the helper finds its key on the keyboard layout) or "v<vk>"
@@ -93,6 +105,11 @@ static func parse(stroke: String) -> Dictionary:
 	while i < stroke.length() and stroke[i] in "^+%$":
 		mods += {"^": "c", "+": "s", "%": "a", "$": "w"}[stroke[i]]
 		i += 1
+	# The same modifier twice is no key press (SendKeys refuses it too): a
+	# run of forty "^" can hide a "%" among them in every cut the list
+	# and the import question make of it.
+	if has_repeated_modifier(stroke):
+		return {}
 	var rest := stroke.substr(i)
 	var keys := PackedStringArray()
 	var repeat := 1

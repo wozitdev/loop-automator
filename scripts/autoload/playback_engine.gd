@@ -222,6 +222,7 @@ func _refresh_hotkey() -> void:
 	var wanted := global_hotkey
 	if wanted and _stop_hotkey.state == StopHotkeyT.State.OFF:
 		_stop_hotkey.start()
+		_stop_hotkey.set_modifiers(is_running)
 	elif not wanted and _stop_hotkey.state != StopHotkeyT.State.OFF:
 		_stop_hotkey.stop()
 	set_process(_stop_hotkey.state != StopHotkeyT.State.OFF)
@@ -322,6 +323,8 @@ func start() -> void:
 		return
 	is_running = true
 	_generation += 1
+	# F8 with a modifier down stops it too, while it runs (see StopHotkey).
+	_stop_hotkey.set_modifiers(true)
 	_user_cursor = _mouse_pos()
 	_loop_moved = false
 	_has_last_hit = false
@@ -362,6 +365,7 @@ func stop(reason: String = "Stopped.") -> void:
 	if not is_running:
 		return
 	is_running = false
+	_stop_hotkey.set_modifiers(false)
 	last_stop_reason = reason
 	_generation += 1
 	_interrupt_helper()
@@ -540,6 +544,8 @@ func _execute_action(action: LoopActionT) -> int:
 			var p := _mouse_pos()
 			if action.move_to:
 				p = action.roll_point()
+				if _off_screens(action, [p]):
+					return LoopActionT.OnFail.CONTINUE
 				var ms := action.roll_duration_ms()
 				if ms > 0:
 					var gen := _generation
@@ -564,6 +570,8 @@ func _execute_action(action: LoopActionT) -> int:
 		LoopActionT.Type.DRAG:
 			var p := action.roll_point()
 			var p2 := action.roll_point2()
+			if _off_screens(action, [p, p2]):
+				return LoopActionT.OnFail.CONTINUE
 			_set_tracker(p, true, "DRAG START")
 			backend.mouse_button(action.button, true, p)
 			if backend.last_skipped:
@@ -1004,6 +1012,8 @@ func _execute_captured(action: LoopActionT) -> void:
 		LoopActionT.Type.DRAG:
 			kind = "drag"
 			path = MousePathT.make(from, to, ms, action.wiggle)
+	if kind == "click" and _off_screens(action, [from]) or kind == "drag" and _off_screens(action, [from, to]):
+		return
 	var label := kind.to_upper() + " ↩"
 	_set_tracker(from, true, label)
 	var b := backend
@@ -1481,6 +1491,25 @@ func _scan_off_thread(reader: InputBackendT, scan: Callable) -> Dictionary:
 		_detect_thread = null
 		_detect_reader = null
 	return result
+
+
+## True (and said on the status line) when one of points of a press or a
+## drag is on no screen: Windows would press it at the nearest screen's edge
+## (a window's Close button, the taskbar's corner), where nothing shows it.
+func _off_screens(action: LoopActionT, points: Array) -> bool:
+	var count := DisplayServer.get_screen_count()
+	if count <= 0:
+		return false
+	for p in points:
+		var on := false
+		for screen in count:
+			if Rect2i(DisplayServer.screen_get_position(screen), DisplayServer.screen_get_size(screen)).has_point(p):
+				on = true
+				break
+		if not on:
+			emit_signal("status", "%s skipped: its point (%d, %d) is on no screen." % [LoopActionT.type_name(action.type), p.x, p.y])
+			return true
+	return false
 
 
 ## The rect every connected display lies in (screen coordinates), or an

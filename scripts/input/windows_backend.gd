@@ -321,6 +321,38 @@ function Held-Needs([int]$vk) {
   }
   return $false
 }
+# Whether a held character needs Shift for itself (not from its own "+",
+# which its release lets go of): then a Shift kept down is the helper's.
+function Char-Needs-Shift {
+  foreach ($id in @($script:HeldShift.Keys)) {
+    if ($script:HeldShift[$id] -and -not $id.Split('|')[0].Contains('s')) { return $true }
+  }
+  return $false
+}
+# Whether SendKeys text presses a modifier itself (+ ^ %) or needs one for a
+# character (a capital's Shift, AltGr): what it would press and let go of.
+# Named keys ({DOWN}, {F4 3}) press none.
+function Types-Modifiers([string]$text) {
+  $rest = [regex]::Replace($text, '\\{[A-Za-z][A-Za-z0-9]*( +[0-9]+)?\\}', '')
+  $chars = New-Object System.Text.StringBuilder
+  $i = 0
+  while ($i -lt $rest.Length) {
+    $c = $rest[$i]
+    if ($c -eq '{') {
+      $m = [regex]::Match($rest.Substring($i), '\\A\\{(.)( +[0-9]+)?\\}')
+      if ($m.Success) { [void]$chars.Append($m.Groups[1].Value); $i += $m.Length; continue }
+      return $true
+    }
+    if ('+^%'.Contains([string]$c)) { return $true }
+    if (-not '~()'.Contains([string]$c)) { [void]$chars.Append($c) }
+    $i++
+  }
+  foreach ($ch in $chars.ToString().ToCharArray()) {
+    $scan = [Win32In]::VkKeyScanW($ch)
+    if ($scan -eq -1 -or (($scan -shr 8) -band 7) -ne 0) { return $true }
+  }
+  return $false
+}
 # Whether a press this helper holds keeps a modifier down (see Held-Needs),
 # or its own Shift for a held character.
 function Holds-Modifier {
@@ -766,9 +798,13 @@ switch ($cmd) {
     # SendKeys lets go of every modifier it presses and puts Shift down for
     # capitals itself: with a Key Down holding one (\"^\", {SHIFT}, a capital's
     # Shift) it would take that from it, or type \"{DEL}\" as Shift+Del.
-    if (Holds-Modifier) { throw 'a Key Down holds a modifier: typing now would change or release it' }
+    # Only for text that presses a modifier itself or needs Shift for a
+    # character: {DOWN} or a plain letter under a held {SHIFT} / {CTRL} is
+    # what holding it is for. (Checked once the text is read, below.)
     Add-Type -AssemblyName System.Windows.Forms
     $text = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([string]$a[1]))
+    if ($script:OwnShift) { throw 'held-modifier: a Key Down holds Shift for its character; typing now would type something else' }
+    if ((Holds-Modifier) -and (Types-Modifiers $text)) { throw 'held-modifier: a Key Down holds a modifier this text would press and let go of' }
     # Text SendKeys cannot read (a stray brace, an unknown {keyword}) is
     # refused whole, nothing typed. Its message quotes what it did not
     # like ('Keyword \"PASSWORD\" is not valid.') and the answer ends up in
@@ -810,7 +846,7 @@ switch ($cmd) {
     # The Shift the helper holds for a held character (a Key Down of \"A\")
     # would turn what is typed now into something else (\"b\" into \"B\",
     # \"^w\" into Ctrl+Shift+W, {DEL} into Shift+Del).
-    if ($script:OwnShift) { throw 'a Key Down holds Shift for its character: typing now would type something else' }
+    if ($script:OwnShift) { throw 'held-modifier: a Key Down holds Shift for its character; typing now would type something else' }
     $mods = [string]$a[1]; $keys = ([string]$a[2]).Split(',')
     $lead = [int]$a[3]; $hold = [int]$a[4]; $gap = [int]$a[5]; $trail = [int]$a[6]
     $down = @()
@@ -910,7 +946,7 @@ switch ($cmd) {
     foreach ($pk in $plan) {
       if ($null -ne $pk[1] -and $script:ModVks -notcontains $pk[1].vk) { $shifts += ($mods.Contains('s') -or [bool]$pk[1].shift) }
     }
-    if (@($shifts | Select-Object -Unique).Count -gt 1) { throw 'keys held together need Shift and no Shift' }
+    if (@($shifts | Select-Object -Unique).Count -gt 1) { throw 'held-modifier: keys held together would need Shift and no Shift' }
     $pressed = @(); $ownsShift = $false
     try {
       foreach ($m in (Mod-Vks $mods)) { Key-Event $m 0; $pressed += $m }
@@ -966,7 +1002,7 @@ switch ($cmd) {
       if ($fam -ne 0 -and (Held-Needs $fam)) {
         # A modifier key held another press still needs: kept, and a Shift
         # kept so is the helper's to let go of with the last of them.
-        if ($fam -eq 0x10) { $script:OwnShift = $true }
+        if ($fam -eq 0x10 -and (Char-Needs-Shift)) { $script:OwnShift = $true }
         continue
       }
       Key-Event $r.vk ($r.ext -bor 2)
@@ -982,7 +1018,7 @@ switch ($cmd) {
     [array]::Reverse($down)
     foreach ($m in $down) {
       if (Held-Needs $m) {
-        if ($m -eq 0x10) { $script:OwnShift = $true }
+        if ($m -eq 0x10 -and (Char-Needs-Shift)) { $script:OwnShift = $true }
       } else {
         Key-Event $m 2
         if ($m -eq 0x10) { $script:OwnShift = $false }
@@ -1222,13 +1258,17 @@ $script:abortFile = Join-Path (Split-Path -Parent $PSCommandPath) ('abort-' + $P
 [Scan]::AbortFile = $script:abortFile
 if ([System.IO.File]::Exists($script:abortFile)) { [System.IO.File]::Delete($script:abortFile) }
 $out.WriteLine('ready'); $out.Flush()
-# Whatever way the loop ends - stdin closed because Loop Automator crashed or
-# was ended from Task Manager, where no release of its own comes - what this
-# helper holds down is let go of (see Release-Own).
+# The loop ending without a 'quit' - stdin closed because Loop Automator
+# crashed or was ended from Task Manager, where no release of its own comes -
+# lets go of what this helper holds down (see Release-Own). A 'quit' is the
+# app's own shutdown, which lets go itself, or a restart of a helper that did
+# not answer in time, after which the run goes on with what it holds.
+$releaseAtEnd = $true
 try {
 while ($true) {
   $line = [Console]::In.ReadLine()
-  if ($null -eq $line -or $line -eq 'quit') { break }
+  if ($line -eq 'quit') { $releaseAtEnd = $false; break }
+  if ($null -eq $line) { break }
   $p = $line.Split(' ')
   try {
     switch ($p[0]) {
@@ -1253,7 +1293,7 @@ while ($true) {
   }
   $out.Flush()
 }
-} finally { Release-Own }
+} finally { if ($releaseAtEnd) { Release-Own } }
 """
 
 
@@ -1775,7 +1815,8 @@ func _run_sync(extra: PackedStringArray, timeout_ms: int = SERVER_READ_TIMEOUT_M
 			# valid"), or in whatever a translated .NET uses - and that is a
 			# piece of what the loop types; the log is what gets attached to
 			# bug reports (see _loggable). None of it is logged.
-			if extra[0] in ["key", "hold", "kdown", "kup", "kupall"]:
+			# (The helper's own refusals, which quote nothing, are: "held-modifier: …".)
+			if extra[0] in ["key", "hold", "kdown", "kup", "kupall"] and not why.begins_with("held-modifier: "):
 				why = "(the message is not logged: it may quote what was typed)"
 			# A captured action a stop asked to end (see interrupt) answers
 			# "error aborted": meant, not a fault.
@@ -2053,6 +2094,10 @@ func send_keys(text: String) -> void:
 		keys_refused = true
 		return
 	for stroke in KeyStrokesT.split(clean):
+		if KeyStrokesT.has_repeated_modifier(stroke):
+			push_warning("WindowsBackend: key text not sent: a keystroke names the same modifier twice.")
+			keys_refused = true
+			return
 		if KeyStrokesT.has_bare_win(stroke):
 			push_warning("WindowsBackend: key text not sent: a Windows key (\"$\") on a stroke only SendKeys could type.")
 			keys_refused = true

@@ -434,7 +434,7 @@ func _build_toolbar() -> Control:
 	hotkey_check = CheckBox.new()
 	hotkey_check.text = "~F8"
 	hotkey_check.focus_mode = Control.FOCUS_NONE
-	hotkey_check.tooltip_text = "Checked: F8 starts and stops the loop from any window while Loop Automator is open (other programs do not get F8 meanwhile), and this window moves out of the way while a loop runs.\nUnchecked: F8 only works while this window has the focus."
+	hotkey_check.tooltip_text = "Checked: F8 starts and stops the loop from any window while Loop Automator is open (other programs do not get F8 meanwhile; while a loop runs, F8 with Shift, Ctrl, Alt or Win stops it too), and this window moves out of the way while a loop runs.\nUnchecked: F8 only works while this window has the focus."
 	hotkey_check.button_pressed = _load_bool_setting("global_hotkey", true)
 	Playback.set_global_hotkey(hotkey_check.button_pressed)
 	hotkey_check.toggled.connect(func(v):
@@ -655,6 +655,7 @@ func _build_editor_panel() -> Control:
 # ======================================================================
 func _connect_signals() -> void:
 	ProjectData.limit_reached.connect(func(message: String): status_label.text = message)
+	ProjectData.notice.connect(func(message: String): status_label.text = message)
 	ProjectData.layers_changed.connect(_refresh_layers)
 	ProjectData.layers_changed.connect(_refresh_layer_props)
 	ProjectData.layers_changed.connect(_refresh_actions_for_layers)
@@ -734,6 +735,12 @@ func _on_selection_changed() -> void:
 
 
 func _on_project_replaced() -> void:
+	# Another loop open (picked, stepped to, the last one deleted): back to
+	# Safe, as after an import - with Live left on, one press of Run or an
+	# idle ~F8 from any window would drive the real mouse and keyboard with
+	# a loop that was not the one Live was chosen for.
+	if not Playback.is_running:
+		_switch_to_safe_backend_if_needed()
 	_delay_pair.set_values(ProjectData.project.loop_delay_ms, ProjectData.project.loop_delay_ms_max)
 	delay_each_check.set_pressed_no_signal(ProjectData.project.delay_after_each_action)
 	_refresh_layers()
@@ -959,6 +966,21 @@ func _fit_described(described: String, room: float, a: LoopActionT) -> String:
 		used += _px(end)
 		hi -= 1
 		end_done = true
+	# Two end keystrokes that do not fit together (short, but wide): each
+	# over half the room is squeezed to its share - both to half, or one to
+	# what the other leaves.
+	if not start_done and not end_done and hi - lo >= 2 and widths[lo] + widths[hi - 1] > left:
+		var half := left / 2.0
+		if widths[hi - 1] > half:
+			end = _squeezed(pieces[hi - 1], half if widths[lo] > half else left - widths[lo])
+			used += _px(end)
+			hi -= 1
+			end_done = true
+		if widths[lo] > half:
+			start = _squeezed(pieces[lo], left - used if widths[hi] <= half else half)
+			used += _px(start)
+			lo += 1
+			start_done = true
 	# Then a keystroke from each end in turn, while one fits: neither end is
 	# left out for the other's sake (a wide "{ENTER}" last, a wide start).
 	var first := lo
@@ -974,6 +996,19 @@ func _fit_described(described: String, room: float, a: LoopActionT) -> String:
 			used += widths[last - 1]
 			last -= 1
 			grew = true
+	# An end left empty (its keystroke wider than the half left to it, the
+	# other end squeezed) gets what room is left, squeezed, rather than
+	# nothing: the end first, what is typed last.
+	if not end_done and last == hi and last > first and left - used > _px("…"):
+		end = _squeezed(pieces[last - 1], left - used)
+		used += _px(end)
+		last -= 1
+		end_done = true
+	if not start_done and first == lo and first < last and left - used > _px("…"):
+		start = _squeezed(pieces[first], left - used)
+		used += _px(start)
+		first += 1
+		start_done = true
 	if not start_done:
 		start = "".join(pieces.slice(0, first))
 	if not end_done:

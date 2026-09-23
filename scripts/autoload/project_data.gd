@@ -23,6 +23,7 @@ signal project_replaced                  ## A whole new project was loaded/creat
 signal layers_changed                    ## Layers added/removed/reordered/renamed
 signal actions_changed(layer_index: int) ## Action list of a layer changed
 signal limit_reached(message: String)    ## An add or duplicate refused: the loop is full
+signal notice(message: String)           ## Something the user should know (the status line)
 signal action_modified(layer_index: int, action_index: int)
 signal selection_changed                 ## Active layer / action selection changed
 signal overlay_view_changed              ## Overlay layer / show-all toggled
@@ -819,7 +820,7 @@ func _load_or_init_store() -> void:
 		else:
 			push_warning("ProjectData: the loop list was not readable, and could not be kept aside; it is left as it is.")
 			_store_index_unreadable = true
-		store_notice = "The list of loops could not be opened (another program has it?): loops made or imported now are saved, but will not be listed after a restart - close that program and restart Loop Automator."
+			store_notice = "The list of loops is damaged and could not be set aside: loops made or imported now are saved, but will not be listed after a restart."
 		loop_stack = []
 		active_loop_id = -1
 		_next_loop_id = 1
@@ -857,7 +858,10 @@ func _save_store_index() -> void:
 		"active_loop_id": active_loop_id,
 		"loops": loop_stack,
 	}
-	_write_text_file(STORE_INDEX_PATH, JSON.stringify(payload, "\t"))
+	var err := _write_text_file(STORE_INDEX_PATH, JSON.stringify(payload, "\t"))
+	if err != OK:
+		push_warning("ProjectData: the loop list could not be written (error %d)." % err)
+		emit_signal("notice", "The list of loops could not be written (disk full?): loops changed since are saved, but the list of them may be out of date after a restart.")
 
 
 func _loop_index_from_id(loop_id: int) -> int:
@@ -942,10 +946,15 @@ static func _write_text_file(path: String, text: String) -> Error:
 	var f := FileAccess.open(tmp, FileAccess.WRITE)
 	if f == null:
 		return FileAccess.get_open_error()
-	f.store_string(text)
+	var ok := f.store_string(text)
 	var err := f.get_error()
 	f.close()
 	var abs_tmp := ProjectSettings.globalize_path(tmp)
+	# A write that fails at close (a full disk: a small file is written only
+	# then) is not reported by the file: what is on disk is read back and
+	# must be all of it, or the old file would be replaced by an empty one.
+	if err == OK and (not ok or FileAccess.get_file_as_bytes(tmp) != text.to_utf8_buffer()):
+		err = ERR_FILE_CANT_WRITE
 	if err != OK:
 		DirAccess.remove_absolute(abs_tmp)
 		return err
