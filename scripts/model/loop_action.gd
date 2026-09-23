@@ -214,7 +214,7 @@ const NOTCHES_MAX := 200
 const KEYS_MAX_CHARS := 8192
 const COMMENT_MAX_CHARS := 2000
 ## The most of a Key's text the action list shows (see describe).
-const DESCRIBE_KEYS_CHARS := 200
+const DESCRIBE_KEYS_CHARS := 64
 
 
 ## Field `key` of a loop-file dictionary as a whole number: the number as
@@ -657,14 +657,24 @@ func describe() -> String:
 			# Worked out once per text (a list of tens of thousands is
 			# described whole on every rebuild; comparing is far cheaper).
 			if keys != _described_keys or _described_shown.is_empty():
-				var shown := plain_text(keys, DESCRIBE_KEYS_CHARS)
+				# A run of spaces shown as its count: blank, a hundred of them
+				# would push what follows past the row's edge unseen.
+				if _space_run == null:
+					_space_run = RegEx.create_from_string(" {4,}")
+				var text := ""
+				var pos := 0
+				for m in _space_run.search_all(keys):
+					text += keys.substr(pos, m.get_start() - pos) + " ⟨%d spaces⟩ " % m.get_string().length()
+					pos = m.get_end()
+				text += keys.substr(pos)
+				var shown := plain_text(text, DESCRIBE_KEYS_CHARS)
 				# Longer or not by the whole text (clean already): cleaning the
 				# cut can take a joiner off its end, and the cut would then pass
 				# for all of it.
-				if keys.length() > DESCRIBE_KEYS_CHARS or shown.length() < keys.length():
-					# Its start and its end: what runs last in a long text is as much
-					# a part of it as what runs first ("notepad", spaces, "$rcmd~").
-					shown = keys.left(DESCRIBE_KEYS_CHARS - 60) + " … " + keys.right(57)
+				if text.length() > DESCRIBE_KEYS_CHARS or shown.length() < text.length():
+					# Its start and its end, both within a row: what runs last in a
+					# long text is as much a part of it as what runs first.
+					shown = text.left(DESCRIBE_KEYS_CHARS / 2) + " … " + text.right(DESCRIBE_KEYS_CHARS / 2 - 3)
 				_described_keys = keys
 				_described_shown = ltr_marked(shown)
 			return "Key%s: \"%s\"" % [" " + press if not press.is_empty() else "", _described_shown]
@@ -721,6 +731,7 @@ static func ltr_marked(text: String) -> String:
 	return _rtl_letter.sub(marked, "$1" + char(0x200E), true)
 static var _rtl: RegEx = null
 static var _special: RegEx = null
+static var _space_run: RegEx = null
 static var _rtl_letter: RegEx = null
 
 

@@ -318,4 +318,8 @@ static func helper_only(press: Dictionary) -> bool:
 		# another character on many layouts ("&", "6"...).
 		if k in ["c94", "c37", "c43"]:
 			return true
+		# "{~}": a dead key on some layouts (US-International, Portuguese),
+		# which the helper types as the character itself.
+		if k == "c126":
+			return true
 	return false

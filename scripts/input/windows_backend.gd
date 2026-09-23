@@ -210,6 +210,44 @@ public class Win32In {
   }
   // One wheel notch (delta +-120: up / right positive) where the cursor is.
   [DllImport(\"user32.dll\", EntryPoint=\"SendInput\")] static extern uint SendKeyInput(uint n,Win32KeyInput[] inputs,int size);
+  [DllImport(\"user32.dll\", CharSet=CharSet.Unicode)] static extern int ToUnicodeEx(uint vk,uint scan,byte[] state,System.Text.StringBuilder buf,int size,uint flags,IntPtr hkl);
+  [DllImport(\"user32.dll\")] static extern IntPtr GetKeyboardLayout(uint thread);
+  // Whether the key VkKeyScanW gives for `c` (with the Shift / Ctrl / Alt it
+  // says the character needs) is a dead key on this layout: pressed, it waits
+  // to put its accent on the next letter. Flag 4: the keyboard's own
+  // dead-key state is left as it is.
+  public static bool IsDeadChar(char c) {
+    short scan = VkKeyScanW(c);
+    if (scan == -1) return false;
+    uint vk = (uint)(scan & 0xFF);
+    int mods = (scan >> 8) & 0xFF;
+    byte[] state = new byte[256];
+    if ((mods & 1) != 0) state[0x10] = 0x80;
+    if ((mods & 2) != 0) state[0x11] = 0x80;
+    if ((mods & 4) != 0) state[0x12] = 0x80;
+    System.Text.StringBuilder buf = new System.Text.StringBuilder(8);
+    return ToUnicodeEx(vk, MapVirtualKeyW(vk, 0), state, buf, 8, 4, GetKeyboardLayout(0)) < 0;
+  }
+  // The Shift that makes `c`'s key type `c` as CapsLock is right now: 0
+  // (none), 1 (Shift), or -1 when neither does (the character is typed as
+  // itself then). Asked of the layout (flag 4: its state left as it is),
+  // not guessed from letter case - CapsLock leaves some letter keys alone
+  // (Italian \"à\", Slovak \"é\").
+  public static int ShiftFor(char c) {
+    short scan = VkKeyScanW(c);
+    if (scan == -1) return -1;
+    uint vk = (uint)(scan & 0xFF);
+    bool caps = (GetKeyState(0x14) & 1) != 0;
+    for (int shift = 0; shift < 2; shift++) {
+      byte[] state = new byte[256];
+      if (caps) state[0x14] = 0x01;
+      if (shift == 1) state[0x10] = 0x80;
+      System.Text.StringBuilder buf = new System.Text.StringBuilder(8);
+      int n = ToUnicodeEx(vk, MapVirtualKeyW(vk, 0), state, buf, 8, 4, GetKeyboardLayout(0));
+      if (n == 1 && buf[0] == c) return shift;
+    }
+    return -1;
+  }
   // One character typed as itself (KEYEVENTF_UNICODE), whatever the layout
   // has or lacks a key for - not through SendKeys, whose \"{^}\" / \"{%}\" /
   // \"{+}\" are US-layout key combinations that type other characters.
@@ -271,25 +309,33 @@ function Mod-Vks([string]$mods) {
 # French layouts: pressed, it waits to put an accent on the next letter,
 # \"x{^}e\" typing \"xê\" - MAPVK_VK_TO_CHAR sets the top bit for one). Such a
 # character is typed as itself (TypeUnicode).
-function No-Plain-Key([int]$scan) {
+function No-Plain-Key([int]$scan, [char]$ch) {
   if ($scan -eq -1 -or ((($scan -shr 8) -band 6) -ne 0)) { return $true }
-  $char = [uint32][Win32In]::MapVirtualKeyW([uint32]($scan -band 0xFF), 2)
-  return (($char -shr 31) -eq 1)
+  return [Win32In]::IsDeadChar($ch)
 }
 # A key of the kdown / kup commands (\"c<code>\" a character found on the
 # keyboard layout, \"v<vk>\" a virtual key) as @{ vk; shift; ext }: the key to
 # press, whether Shift is needed for the character (unless Shift is a
 # modifier already) and the extended-key flag the navigation keys carry.
 # $null for a character the layout has no plain key for.
-function Resolve-Key([string]$k, [string]$mods) {
+function Resolve-Key([string]$k, [string]$mods, [bool]$caps = $false) {
   $vk = 0; $shift = $false
   if ($k.StartsWith('v')) {
     $vk = [int]$k.Substring(1)
     if ($vk -lt 1 -or $vk -gt 254) { throw ('not a key: ' + $k) }
   } else {
-    $scan = [Win32In]::VkKeyScanW([char][int]$k.Substring(1))
-    if (No-Plain-Key $scan) { return $null }
+    $ch = [char][int]$k.Substring(1)
+    $scan = [Win32In]::VkKeyScanW($ch)
+    if (No-Plain-Key $scan $ch) { return $null }
     $vk = $scan -band 0xFF; $shift = ((($scan -shr 8) -band 1) -eq 1) -and -not $mods.Contains('s')
+    # With `caps` (a press, CapsLock on) and no modifier of the text's own:
+    # the Shift the layout needs for the character as CapsLock is now (see
+    # 'hold'); none that types it, and it is typed as itself.
+    if ($caps -and $mods -notmatch '[csaw]') {
+      $sf = [Win32In]::ShiftFor($ch)
+      if ($sf -lt 0) { return $null }
+      $shift = ($sf -eq 1)
+    }
   }
   $ext = 0; if (($vk -ge 0x21 -and $vk -le 0x28) -or $vk -eq 0x2D -or $vk -eq 0x2E) { $ext = 1 }
   return @{ vk = $vk; shift = $shift; ext = $ext }
@@ -674,12 +720,21 @@ switch ($cmd) {
     # by SendKeys and put its accent on the next letter: the text is
     # refused, nothing typed, rather than typed as another text. (SendKeys'
     # own characters are its syntax, and braced names are plain letters.)
-    foreach ($c in $text.ToCharArray()) {
-      if ('+^%~(){}[]'.Contains([string]$c)) { continue }
-      $s = [Win32In]::VkKeyScanW($c)
-      if ($s -ne -1 -and ((([uint32][Win32In]::MapVirtualKeyW([uint32]($s -band 0xFF), 2)) -shr 31) -eq 1)) {
-        throw 'the text has a character this keyboard layout types as a dead key'
-      }
+    # The characters looked at: those outside braces that are not syntax,
+    # and a braced one (\"{~}\", \"{~ 3}\", \"{}}\"), which is typed as itself.
+    $braced = '\\{\\}[^}]*\\}|\\{[^}]*\\}'
+    $chars = @()
+    foreach ($m in [regex]::Matches($text, $braced)) {
+      $inner = $m.Value.Substring(1, $m.Value.Length - 2)
+      $kw = ($inner -split '\\s', 2)[0]
+      if ($inner.StartsWith('}')) { $kw = '}' }
+      if ($kw.Length -eq 1) { $chars += $kw[0] }
+    }
+    foreach ($c in ([regex]::Replace($text, $braced, '')).ToCharArray()) {
+      if (-not '+^%~(){}[]'.Contains([string]$c)) { $chars += $c }
+    }
+    foreach ($c in $chars) {
+      if ([Win32In]::IsDeadChar($c)) { throw 'the text has a character this keyboard layout types as a dead key' }
     }
     try { Send-Keys $text }
     catch { throw 'the text is not valid SendKeys syntax' }
@@ -714,17 +769,24 @@ switch ($cmd) {
           $scan = [Win32In]::VkKeyScanW($ch)
           # No key for it, or one that needs Ctrl / Alt (AltGr) on this
           # layout: typed as the character itself.
-          if (No-Plain-Key $scan) {
+          if (No-Plain-Key $scan $ch) {
             [Win32In]::TypeUnicode($ch)
             if ($i -lt $keys.Count - 1) { Nap $gap }
             continue
           }
           $vk = $scan -band 0xFF; $shift = ((($scan -shr 8) -band 1) -eq 1) -and -not $mods.Contains('s')
-          # CapsLock on turns a letter's case round, as it does for a hand:
-          # Shift the other way, or \"Password\" is typed \"pASSWORD\" (SendKeys
-          # makes up for CapsLock, so plain typing would differ from paced).
-          if (-not $mods.Contains('s') -and ([char]::ToUpper($ch) -ne [char]::ToLower($ch)) -and (([Win32In]::GetKeyState(0x14) -band 1) -eq 1)) {
-            $shift = -not $shift
+          # The Shift the layout needs for this character as CapsLock is right
+          # now, asked of the layout (\"Password\" with CapsLock on is still
+          # \"Password\"; a key CapsLock leaves alone is left alone). Only for
+          # a plain character: a shortcut (\"^w\") is pressed as written.
+          if ($mods -notmatch '[csaw]') {
+            $sf = [Win32In]::ShiftFor($ch)
+            if ($sf -lt 0) {
+              [Win32In]::TypeUnicode($ch)
+              if ($i -lt $keys.Count - 1) { Nap $gap }
+              continue
+            }
+            $shift = ($sf -eq 1)
           }
         }
         # KEYEVENTF_EXTENDEDKEY for the navigation keys, as the keyboard sends them.
@@ -758,7 +820,8 @@ switch ($cmd) {
     # Every key is resolved before anything goes down, so a bad one is an
     # error and not a modifier left pressed; and what did go down before a
     # failure comes back up.
-    $plan = @(); foreach ($k in $keys) { $plan += ,@($k, (Resolve-Key $k $mods)) }
+    $caps = (([Win32In]::GetKeyState(0x14) -band 1) -eq 1)
+    $plan = @(); foreach ($k in $keys) { $plan += ,@($k, (Resolve-Key $k $mods $caps)) }
     $pressed = @()
     try {
       foreach ($m in (Mod-Vks $mods)) { Key-Event $m 0; $pressed += $m }
@@ -789,7 +852,9 @@ switch ($cmd) {
       try { $r = Resolve-Key $k $mods } catch { continue }
       if ($null -eq $r) { continue }
       Key-Event $r.vk ($r.ext -bor 2)
-      if ($r.shift) { Key-Event 0x10 2 }
+      # Shift for a character whatever this resolve says: the press may have
+      # had it the other way round (CapsLock then, see 'kdown').
+      if ($r.shift -or ($k.StartsWith('c') -and -not $mods.Contains('s'))) { Key-Event 0x10 2 }
     }
     $down = @(Mod-Vks $mods)
     [array]::Reverse($down)

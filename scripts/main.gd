@@ -2838,6 +2838,7 @@ static func _quoted_parts(line: String) -> Array:
 ## cut never splits a \" - each half in quotes of its own, with the " … "
 ## and the part's length outside them, where file text cannot put words.
 static func _cut_quoted(line: String, keep: int) -> String:
+	var counted := line.ends_with(" characters)")
 	var out := ""
 	var from := 0
 	var at := line.find(char(0x2066))
@@ -2849,10 +2850,13 @@ static func _cut_quoted(line: String, keep: int) -> String:
 		var raw: Variant = JSON.parse_string(line.substr(at + 1, end - at - 1))
 		if typeof(raw) == TYPE_STRING and (raw as String).length() > 2 * keep + 1:
 			var text: String = raw
-			segment = "%s … %s  (%d characters)" % [
+			segment = "%s … %s" % [
 				char(0x2066) + JSON.stringify(text.left(keep)) + char(0x2069),
-				char(0x2066) + JSON.stringify(text.right(keep)) + char(0x2069),
-				text.replace(char(0x200E), "").length()]
+				char(0x2066) + JSON.stringify(text.right(keep)) + char(0x2069)]
+			# Its length, unless the line gives the whole text's already (a
+			# part that is itself the start or end of a longer one, see _quoted).
+			if not counted:
+				segment += "  (%d characters)" % text.replace(char(0x200E), "").length()
 		out += line.substr(from, at - from) + segment
 		from = end + 1
 		at = line.find(char(0x2066), from)
