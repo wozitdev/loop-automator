@@ -712,11 +712,16 @@ static func ltr_marked(text: String) -> String:
 	if _rtl == null:
 		_rtl = RegEx.create_from_string("[\\x{0590}-\\x{08FF}\\x{FB1D}-\\x{FDFF}\\x{FE70}-\\x{FEFF}\\x{10800}-\\x{10FFF}\\x{1E800}-\\x{1EFFF}]")
 		_special = RegEx.create_from_string("([~^+%$(){}\\[\\]])")
+		_rtl_letter = RegEx.create_from_string("([\\x{0590}-\\x{08FF}\\x{FB1D}-\\x{FDFF}\\x{FE70}-\\x{FEFF}\\x{10800}-\\x{10FFF}\\x{1E800}-\\x{1EFFF}])")
 	if _rtl.search(text) == null:
 		return text
-	return _special.sub(text, char(0x200E) + "$1" + char(0x200E), true)
+	# ...and one after each right-to-left letter, so the digits and spaces
+	# that follow it attach left to right too ("ש 12 34" would show "34 12").
+	var marked := _special.sub(text, char(0x200E) + "$1" + char(0x200E), true)
+	return _rtl_letter.sub(marked, "$1" + char(0x200E), true)
 static var _rtl: RegEx = null
 static var _special: RegEx = null
+static var _rtl_letter: RegEx = null
 
 
 ## `raw` as a Key's text: one line with nothing in it that does not show

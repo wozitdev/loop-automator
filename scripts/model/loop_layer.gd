@@ -49,9 +49,18 @@ static func clean_name(raw: String) -> String:
 	# Blanks collapsed first, then cleaned (a mark after a no-break space
 	# would otherwise end up on the plain space it becomes), and no mark at
 	# the start, where it would sit on whatever comes before the name.
-	var name := _blank_runs.sub(raw.left(NAME_MAX_CHARS * 2), " ", true)
-	name = _edge_spaces.sub(LoopActionT.plain_text(name, NAME_MAX_CHARS), "", true)
-	return _leading_marks.sub(name, "", true)
+	# Until nothing changes: cleaning can join blanks an invisible character
+	# kept apart (" " U+200B " "), and every pass that changes the name
+	# shortens it.
+	var name := raw.left(NAME_MAX_CHARS * 2)
+	while true:
+		var before := name
+		name = _blank_runs.sub(name, " ", true)
+		name = _edge_spaces.sub(LoopActionT.plain_text(name, NAME_MAX_CHARS), "", true)
+		name = _leading_marks.sub(name, "", true)
+		if name == before:
+			break
+	return name
 static var _edge_spaces: RegEx = null
 static var _blank_runs: RegEx = null
 static var _leading_marks: RegEx = null

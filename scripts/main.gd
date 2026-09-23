@@ -2754,7 +2754,7 @@ static func _wrap_lines(text: String, width: int = DIALOG_WRAP) -> String:
 func _inform(text: String) -> void:
 	var dlg := AcceptDialog.new()
 	dlg.title = "Loop Automator"
-	dlg.dialog_text = _wrap_lines(text)
+	dlg.dialog_text = _dialog_text(text)
 	dlg.confirmed.connect(func(): dlg.queue_free())
 	dlg.canceled.connect(func(): dlg.queue_free())
 	add_child(dlg)
@@ -2771,13 +2771,7 @@ func _confirm(text: String, on_ok: Callable, ok_text: String = "Delete") -> void
 	# would otherwise make the dialog wider than the screen - its end, what
 	# a Key types last, off it - and wrapping it would set its rest on the
 	# margin the dialog's own sentences start at.
-	var screen := DisplayServer.screen_get_usable_rect(DisplayServer.window_get_current_screen())
-	var fit_px := mini(DIALOG_LINE_MAX_PX, screen.size.x - 80)
-	var lines := _wrap_lines(text).split("\n")
-	for i in lines.size():
-		if lines[i].begins_with(" "):
-			lines[i] = _fit_line(lines[i], fit_px)
-	dlg.dialog_text = "\n".join(lines)
+	dlg.dialog_text = _dialog_text(text)
 	dlg.ok_button_text = ok_text
 	dlg.confirmed.connect(func():
 		on_ok.call()
@@ -2787,26 +2781,74 @@ func _confirm(text: String, on_ok: Callable, ok_text: String = "Delete") -> void
 	dlg.popup_centered()
 
 
-const DIALOG_LINE_MAX_PX := 720
+const DIALOG_LINE_MAX_PX := 1000
+
+
+## `text` for a dialog: wrapped (see _wrap_lines), each indented line (a
+## name or a Key's text from a file) fitted to the screen (see _fit_line).
+func _dialog_text(text: String) -> String:
+	var screen := DisplayServer.screen_get_usable_rect(DisplayServer.window_get_current_screen())
+	var fit_px := mini(DIALOG_LINE_MAX_PX, screen.size.x - 80)
+	var lines := _wrap_lines(text).split("\n")
+	for i in lines.size():
+		if lines[i].begins_with(" "):
+			lines[i] = _fit_line(lines[i], fit_px)
+	return "\n".join(lines)
 
 
 ## `line` as it is if it is at most `max_px` wide in a dialog's font, else
-## its start and its end with " … " between, as much of both as fits.
+## with each quoted part (see _quoted: file text) cut to its start and end,
+## as much of both as fits - the app's own words around them never cut.
 func _fit_line(line: String, max_px: int) -> String:
 	var font := get_theme_font("font", "Label")
 	var size := get_theme_font_size("font_size", "Label")
 	if font == null or font.get_string_size(line, HORIZONTAL_ALIGNMENT_LEFT, -1, size).x <= max_px:
 		return line
-	var lo := 0
-	var hi := line.length() / 2
+	var longest := 0
+	for part in _quoted_parts(line):
+		longest = maxi(longest, (part as String).length())
+	var lo := 1
+	var hi := longest
 	while lo < hi:
 		var mid := (lo + hi + 1) / 2
-		var cut := line.left(mid) + " … " + line.right(mid)
-		if font.get_string_size(cut, HORIZONTAL_ALIGNMENT_LEFT, -1, size).x <= max_px:
+		if font.get_string_size(_cut_quoted(line, mid), HORIZONTAL_ALIGNMENT_LEFT, -1, size).x <= max_px:
 			lo = mid
 		else:
 			hi = mid - 1
-	return line.left(lo) + " … " + line.right(lo)
+	return _cut_quoted(line, lo)
+
+
+## The text inside each quote of `line` (between _quoted's isolate marks
+## and quote marks).
+static func _quoted_parts(line: String) -> Array:
+	var parts := []
+	var at := line.find(char(0x2066))
+	while at >= 0:
+		var end := line.find(char(0x2069), at)
+		if end < 0:
+			break
+		parts.append(line.substr(at + 2, end - at - 3))
+		at = line.find(char(0x2066), end)
+	return parts
+
+
+## `line` with every quoted part longer than 2 × `keep` characters cut to
+## its first and last `keep`, " … " between them, still in its quotes.
+static func _cut_quoted(line: String, keep: int) -> String:
+	var out := ""
+	var from := 0
+	var at := line.find(char(0x2066))
+	while at >= 0:
+		var end := line.find(char(0x2069), at)
+		if end < 0:
+			break
+		var inner := line.substr(at + 2, end - at - 3)
+		if inner.length() > 2 * keep + 1:
+			inner = inner.left(keep) + " … " + inner.right(keep)
+		out += line.substr(from, at + 2 - from) + inner + line.substr(end - 1, 2)
+		from = end + 1
+		at = line.find(char(0x2066), from)
+	return out + line.substr(from)
 
 
 func _rename_layer_dialog(index: int) -> void:
