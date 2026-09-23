@@ -657,24 +657,25 @@ func describe() -> String:
 			# Worked out once per text (a list of tens of thousands is
 			# described whole on every rebuild; comparing is far cheaper).
 			if keys != _described_keys or _described_shown.is_empty():
-				# A run of spaces shown as its count: blank, a hundred of them
-				# would push what follows past the row's edge unseen.
-				if _space_run == null:
-					_space_run = RegEx.create_from_string(" {4,}")
-				var text := ""
-				var pos := 0
-				for m in _space_run.search_all(keys):
-					text += keys.substr(pos, m.get_start() - pos) + " ⟨%d spaces⟩ " % m.get_string().length()
-					pos = m.get_end()
-				text += keys.substr(pos)
-				var shown := plain_text(text, DESCRIBE_KEYS_CHARS)
+				# Only its two ends are worked on (see _shown_part): a text can
+				# have thousands of runs of spaces, and a list tens of thousands
+				# of texts.
+				var head := _shown_part(keys, DESCRIBE_KEYS_CHARS + 1)
+				var shown := plain_text(head, DESCRIBE_KEYS_CHARS)
 				# Longer or not by the whole text (clean already): cleaning the
 				# cut can take a joiner off its end, and the cut would then pass
 				# for all of it.
-				if text.length() > DESCRIBE_KEYS_CHARS or shown.length() < text.length():
+				if head.length() > DESCRIBE_KEYS_CHARS or shown.length() < head.length():
 					# Its start and its end, both within a row: what runs last in a
 					# long text is as much a part of it as what runs first.
-					shown = text.left(DESCRIBE_KEYS_CHARS / 2) + " … " + text.right(DESCRIBE_KEYS_CHARS / 2 - 3)
+					var keep := DESCRIBE_KEYS_CHARS / 2 - 3
+					# The end from where a run of blanks it starts in begins, so
+					# the run is counted whole.
+					var from := maxi(0, keys.length() - keep)
+					var before := _blank_tail.search(keys.left(from))
+					if before != null:
+						from = before.get_start()
+					shown = head.left(DESCRIBE_KEYS_CHARS / 2) + " … " + _shown_part(keys.substr(from), -1).right(keep)
 				_described_keys = keys
 				_described_shown = ltr_marked(shown)
 			return "Key%s: \"%s\"" % [" " + press if not press.is_empty() else "", _described_shown]
@@ -731,7 +732,41 @@ static func ltr_marked(text: String) -> String:
 	return _rtl_letter.sub(marked, "$1" + char(0x200E), true)
 static var _rtl: RegEx = null
 static var _special: RegEx = null
-static var _space_run: RegEx = null
+static var _blank_run: RegEx = null
+static var _blank_tail: RegEx = null
+
+
+## Text as the action list shows it, from its start until it is at least
+## [param limit] long (all of it if -1). Every blank is a plain space: an
+## ideographic or em space is four times as wide, and a few dozen (in runs or
+## between letters) would push what follows past the row's edge unseen; and
+## a run of 4 or more is its count, " ⟨N spaces⟩ ". Unless the text has a
+## "⟨" or "⟩" of its own, which would make a count it spells out look like
+## one: its runs are plain spaces then, as narrow as a space gets.
+static func _shown_part(text: String, limit: int) -> String:
+	if _blank_run == null:
+		_blank_run = RegEx.create_from_string("[\\p{Zs}\\x{2800}]+")
+		_blank_tail = RegEx.create_from_string("[\\p{Zs}\\x{2800}]+\\z")
+	var counted := not (text.contains("⟨") or text.contains("⟩"))
+	var parts := PackedStringArray()
+	var size := 0
+	var pos := 0
+	while pos < text.length() and (limit < 0 or size < limit):
+		var m := _blank_run.search(text, pos)
+		var upto := m.get_start() if m != null else text.length()
+		if limit >= 0:
+			upto = mini(upto, pos + limit - size)
+		if upto > pos:
+			parts.append(text.substr(pos, upto - pos))
+			size += upto - pos
+			pos = upto
+			continue
+		var run := m.get_end() - m.get_start()
+		var shown := " ⟨%d spaces⟩ " % run if counted and run >= 4 else " ".repeat(mini(run, 4 if limit < 0 else limit - size))
+		parts.append(shown)
+		size += shown.length()
+		pos = m.get_end()
+	return "".join(parts)
 static var _rtl_letter: RegEx = null
 
 

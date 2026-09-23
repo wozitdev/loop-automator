@@ -318,7 +318,7 @@ function No-Plain-Key([int]$scan, [char]$ch) {
 # press, whether Shift is needed for the character (unless Shift is a
 # modifier already) and the extended-key flag the navigation keys carry.
 # $null for a character the layout has no plain key for.
-function Resolve-Key([string]$k, [string]$mods, [bool]$caps = $false) {
+function Resolve-Key([string]$k, [string]$mods) {
   $vk = 0; $shift = $false
   if ($k.StartsWith('v')) {
     $vk = [int]$k.Substring(1)
@@ -328,14 +328,6 @@ function Resolve-Key([string]$k, [string]$mods, [bool]$caps = $false) {
     $scan = [Win32In]::VkKeyScanW($ch)
     if (No-Plain-Key $scan $ch) { return $null }
     $vk = $scan -band 0xFF; $shift = ((($scan -shr 8) -band 1) -eq 1) -and -not $mods.Contains('s')
-    # With `caps` (a press, CapsLock on) and no modifier of the text's own:
-    # the Shift the layout needs for the character as CapsLock is now (see
-    # 'hold'); none that types it, and it is typed as itself.
-    if ($caps -and $mods -notmatch '[csaw]') {
-      $sf = [Win32In]::ShiftFor($ch)
-      if ($sf -lt 0) { return $null }
-      $shift = ($sf -eq 1)
-    }
   }
   $ext = 0; if (($vk -ge 0x21 -and $vk -le 0x28) -or $vk -eq 0x2D -or $vk -eq 0x2E) { $ext = 1 }
   return @{ vk = $vk; shift = $shift; ext = $ext }
@@ -356,6 +348,8 @@ $script:pinned = $false; $script:px = 0; $script:py = 0
 $script:pathBuf = ''
 # The server's abort file (see Wait-Until): set once it is serving.
 $script:abortFile = ''; $script:tick = 0
+# Per key a 'kdown' pressed: whether it put Shift down with it (see 'kup').
+$script:ShiftedBy = @{}
 function Read-Motion {
   $p = Read-Cursor
   $script:ux += $p.X - $script:lx; $script:uy += $p.Y - $script:ly
@@ -820,8 +814,11 @@ switch ($cmd) {
     # Every key is resolved before anything goes down, so a bad one is an
     # error and not a modifier left pressed; and what did go down before a
     # failure comes back up.
-    $caps = (([Win32In]::GetKeyState(0x14) -band 1) -eq 1)
-    $plan = @(); foreach ($k in $keys) { $plan += ,@($k, (Resolve-Key $k $mods $caps)) }
+    # CapsLock is not made up for here, unlike typing ('hold'): a key held
+    # is held for the key it is (W to walk), and a Shift held with it would
+    # turn it - and every click and key of other actions meanwhile - into
+    # something else (a sprint, Shift+Del).
+    $plan = @(); foreach ($k in $keys) { $plan += ,@($k, (Resolve-Key $k $mods)) }
     $pressed = @()
     try {
       foreach ($m in (Mod-Vks $mods)) { Key-Event $m 0; $pressed += $m }
@@ -833,6 +830,9 @@ switch ($cmd) {
         }
         if ($r.shift) { Key-Event 0x10 0; $pressed += 0x10 }
         Key-Event $r.vk $r.ext; $pressed += $r.vk
+        # Which presses put a Shift down, for 'kup' to let go of that one
+        # and no other (one held by a Key Down of {SHIFT}, or by the user).
+        $script:ShiftedBy["$mods|$($pk[0])"] = [bool]$r.shift
       }
       $pressed = @()
     } finally {
@@ -852,9 +852,13 @@ switch ($cmd) {
       try { $r = Resolve-Key $k $mods } catch { continue }
       if ($null -eq $r) { continue }
       Key-Event $r.vk ($r.ext -bor 2)
-      # Shift for a character whatever this resolve says: the press may have
-      # had it the other way round (CapsLock then, see 'kdown').
-      if ($r.shift -or ($k.StartsWith('c') -and -not $mods.Contains('s'))) { Key-Event 0x10 2 }
+      # Shift only if this press put it down: not one held by a Key Down of
+      # {SHIFT} or by the user. What this resolve says only for a press
+      # this helper did not make (a new one after a kill).
+      $id = "$mods|$k"
+      $shifted = [bool]$r.shift
+      if ($script:ShiftedBy.ContainsKey($id)) { $shifted = $script:ShiftedBy[$id]; $script:ShiftedBy.Remove($id) }
+      if ($shifted) { Key-Event 0x10 2 }
     }
     $down = @(Mod-Vks $mods)
     [array]::Reverse($down)
@@ -873,6 +877,7 @@ switch ($cmd) {
         Key-Event $vk $f
       }
     }
+    $script:ShiftedBy.Clear()
   }
   'cursor' {
     # Where the real cursor is right now, as "x,y" (Capture actions).

@@ -8,11 +8,47 @@ class_name InputBackend
 ## a loop cannot drive the app that is running it.
 var avoid_pid: int = 0
 ## True when the most recent input command was skipped because of `avoid_pid`.
-var last_skipped: bool = false
+var last_skipped: bool:
+	get: return _flag("skipped")
+	set(value): _set_flag("skipped", value)
 ## True when the most recent input command may not have happened: it failed,
 ## or the helper ended without answering (a button meant to come up may
 ## still be down).
-var last_failed: bool = false
+var last_failed: bool:
+	get: return _flag("failed")
+	set(value): _set_flag("failed", value)
+
+## The two above, per thread: a run's worker finishing its piece while a
+## stop's release runs on the main thread would otherwise set the release's
+## outcome to its own (a failed release read as done, and not tried again).
+## A worker's are the caller's once it is joined (see adopt_flags).
+static var _flags := {}
+static var _flags_mutex := Mutex.new()
+const _FLAG_NAMES: Array[String] = ["skipped", "failed"]
+
+
+static func _flag(name: String) -> bool:
+	_flags_mutex.lock()
+	var value: bool = _flags.get("%d %s" % [OS.get_thread_caller_id(), name], false)
+	_flags_mutex.unlock()
+	return value
+
+
+static func _set_flag(name: String, value: bool) -> void:
+	_flags_mutex.lock()
+	_flags["%d %s" % [OS.get_thread_caller_id(), name]] = value
+	_flags_mutex.unlock()
+
+
+## Makes what the last command of thread `id` (a worker just joined) came
+## to the calling thread's: the caller reads it after the join.
+static func adopt_flags(id: int) -> void:
+	_flags_mutex.lock()
+	for name in _FLAG_NAMES:
+		var key := "%d %s" % [id, name]
+		_flags["%d %s" % [OS.get_thread_caller_id(), name]] = _flags.get(key, false)
+		_flags.erase(key)
+	_flags_mutex.unlock()
 ## Set when a key command was not sent at all (no way to send it safely);
 ## stays set until the engine clears it for a new run.
 var keys_refused: bool = false

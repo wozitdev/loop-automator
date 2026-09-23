@@ -428,6 +428,10 @@ func _run_loop(gen: int) -> void:
 					return
 				if not is_running or gen != _generation:
 					break
+				# A Safe run leaves the builder open: an action deleted
+				# meanwhile makes the layer shorter than when this pass began.
+				if ai >= layer.actions.size():
+					break
 				var action: LoopActionT = layer.actions[ai]
 				if not action.enabled:
 					continue
@@ -692,14 +696,19 @@ func _execute_action(action: LoopActionT) -> int:
 			match action.capture_mode:
 				LoopActionT.CaptureMode.MOUSE:
 					# Where the user's own mouse is (see _user_cursor).
+					var travel_gen := _generation
 					await _travel(_mouse_pos(), _user_cursor, action.roll_duration_ms(), action.wiggle, "CAPTURE MOUSE")
-					emit_signal("status", "Capture: moved to your mouse position (%d, %d)" % [_user_cursor.x, _user_cursor.y])
+					# A stop during the travel has said why, and it did not get there.
+					if is_running and travel_gen == _generation:
+						emit_signal("status", "Capture: moved to your mouse position (%d, %d)" % [_user_cursor.x, _user_cursor.y])
 				LoopActionT.CaptureMode.DETECT:
 					# The last detect's spot. Nothing found yet is not a fault
 					# of the action (the detect may find next pass): carry on.
 					if _has_last_hit:
+						var travel_gen := _generation
 						await _travel(_mouse_pos(), _last_hit, action.roll_duration_ms(), action.wiggle, "CAPTURE DETECT")
-						emit_signal("status", "Capture: moved to the last detect's spot (%d, %d)" % [_last_hit.x, _last_hit.y])
+						if is_running and travel_gen == _generation:
+							emit_signal("status", "Capture: moved to the last detect's spot (%d, %d)" % [_last_hit.x, _last_hit.y])
 					else:
 						emit_signal("status", "Capture: no detect has found anything yet.")
 	return LoopActionT.OnFail.CONTINUE
@@ -1100,14 +1109,19 @@ func _off_thread(work: Callable) -> Variant:
 func _start_worker(work: Callable) -> Thread:
 	var thread := Thread.new()
 	_work_threads.append(thread)
-	thread.start(work)
+	# Which thread it was, for its command's outcome to be the caller's
+	# after the join (see InputBackend.adopt_flags).
+	thread.start(func() -> Array: return [work.call(), OS.get_thread_caller_id()])
 	return thread
 
 
 func _join_worker(thread: Thread) -> Variant:
-	var result: Variant = thread.wait_to_finish()
+	var done: Variant = thread.wait_to_finish()
 	_work_threads.erase(thread)
-	return result
+	if not (done is Array and (done as Array).size() == 2):
+		return null
+	InputBackendT.adopt_flags(done[1])
+	return done[0]
 
 
 ## Types a Key action's text the plain way: SendKeys gets it as it is. A
