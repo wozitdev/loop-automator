@@ -399,6 +399,9 @@ func _run_loop(gen: int) -> void:
 		for li in project.layers.size():
 			if not is_running or gen != _generation:
 				break
+			# A layer deleted during a Safe run (see the action guard below).
+			if li >= project.layers.size():
+				break
 			var layer: LoopLayerT = project.layers[li]
 			# Enabled, or the solo layer while one is set (see ProjectData).
 			if not ProjectData.layer_runs(li):

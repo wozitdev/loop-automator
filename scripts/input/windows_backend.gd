@@ -819,6 +819,10 @@ switch ($cmd) {
     # turn it - and every click and key of other actions meanwhile - into
     # something else (a sprint, Shift+Del).
     $plan = @(); foreach ($k in $keys) { $plan += ,@($k, (Resolve-Key $k $mods)) }
+    # Keys held together share one Shift: "(Ab)" would hold A's Shift over
+    # b as well, and B would be what repeats. Such a group is refused.
+    $shifts = @($plan | Where-Object { $null -ne $_[1] -and $_[0].StartsWith('c') } | ForEach-Object { [bool]$_[1].shift } | Select-Object -Unique)
+    if ($shifts.Count -gt 1) { throw 'keys held together need Shift and no Shift' }
     $pressed = @()
     try {
       foreach ($m in (Mod-Vks $mods)) { Key-Event $m 0; $pressed += $m }
