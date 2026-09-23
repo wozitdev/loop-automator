@@ -546,7 +546,6 @@ func _execute_action(action: LoopActionT) -> int:
 				# the last action's target. Skipped too, until a point lands.
 				_cursor_unplaced = true
 				return LoopActionT.OnFail.CONTINUE
-			_cursor_unplaced = false
 			await _travel(_mouse_pos(), p, action.roll_duration_ms(), action.wiggle, "MOVE")
 		LoopActionT.Type.CLICK:
 			# ~Move: get to the point first (over the duration, like a Move);
@@ -557,14 +556,16 @@ func _execute_action(action: LoopActionT) -> int:
 				return LoopActionT.OnFail.CONTINUE
 			if action.move_to:
 				p = action.roll_point()
-				_cursor_unplaced = false
 				if _off_screens(action, [p]):
 					# An Up is let go of all the same, where the cursor is: the
 					# button a Down pressed would otherwise stay down, every
 					# later move a drag.
 					if action.press_mode == LoopActionT.PressMode.UP and _held_buttons.has(action.button):
 						_let_go(action.button)
+					# (Nor did the cursor go where this Click meant it to.)
+					_cursor_unplaced = true
 					return LoopActionT.OnFail.CONTINUE
+				_cursor_unplaced = false
 				var ms := action.roll_duration_ms()
 				if ms > 0:
 					var gen := _generation
@@ -1298,6 +1299,9 @@ const TRAVEL_CHUNK_MS := 200
 ## bends the route a little), showing the travel on the tracker as `label`.
 ## With `ms` 0 it is a jump. A stop ends the travel where the cursor is.
 func _travel(from: Vector2i, to: Vector2i, ms: int, wiggle: bool, label: String) -> void:
+	# Every travel is to a point on a screen (a Move, a Click's, a Drag's, a
+	# Capture's): the cursor is somewhere again (see _cursor_unplaced).
+	_cursor_unplaced = false
 	var path := MousePathT.make(from, to, ms, wiggle)
 	if path.size() <= 2:
 		# A jump — or, going nowhere with a duration (a drag held in place),

@@ -2306,7 +2306,7 @@ func _stop_recording(reason: String = "", from_builder: bool = false) -> void:
 		return
 	status_label.text = "Recorded %d action%s into %s." % [added, "" if added == 1 else "s", _quoted(_record_layer.name)]
 	if RecordingT.skipped_keys > 0:
-		status_label.text += " %d key press%s with nothing to type it by (a dead key, Pause, the menu key) %s left out." % [RecordingT.skipped_keys, "" if RecordingT.skipped_keys == 1 else "es", "was" if RecordingT.skipped_keys == 1 else "were"]
+		status_label.text += " %d key press%s with nothing to type it by (Pause, the menu key) %s left out." % [RecordingT.skipped_keys, "" if RecordingT.skipped_keys == 1 else "es", "was" if RecordingT.skipped_keys == 1 else "were"]
 	if added < actions.size():
 		status_label.text += " The loop is full (%d actions): the rest was not kept." % ProjectData.LOOP_ACTIONS_MAX
 	if _recorder.limit_reached:

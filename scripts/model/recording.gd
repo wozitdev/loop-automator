@@ -41,7 +41,7 @@ const OEM := {
 
 
 ## Keys the last to_actions left out: no character and no name to type
-## them by (a dead key, Pause, the menu key). Said on the status line.
+## them by (Pause, the menu key). Said on the status line.
 static var skipped_keys := 0
 
 
@@ -284,10 +284,15 @@ static func _stroke(vk: int, mods: String, _extended: bool, ch: int = 0) -> Stri
 	for letter in mods:
 		prefix += {"c": "^", "s": "+", "a": "%", "w": "$"}.get(letter, "")
 	var key := ""
-	# A dead key (an accent waiting for its letter) types nothing of its
-	# own: left out (counted), not written as the US character on its code.
+	# A dead key (an accent waiting for its letter) comes negated: written as
+	# its accent's own character, the layout's - so a replay presses the same
+	# key (Ctrl+` stays Ctrl+`, US-International's ' stays '), or plain
+	# typing refuses it where it would wait for a letter; never the US
+	# character its code is named for.
 	if ch < 0:
-		return ""
+		ch = -ch
+		if ch <= 0x20:
+			return ""
 	if vk >= 0x41 and vk <= 0x5A:
 		key = char(vk).to_lower()
 		if shift and mods == "s":
