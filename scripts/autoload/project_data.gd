@@ -861,7 +861,10 @@ func _save_store_index() -> void:
 	var err := _write_text_file(STORE_INDEX_PATH, JSON.stringify(payload, "\t"))
 	if err != OK:
 		push_warning("ProjectData: the loop list could not be written (error %d)." % err)
-		emit_signal("notice", "The list of loops could not be written (disk full?): loops changed since are saved, but the list of them may be out of date after a restart.")
+		# After whatever the flow that wrote it says (a Save's "Saved."), and
+		# for the start-up message too if it happened before anyone listened.
+		store_notice = "The list of loops could not be written (disk full?): loops changed since are saved, but the list of them may be out of date after a restart."
+		emit_signal.call_deferred("notice", store_notice)
 
 
 func _loop_index_from_id(loop_id: int) -> int:

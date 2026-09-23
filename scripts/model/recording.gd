@@ -40,8 +40,14 @@ const OEM := {
 }
 
 
+## Keys the last to_actions left out: no character and no name to type
+## them by (a dead key, Pause, the menu key). Said on the status line.
+static var skipped_keys := 0
+
+
 ## The actions for `events`.
 static func to_actions(events: Array) -> Array[LoopActionT]:
+	skipped_keys = 0
 	return _actions(_items(events))
 
 
@@ -135,15 +141,18 @@ static func _items(events: Array) -> Array:
 				var dir := LoopActionT.ScrollDir.UP if delta > 0 else LoopActionT.ScrollDir.DOWN
 				if e["horizontal"]:
 					dir = LoopActionT.ScrollDir.RIGHT if delta > 0 else LoopActionT.ScrollDir.LEFT
-				var n := maxi(1, absi(delta) / 120)
+				# A notch is 120; a smooth wheel or a touchpad sends it in small
+				# steps (15, 30), so the run's steps are added up and it turns
+				# as many notches as they come to.
 				# (A Scroll turns NOTCHES_MAX at most: a longer run is two.)
 				if not wheel.is_empty() and (wheel["dir"] != dir or t - wheel["t1"] > WHEEL_GAP_MS \
-						or wheel["n"] + n > LoopActionT.NOTCHES_MAX):
-					items.append(_item("scroll", wheel["t0"], wheel["t1"], wheel))
+						or (wheel["sum"] + absi(delta)) / 120 > LoopActionT.NOTCHES_MAX):
+					_end_wheel(items, wheel)
 					wheel = {}
 				if wheel.is_empty():
-					wheel = {"t0": t, "t1": t, "dir": dir, "n": 0}
-				wheel["n"] += n
+					wheel = {"t0": t, "t1": t, "dir": dir, "n": 0, "sum": 0}
+				wheel["sum"] += absi(delta)
+				wheel["n"] = roundi(wheel["sum"] / 120.0)
 				wheel["t1"] = t
 			"k":
 				var vk := _vk(e["vk"])
@@ -174,15 +183,16 @@ static func _items(events: Array) -> Array:
 					for mvk in mods:
 						if not letters.contains(MODIFIERS[mvk]):
 							letters += MODIFIERS[mvk]
-					keys[vk] = {"t": t, "mods": letters, "other": false, "extended": e["extended"]}
+					keys[vk] = {"t": t, "mods": letters, "other": false, "extended": e["extended"], "ch": e.get("ch", 0)}
 				elif keys.has(vk):
 					# Motion still under way happened during the hold: it counts.
 					_flush_move(items, run, keys)
 					run = {}
 					var k: Dictionary = keys[vk]
 					keys.erase(vk)
-					var text := _stroke(vk, k["mods"], e["extended"])
+					var text := _stroke(vk, k["mods"], e["extended"], k["ch"])
 					if text.is_empty():
+						skipped_keys += 1
 						continue
 					if k["other"]:
 						items.append(_item("keydown", k["t"], k["t"], {"text": text}))
@@ -193,16 +203,18 @@ static func _items(events: Array) -> Array:
 						items.append(_item("key", k["t"], t, {"text": text}))
 	_flush_move(items, run, keys)
 	if not wheel.is_empty():
-		items.append(_item("scroll", wheel["t0"], wheel["t1"], wheel))
+		_end_wheel(items, wheel)
 	# Still down when the recording ended: pressed, never let go.
 	for b in buttons:
 		var d: Dictionary = buttons[b]
 		items.append(_item("down", d["t"], d["t"], {"button": b, "x": d["x"], "y": d["y"]}))
 	for vk in keys:
 		var k: Dictionary = keys[vk]
-		var text := _stroke(vk, k["mods"], k["extended"])
+		var text := _stroke(vk, k["mods"], k["extended"], k["ch"])
 		if not text.is_empty():
 			items.append(_item("keydown", k["t"], k["t"], {"text": text}))
+		else:
+			skipped_keys += 1
 	# By start time; the sort is not stable, so ties keep their order by hand.
 	for i in items.size():
 		items[i]["i"] = i
@@ -248,6 +260,12 @@ static func _touch(buttons: Dictionary, keys: Dictionary, mods: Dictionary, by_m
 			m["mouse"] = true
 
 
+## A wheel run as a Scroll, unless its steps came to less than half a notch.
+static func _end_wheel(items: Array, wheel: Dictionary) -> void:
+	if wheel["n"] >= 1:
+		items.append(_item("scroll", wheel["t0"], wheel["t1"], wheel))
+
+
 ## Left / right modifier codes as the plain ones.
 static func _vk(vk: int) -> int:
 	match vk:
@@ -260,7 +278,7 @@ static func _vk(vk: int) -> int:
 ## The SendKeys stroke for a key: its modifier prefixes (^ + % $) and the
 ## key - a character (Shift and a letter is the capital), a "{NAME}", or ""
 ## for a key with no name (skipped).
-static func _stroke(vk: int, mods: String, _extended: bool) -> String:
+static func _stroke(vk: int, mods: String, _extended: bool, ch: int = 0) -> String:
 	var prefix := ""
 	var shift := mods.contains("s")
 	for letter in mods:
@@ -273,13 +291,19 @@ static func _stroke(vk: int, mods: String, _extended: bool) -> String:
 			key = key.to_upper()
 			prefix = ""
 	elif vk >= 0x30 and vk <= 0x39:
-		key = char(vk)
+		# The layout's character for the key (a French keyboard's top row is
+		# "&", "Ã©", ... unshifted), the digit where the helper said none.
+		key = char(ch).to_lower() if ch > 0x20 else char(vk)
 	elif vk >= 0x60 and vk <= 0x69:
 		key = char(vk - 0x60 + 0x30)   # numpad digits
 	elif vk == 0x6E:
 		key = "."
 	elif vk == 0x20:
 		key = " "
+	elif ch > 0x20 and not (vk >= 0x60 and vk <= 0x6F):
+		# A punctuation key (the OEM codes, the ISO "<" key): the character the
+		# layout puts on it, not the US one (German "+" is 0xBB, US "=").
+		key = char(ch).to_lower()
 	elif OEM.has(vk):
 		key = OEM[vk]
 	else:

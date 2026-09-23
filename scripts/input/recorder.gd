@@ -156,12 +156,22 @@ public class Rec : NativeWindow {
       int ext = (kflags & 2) != 0 ? 1 : 0;
       if (vk == 0xFF) return;  // the fake shift some keys are padded with
       // F8 ends the recording (WM_HOTKEY, below) and is never in it.
-      if (vk != 0x77 && (any || !injected) && !Guarded(GetForegroundWindow())) {
-        Out(\"k \" + t + \" \" + vk + \" \" + (up ? 0 : 1) + \" \" + ext);
+      IntPtr fg = GetForegroundWindow();
+      if (vk != 0x77 && (any || !injected) && !Guarded(fg)) {
+        // The key's own character on the layout of the window typed into
+        // (MAPVK_VK_TO_CHAR; 0 for none, or a dead key): what a digit or
+        // punctuation key types is the layout's (\"+\" on a German keyboard,
+        // \"&\" on a French one), not the US one its code is named for.
+        uint pid; uint tid = GetWindowThreadProcessId(fg, out pid);
+        uint ch = MapVirtualKeyEx((uint)vk, 2, GetKeyboardLayout(tid));
+        if ((ch & 0x80000000) != 0) ch = 0;
+        Out(\"k \" + t + \" \" + vk + \" \" + (up ? 0 : 1) + \" \" + ext + \" \" + (ch & 0xFFFF));
       }
     }
   }
   [DllImport(\"user32.dll\")] static extern bool SetProcessDPIAware();
+  [DllImport(\"user32.dll\")] static extern uint MapVirtualKeyEx(uint code, uint type, IntPtr hkl);
+  [DllImport(\"user32.dll\")] static extern IntPtr GetKeyboardLayout(uint thread);
   public static int Run(uint guardPid, bool anyInput) {
     // Screen pixels as Godot counts them (it is DPI aware; powershell.exe
     // is not): scaled units would put every recorded point off.
@@ -343,7 +353,8 @@ static func parse_line(line: String) -> Dictionary:
 				return {"kind": "w", "t": t, "delta": int(p[2]), "horizontal": p[3] == "1", "x": int(p[4]) + o.x, "y": int(p[5]) + o.y}
 		"k":
 			if p.size() >= 5:
-				return {"kind": "k", "t": t, "vk": int(p[2]), "down": p[3] == "1", "extended": p[4] == "1"}
+				return {"kind": "k", "t": t, "vk": int(p[2]), "down": p[3] == "1", "extended": p[4] == "1",
+					"ch": int(p[5]) if p.size() >= 6 and p[5].is_valid_int() else 0}
 	return {}
 
 

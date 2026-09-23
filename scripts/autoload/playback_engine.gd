@@ -537,6 +537,10 @@ func _execute_action(action: LoopActionT) -> int:
 	match action.type:
 		LoopActionT.Type.MOVE:
 			var p := action.roll_point()
+			# (Windows would stop the cursor at the nearest screen's edge, and a
+			# click or scroll where it is would land there, unseen.)
+			if _off_screens(action, [p]):
+				return LoopActionT.OnFail.CONTINUE
 			await _travel(_mouse_pos(), p, action.roll_duration_ms(), action.wiggle, "MOVE")
 		LoopActionT.Type.CLICK:
 			# ~Move: get to the point first (over the duration, like a Move);
@@ -545,6 +549,11 @@ func _execute_action(action: LoopActionT) -> int:
 			if action.move_to:
 				p = action.roll_point()
 				if _off_screens(action, [p]):
+					# An Up is let go of all the same, where the cursor is: the
+					# button a Down pressed would otherwise stay down, every
+					# later move a drag.
+					if action.press_mode == LoopActionT.PressMode.UP and _held_buttons.has(action.button):
+						_let_go(action.button)
 					return LoopActionT.OnFail.CONTINUE
 				var ms := action.roll_duration_ms()
 				if ms > 0:

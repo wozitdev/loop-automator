@@ -333,7 +333,7 @@ function Char-Needs-Shift {
 # character (a capital's Shift, AltGr): what it would press and let go of.
 # Named keys ({DOWN}, {F4 3}) press none.
 function Types-Modifiers([string]$text) {
-  $rest = [regex]::Replace($text, '\\{[A-Za-z][A-Za-z0-9]*( +[0-9]+)?\\}', '')
+  $rest = [regex]::Replace($text, '\\{[A-Za-z][A-Za-z0-9]+( +[0-9]+)?\\}', '')
   $chars = New-Object System.Text.StringBuilder
   $i = 0
   while ($i -lt $rest.Length) {
@@ -1011,6 +1011,10 @@ switch ($cmd) {
       # what the layout says it needed.)
       if (($script:OwnShift -or (-not $known -and $r.shift)) -and -not (Held-Needs 0x10)) {
         Key-Event 0x10 2
+        $script:OwnShift = $false
+      } elseif ($script:OwnShift -and -not (Char-Needs-Shift)) {
+        # Still down, but for a held {SHIFT} or \"+\" now, not a character:
+        # no longer the helper's own.
         $script:OwnShift = $false
       }
     }

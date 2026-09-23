@@ -2037,7 +2037,14 @@ func _on_overlay_toggle(pressed: bool) -> void:
 		status_label.text = "Overlay off."
 
 
+## True while the overlay is up and not click-through: it takes the mouse.
+func _overlay_blocks_mouse() -> bool:
+	return overlay != null and overlay.visible and overlay.click_through in [OverlayT.ClickThrough.PENDING, OverlayT.ClickThrough.FAILED]
+
+
 func _on_overlay_click_through_changed(state: int) -> void:
+	if state == OverlayT.ClickThrough.FAILED and Playback.is_running and Playback.backend != null and Playback.backend.is_real():
+		Playback.stop("Stopped: the overlay stopped being click-through (it would take every click).")
 	if _pick_active or not overlay.transparency_available():
 		return
 	match state:
@@ -2287,6 +2294,8 @@ func _stop_recording(reason: String = "", from_builder: bool = false) -> void:
 		status_label.text = "Recording not kept: the layer it was for is gone."
 		return
 	status_label.text = "Recorded %d action%s into %s." % [added, "" if added == 1 else "s", _quoted(_record_layer.name)]
+	if RecordingT.skipped_keys > 0:
+		status_label.text += " %d key press%s with nothing to type it by (a dead key, Pause, the menu key) %s left out." % [RecordingT.skipped_keys, "" if RecordingT.skipped_keys == 1 else "es", "was" if RecordingT.skipped_keys == 1 else "were"]
 	if added < actions.size():
 		status_label.text += " The loop is full (%d actions): the rest was not kept." % ProjectData.LOOP_ACTIONS_MAX
 	if _recorder.limit_reached:
@@ -2659,6 +2668,12 @@ func _on_play_pressed() -> void:
 		status_label.text = "Not started: a pick or a screen read is still under way."
 		return
 	_commit_pending_edits()
+	# Not Live while the overlay takes the mouse (its click-through still
+	# coming, or failed): every click would land on it - skipped as this
+	# app's - while the keys went on into whatever window has the focus.
+	if not Playback.is_running and Playback.backend != null and Playback.backend.is_real() and _overlay_blocks_mouse():
+		status_label.text = "Not started: the overlay is not click-through (yet) - wait a moment, or turn it off."
+		return
 	# A Live run of a loop whose points may be off (see _warn_points_unsure)
 	# is asked about first; confirmed, its points count as checked.
 	if not Playback.is_running and Playback.backend != null and Playback.backend.is_real() and ProjectData.project.points_unsure != Vector2i.ZERO:
