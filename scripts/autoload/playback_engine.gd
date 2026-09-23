@@ -549,7 +549,7 @@ func _execute_action(action: LoopActionT) -> int:
 				# Its up (or the release after it) not carried out: the button
 				# may be down - kept as held, and let go of as a Hold's is
 				# (tried again, the run stopped if that fails too).
-				if backend.last_failed and not backend.last_skipped:
+				if backend.last_failed:   # (a refused up whose release failed too included)
 					_held_buttons[action.button] = p
 					_let_go(action.button)
 			else:

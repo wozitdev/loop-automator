@@ -280,4 +280,9 @@ static func helper_only(press: Dictionary) -> bool:
 	for k in press["keys"]:
 		if k.begins_with("v") and int(k.substr(1)) in EXTRA:
 			return true
+		# "^", "%" and "+" as characters ("{^}"): SendKeys looks these up in
+		# a US-layout table (Shift+6, Shift+5, numpad Add), which types
+		# another character on many layouts ("&", "6"...).
+		if k in ["c94", "c37", "c43"]:
+			return true
 	return false

@@ -123,6 +123,9 @@ using System.Runtime.InteropServices;
 [StructLayout(LayoutKind.Sequential, Pack=1)] public struct Win32Blend { public byte op; public byte flags; public byte alpha; public byte fmt; }
 [StructLayout(LayoutKind.Sequential)] public struct Win32MouseInput { public int dx; public int dy; public uint mouseData; public uint dwFlags; public uint time; public IntPtr extra; }
 [StructLayout(LayoutKind.Sequential)] public struct Win32Input { public uint type; public Win32MouseInput mi; }
+[StructLayout(LayoutKind.Sequential)] public struct Win32KeybdInput { public ushort vk; public ushort scan; public uint flags; public uint time; public IntPtr extra; }
+[StructLayout(LayoutKind.Explicit)] public struct Win32InputUnion { [FieldOffset(0)] public Win32MouseInput mi; [FieldOffset(0)] public Win32KeybdInput ki; }
+[StructLayout(LayoutKind.Sequential)] public struct Win32KeyInput { public uint type; public Win32InputUnion u; }
 [StructLayout(LayoutKind.Sequential)] public struct Win32Rect { public int L; public int T; public int R; public int B; }
 [StructLayout(LayoutKind.Sequential)] public struct Win32MonInfo { public int cbSize; public Win32Rect mon; public Win32Rect work; public int flags; }
 public class Win32In {
@@ -205,6 +208,16 @@ public class Win32In {
     SendInput(1,inp,Marshal.SizeOf(typeof(Win32Input)));
   }
   // One wheel notch (delta +-120: up / right positive) where the cursor is.
+  [DllImport(\"user32.dll\", EntryPoint=\"SendInput\")] static extern uint SendKeyInput(uint n,Win32KeyInput[] inputs,int size);
+  // One character typed as itself (KEYEVENTF_UNICODE), whatever the layout
+  // has or lacks a key for - not through SendKeys, whose \"{^}\" / \"{%}\" /
+  // \"{+}\" are US-layout key combinations that type other characters.
+  public static void TypeUnicode(char c) {
+    Win32KeyInput[] inp = new Win32KeyInput[2];
+    inp[0].type = 1; inp[0].u.ki.scan = c; inp[0].u.ki.flags = 0x0004;
+    inp[1].type = 1; inp[1].u.ki.scan = c; inp[1].u.ki.flags = 0x0004 | 0x0002;
+    SendKeyInput(2,inp,Marshal.SizeOf(typeof(Win32KeyInput)));
+  }
   public static void Wheel(int delta,bool horizontal) {
     Win32Input[] inp = new Win32Input[1];
     inp[0].type = 0;
@@ -654,7 +667,7 @@ switch ($cmd) {
     # ms later each key (\"c<code>\" a character found on the keyboard
     # layout, \"v<vk>\" a virtual key) is held $hold ms, $gap ms apart, and
     # $trail ms after the last the modifiers come up. A character the
-    # layout has no key for is sent by SendKeys instead.
+    # layout has no key for is typed as itself instead (TypeUnicode).
     if (Guarded ([Win32In]::GetForegroundWindow())) { Write-Output 'skipped'; break }
     $mods = [string]$a[1]; $keys = ([string]$a[2]).Split(',')
     $lead = [int]$a[3]; $hold = [int]$a[4]; $gap = [int]$a[5]; $trail = [int]$a[6]
@@ -677,11 +690,9 @@ switch ($cmd) {
           $ch = [char][int]$k.Substring(1)
           $scan = [Win32In]::VkKeyScanW($ch)
           # No key for it, or one that needs Ctrl / Alt (AltGr) on this
-          # layout: SendKeys knows how to type it.
+          # layout: typed as the character itself.
           if ($scan -eq -1 -or ((($scan -shr 8) -band 6) -ne 0)) {
-            Add-Type -AssemblyName System.Windows.Forms
-            $t = [string]$ch; if ('+^%~(){}[]'.Contains($t)) { $t = '{' + $t + '}' }
-            Send-Keys $t
+            [Win32In]::TypeUnicode($ch)
             if ($i -lt $keys.Count - 1) { Nap $gap }
             continue
           }
@@ -712,7 +723,7 @@ switch ($cmd) {
     # kdown <mods|n> <keys>: the modifiers go down, then each key (the forms
     # of 'hold'), and they stay down - a Key action's Down, or the start of
     # its Hold; 'kup' is the reverse. A character the layout has no key for
-    # cannot be held: SendKeys types it once instead.
+    # cannot be held: it is typed once instead (TypeUnicode).
     if (Guarded ([Win32In]::GetForegroundWindow())) { Write-Output 'skipped'; break }
     $mods = [string]$a[1]; $keys = ([string]$a[2]).Split(',')
     # Every key is resolved before anything goes down, so a bad one is an
@@ -725,9 +736,7 @@ switch ($cmd) {
       foreach ($pk in $plan) {
         $r = $pk[1]
         if ($null -eq $r) {
-          Add-Type -AssemblyName System.Windows.Forms
-          $t = [string][char][int]([string]$pk[0]).Substring(1); if ('+^%~(){}[]'.Contains($t)) { $t = '{' + $t + '}' }
-          Send-Keys $t
+          [Win32In]::TypeUnicode([char][int]([string]$pk[0]).Substring(1))
           continue
         }
         if ($r.shift) { Key-Event 0x10 0; $pressed += 0x10 }
