@@ -353,6 +353,24 @@ function Types-Modifiers([string]$text) {
   }
   return $false
 }
+# Holds a key down for $ms as a keyboard does: after the repeat delay it
+# sends the key again at the repeat rate (Windows' own settings) - a held
+# Backspace deletes a character per repeat, a held arrow walks a list;
+# injected input does not repeat by itself. Abortable (see Nap).
+function Hold-Repeating([int]$vk, [int]$ext, [int]$ms) {
+  Add-Type -AssemblyName System.Windows.Forms
+  $delay = ([System.Windows.Forms.SystemInformation]::KeyboardDelay + 1) * 250
+  $every = [int](1000 / (2.5 + [System.Windows.Forms.SystemInformation]::KeyboardSpeed * 27.5 / 31))
+  if ($ms -le $delay) { Nap $ms; return }
+  Nap $delay
+  $left = $ms - $delay
+  while ($left -gt 0) {
+    Key-Event $vk $ext
+    $step = [math]::Min($every, $left)
+    Nap $step
+    $left -= $step
+  }
+}
 # Modifier letters in one order (c s a w), or n for none: a press is known
 # by them whatever order its text had them in.
 function Order-Mods([string]$mods) {
@@ -918,7 +936,7 @@ switch ($cmd) {
         $cur = @($vk, $ext, $shift)
         if ($shift) { Key-Event 0x10 0 }
         Key-Event $vk $ext
-        Nap $hold
+        Hold-Repeating $vk $ext $hold
         Key-Event $vk ($ext -bor 2)
         if ($shift) { Key-Event 0x10 2 }
         $cur = $null
@@ -1617,6 +1635,12 @@ func _server_call(cmd: String, timeout_ms: int = SERVER_READ_TIMEOUT_MS, gen: in
 			var flag := FileAccess.open(_abort_file(_server_pid), FileAccess.WRITE)
 			if flag != null:
 				flag.close()
+				# Registered as an interrupt's is, so _clear_abort below takes it
+				# away again: left there, every later scan, captured action and
+				# timed key on this helper would end at once.
+				_abort_mutex.lock()
+				_abort_pid = _server_pid
+				_abort_mutex.unlock()
 				kept = not _server_read_line(ABORT_GRACE_MS).is_empty()
 		_abort_mutex.lock()
 		_in_cap = false

@@ -94,11 +94,20 @@ static func _items(events: Array) -> Array:
 		match e["kind"]:
 			"m":
 				if not buttons.is_empty():
-					# Motion with a button down is the press's own (a drag).
+					# Motion with a button down is the press's own (a drag) - and
+					# other input for any key held meanwhile (W and a camera turn).
+					var plain := false
 					for b in buttons.values():
 						b["x2"] = e["x"]
 						b["y2"] = e["y"]
-					continue
+						plain = plain or b["other"]
+					for k in keys.values():
+						k["other"] = true
+					# A press that became a plain down ... up (something else
+					# happened while it was down) is no drag: its motion is kept
+					# as Moves, as without a button.
+					if not plain:
+						continue
 				if not run.is_empty() and t - run["t1"] > MOVE_GAP_MS:
 					_flush_move(items, run, keys)
 					run = {}
@@ -124,7 +133,9 @@ static func _items(events: Array) -> Array:
 				var base := {"button": e["button"], "x": d["x"], "y": d["y"]}
 				if d["other"]:
 					items.append(_item("down", d["t"], d["t"], base))
-					items.append(_item("up", t, t, {"button": e["button"]}))
+					# Let go of where it was let go of (the end of a drag, off the
+					# button it was pressed on), not wherever the cursor is.
+					items.append(_item("up", t, t, {"button": e["button"], "x": e["x"], "y": e["y"]}))
 				elif Vector2i(d["x"], d["y"]).distance_to(Vector2i(e["x"], e["y"])) > DRAG_PX:
 					base["x2"] = e["x"]
 					base["y2"] = e["y"]
@@ -160,6 +171,12 @@ static func _items(events: Array) -> Array:
 					if e["down"]:
 						if not mods.has(vk):
 							mods[vk] = {"t": t, "used": false, "mouse": false}
+							# Held across it, a key or button is a down ... up (so the
+							# modifier lands between them as it did).
+							for b in buttons.values():
+								b["other"] = true
+							for k in keys.values():
+								k["other"] = true
 					elif mods.has(vk):
 						var m: Dictionary = mods[vk]
 						mods.erase(vk)
@@ -170,8 +187,9 @@ static func _items(events: Array) -> Array:
 							items.append(_item("keydown", m["t"], m["t"], {"text": text}))
 							items.append(_item("keyup", t, t, {"text": text}))
 						elif not m["used"]:
-							# A modifier tapped on its own is a keystroke of its own.
-							items.append(_item("key", m["t"], t, {"text": text}))
+							# A modifier on its own is a keystroke of its own - a
+							# hold if it was held (Shift to sprint, to crouch).
+							items.append(_item("keyhold" if t - int(m["t"]) >= HOLD_MS else "key", m["t"], t, {"text": text}))
 					continue
 				if e["down"]:
 					if keys.has(vk):
@@ -200,7 +218,9 @@ static func _items(events: Array) -> Array:
 					elif t - int(k["t"]) >= HOLD_MS:
 						items.append(_item("keyhold", k["t"], t, {"text": text}))
 					else:
-						items.append(_item("key", k["t"], t, {"text": text}))
+						# Typed: a letter as the layout has it (Cyrillic, Greek),
+						# where a held one stays the key it is (W to walk).
+						items.append(_item("key", k["t"], t, {"text": _stroke(vk, k["mods"], e["extended"], k["ch"], true)}))
 	_flush_move(items, run, keys)
 	if not wheel.is_empty():
 		_end_wheel(items, wheel)
@@ -278,7 +298,7 @@ static func _vk(vk: int) -> int:
 ## The SendKeys stroke for a key: its modifier prefixes (^ + % $) and the
 ## key - a character (Shift and a letter is the capital), a "{NAME}", or ""
 ## for a key with no name (skipped).
-static func _stroke(vk: int, mods: String, _extended: bool, ch: int = 0) -> String:
+static func _stroke(vk: int, mods: String, _extended: bool, ch: int = 0, typed: bool = false) -> String:
 	var prefix := ""
 	var shift := mods.contains("s")
 	for letter in mods:
@@ -297,6 +317,8 @@ static func _stroke(vk: int, mods: String, _extended: bool, ch: int = 0) -> Stri
 			return ""
 	if vk >= 0x41 and vk <= 0x5A:
 		key = char(vk).to_lower()
+		if typed and ch > 0x20 and char(ch).to_upper() != char(vk):
+			key = char(ch).to_lower()
 		if shift and mods == "s":
 			# Shift and a letter: the capital says it (SendKeys sends Shift).
 			key = key.to_upper()
@@ -374,7 +396,10 @@ static func _actions(items: Array) -> Array[LoopActionT]:
 				a = LoopActionT.new_of_type(LoopActionT.Type.CLICK)
 				a.button = it["button"]
 				a.press_mode = LoopActionT.PressMode.UP
-				a.move_to = false
+				# Where it was let go of, when the recording says (see _items).
+				a.move_to = it.has("x")
+				if a.move_to:
+					_at(a, it["x"], it["y"])
 			"drag":
 				a = LoopActionT.new_of_type(LoopActionT.Type.DRAG)
 				a.button = it["button"]
