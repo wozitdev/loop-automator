@@ -373,6 +373,10 @@ static func _actions(items: Array) -> Array[LoopActionT]:
 		if a != null:
 			out.append(a)
 		t_done = maxi(t_done, t1)
+	# Held as the editor would show it (a pause or a hold longer than its box
+	# takes is cut to that, as a load would cut it).
+	for a in out:
+		a.keep_to_limits()
 	return out
 
 

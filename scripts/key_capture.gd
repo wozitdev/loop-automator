@@ -15,6 +15,8 @@ class_name KeyCapture
 ## was captured since) and hands it over as `sent(text)`. Cancel, or
 ## closing the window, drops it.
 
+const LoopActionT := preload("res://scripts/model/loop_action.gd")
+
 signal sent(text: String)
 
 ## SendKeys reserves these (and $ is our Win prefix); each is sent literally as {c}.
@@ -219,7 +221,8 @@ func _text() -> String:
 
 
 func _refresh_preview() -> void:
-	_preview.text = _text()
+	# Marked like the Keys field (see LoopAction.ltr_marked), for showing.
+	_preview.text = LoopActionT.ltr_marked(LoopActionT.clean_keys(_text()))
 	_preview.caret_column = _preview.text.length()
 	var n := _tokens.size()
 	_count.text = "%d key%s captured" % [n, "" if n == 1 else "s"]
@@ -260,6 +263,9 @@ func _build() -> void:
 	_preview.editable = false
 	_preview.focus_mode = Control.FOCUS_NONE
 	_preview.placeholder_text = "SendKeys text"
+	# Left to right whatever it holds, as the Keys field: a right-to-left
+	# run would show "%{F4}" as "{F4}%".
+	_preview.text_direction = Control.TEXT_DIRECTION_LTR
 	_preview.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_preview.add_theme_font_size_override("font_size", 15)
 	_preview.add_theme_stylebox_override("normal", _flat(Color.TRANSPARENT, 0, Color.TRANSPARENT))

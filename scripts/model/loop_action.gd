@@ -181,6 +181,9 @@ var mismatch: int = 0
 var mismatch_max: int = 0
 var _image: Image = null
 var _image_texture: ImageTexture = null
+## describe()'s Key text and the `keys` it was worked out from.
+var _described_keys: String = ""
+var _described_shown: String = ""
 
 
 ## Coordinates and times are kept to what the helper's [int] casts take (a
@@ -188,12 +191,21 @@ var _image_texture: ImageTexture = null
 ## otherwise turn into INT64_MIN and be sent as such).
 const FIELD_MIN := -2147483648
 const FIELD_MAX := 2147483647
-## Screen geometry (a point, a rect's size) is kept well inside that: the
-## overlay and the detects add points and sizes together (Rect2i is 32-bit),
-## and a file saying 2147483647 for both would wrap. No screen is anywhere
-## near this many pixels.
-const COORD_MIN := -16777216
-const COORD_MAX := 16777216
+## Screen geometry (a point, a rect's size) is kept to what the editor's
+## boxes take, well inside that: the overlay and the detects add points and
+## sizes together (Rect2i is 32-bit), and a box shows a value past its end
+## as the end - a file saying 99999 would show 20000 and click at 99999
+## (pinned to the screen's edge, where the ~Self guard sees no window).
+const COORD_MIN := -20000
+const COORD_MAX := 20000
+## The editor's limits for the times and counts (see keep_to_limits): a
+## value past one would be shown as the limit and run as itself - a Hold of
+## 2000000000 ms shown as 600000.
+const WAIT_MS_MAX := 600000
+const HOLD_MS_MAX := 600000
+const TIMEOUT_MS_MAX := 3600000
+const DURATION_MS_MAX := 60000
+const STOP_AFTER_MAX := 1000000
 ## The most notches one Scroll turns (the editor's and the helper's limit;
 ## a file saying more would have the run turning the wheel for hours).
 const NOTCHES_MAX := 200
@@ -237,18 +249,97 @@ static func read_coord(d: Dictionary, key: String, default: int) -> int:
 
 
 ## `raw` as one line of plain text: no control characters (line breaks,
-## tabs, …), no line / paragraph separators, and no bidi marks or overrides
-## - which can make text read in another order than it is typed or stored.
+## tabs, …), no line / paragraph separators, no bidi marks or overrides
+## - which can make text read in another order than it is typed or stored -
+## and nothing else that is drawn as nothing but typed all the same: the
+## format characters (zero-width spaces and joiners, soft hyphens, the
+## invisible tag letters that can spell out a whole hidden text), the
+## variation selectors and the blank Hangul fillers.
 ## What a name, a comment or a Key's text looks like on screen is then what
 ## it is. `max_chars` cuts it after that.
 static func plain_text(raw: String, max_chars: int) -> String:
 	if _not_plain == null:
-		# C0 / C1 control characters, line / paragraph separators, bidi marks
-		# and overrides. One RegEx pass: a file of thousands of 8K texts is
-		# read, not stepped through a character at a time.
-		_not_plain = RegEx.create_from_string("[\\x{0}-\\x{1F}\\x{7F}-\\x{9F}\\x{2028}\\x{2029}\\x{061C}\\x{200E}\\x{200F}\\x{202A}-\\x{202E}\\x{2066}-\\x{2069}]")
-	return _not_plain.sub(raw.left(max_chars * 2), "", true).left(max_chars)
+		# Control (Cc) and format (Cf: bidi marks and overrides, zero-width
+		# characters, tags, BOM, soft hyphen) characters, everything Unicode
+		# calls default-ignorable (DI: drawn as nothing - the combining
+		# grapheme joiner, Mongolian selectors, the rest of the tag and
+		# selector blocks), unassigned code points (Cn: no glyph either), line
+		# / paragraph separators, variation selectors and the Hangul fillers.
+		# Not the joiners (U+200C / U+200D) nor the emoji selectors (U+FE0E /
+		# U+FE0F): real text needs them - Persian "می‌خواهم", Sinhala, an
+		# emoji family, "❤️" - and they are dealt with below. One RegEx pass
+		# each: a file of thousands of 8K texts is read, not stepped through a
+		# character at a time.
+		_not_plain = RegEx.create_from_string("(?![\\x{200C}\\x{200D}\\x{FE0E}\\x{FE0F}])[\\p{Cc}\\p{Cf}\\p{DI}\\p{Cn}\\p{Zl}\\p{Zp}\\x{115F}\\x{1160}\\x{3164}\\x{FFA0}\\x{FE00}-\\x{FE0F}\\x{E0100}-\\x{E01EF}]")
+		# Two or more joiners or selectors in a row: no text needs that, and
+		# a run is a hidden text of its own (a joiner then only ever has a
+		# visible character on either side, below).
+		# (A selector then a joiner is one emoji's: "❤️‍🔥".)
+		_invisible_run = RegEx.create_from_string("[\\x{200C}\\x{200D}]{2,}|[\\x{FE0E}\\x{FE0F}]{2,}|[\\x{200C}\\x{200D}][\\x{FE0E}\\x{FE0F}]")
+		# A joiner is kept only where text needs one: between two characters
+		# of a script whose letters join or take half forms (Arabic, Syriac,
+		# Thaana, N'Ko, the Indic scripts, Tibetan, Myanmar, Khmer,
+		# Mongolian - their viramas and vowel marks included), or between
+		# the parts of an emoji ("👩🏽‍💻", "❤️‍🔥"). Anywhere else (Latin,
+		# Cyrillic, Chinese, digits, punctuation, spaces, an end) it joins
+		# nothing and would only be typed unseen.
+		var joins := "\\x{0600}-\\x{08FF}\\x{0900}-\\x{0DFF}\\x{0F00}-\\x{109F}\\x{1780}-\\x{18AF}\\x{A8E0}-\\x{A8FF}\\x{FB50}-\\x{FDFF}\\x{FE70}-\\x{FEFF}"
+		# Kept: either joiner between two letters or marks of those scripts
+		# (not their digits or punctuation), or a ZWJ after an emoji (its
+		# selector, skin tone or hair part) before another emoji. Anything
+		# else is loose.
+		var script_before := "(?<=[%s])(?<=[\\p{L}\\p{M}])" % joins
+		var script_after := "(?=[%s])(?=[\\p{L}\\p{M}])" % joins
+		var emoji_before := "(?<=[\\p{ExtPict}\\x{FE0F}\\x{1F3FB}-\\x{1F3FF}\\x{1F9B0}-\\x{1F9B3}])"
+		_loose_joiner = RegEx.create_from_string("(?!%s[\\x{200C}\\x{200D}]%s)(?!%s\\x{200D}(?=\\p{ExtPict}))[\\x{200C}\\x{200D}]" % [script_before, script_after, emoji_before])
+		# An emoji selector only after what it can select: an emoji symbol
+		# past Latin-1 ("❤️"), or a keycap's digit, # or * with the keycap
+		# after it ("1️⃣").
+		_loose_selector = RegEx.create_from_string("(?<!\\p{Emoji})(?<![0-9#*])[\\x{FE0E}\\x{FE0F}]|(?<=[\\x{0}-\\x{FF}])(?<![0-9#*])[\\x{FE0E}\\x{FE0F}]|(?<=[0-9#*])[\\x{FE0E}\\x{FE0F}](?!\\x{20E3})")
+		# Combining marks stacked far past any script's need (dozens on one
+		# letter, drawn over the lines around it): eight are kept, counted
+		# across the joiners between them.
+		_stacked = RegEx.create_from_string("((?:\\p{M}[\\x{200C}\\x{200D}]?){8})[\\p{M}\\x{200C}\\x{200D}]+")
+		# \A and \z: "$" would also match before a final line break.
+		# A combining mark on an ASCII symbol or space: it hides or changes
+		# what the symbol looks like (a "~" struck through reads as another
+		# sign) while SendKeys reads the symbol - Enter, Ctrl, the Windows
+		# key - all the same. (A keycap's selector and enclosing mark, which
+		# follow the digit or # * through U+FE0F, are not on the symbol.)
+		_mark_on_symbol = RegEx.create_from_string("(?<=[\\x{20}-\\x{2F}\\x{3A}-\\x{40}\\x{5B}-\\x{60}\\x{7B}-\\x{7E}])(?![\\x{FE0E}\\x{FE0F}])[\\p{M}\\x{200C}\\x{200D}]+")
+		_printable_ascii = RegEx.create_from_string("\\A[\\x{20}-\\x{7E}]*\\z")
+		_joining = RegEx.create_from_string("[\\x{200C}\\x{200D}\\x{FE0E}\\x{FE0F}\\p{M}]")
+	var head := raw.left(max_chars * 2)
+	# Plain printable ASCII (most Key texts) has nothing to take out.
+	if _printable_ascii.search(head) != null:
+		return head.left(max_chars)
+	# Cut before the joiner / selector rules below, so the end the cut makes
+	# is looked at too (a joiner left last would be typed unseen).
+	var clean := _not_plain.sub(head, "", true).left(max_chars)
+	if _joining.search(clean) == null:
+		return clean
+	# Until nothing changes (a removal can leave another one loose), so that
+	# cleaning a clean text changes nothing - it is cleaned again on the way
+	# to every view.
+	# (Every pass that changes the text shortens it, so this ends.)
+	while true:
+		var before := clean
+		clean = _invisible_run.sub(clean, "", true)
+		clean = _loose_joiner.sub(clean, "", true)
+		clean = _loose_selector.sub(clean, "", true)
+		clean = _stacked.sub(clean, "$1", true)
+		clean = _mark_on_symbol.sub(clean, "", true)
+		if clean == before:
+			break
+	return clean
+static var _printable_ascii: RegEx = null
+static var _mark_on_symbol: RegEx = null
+static var _joining: RegEx = null
 static var _not_plain: RegEx = null
+static var _invisible_run: RegEx = null
+static var _loose_joiner: RegEx = null
+static var _loose_selector: RegEx = null
+static var _stacked: RegEx = null
 
 
 ## Field `key` as true / false: a boolean as written, a number as non-zero,
@@ -285,9 +376,14 @@ static func read_string(d: Dictionary, key: String, default: String) -> String:
 
 ## Field `key` as a colour, from the "rrggbb" / "rrggbbaa" form the files
 ## use; `default` when it is not one.
+## Always opaque: a layer drawn in "00000000" would have its name in the
+## list and its clicks and keys on the overlay drawn as nothing, and a
+## detect only ever compares red, green and blue.
 static func read_color(d: Dictionary, key: String, default: Color) -> Color:
 	var s := read_string(d, key, "")
-	return Color.html(s) if Color.html_is_valid(s) else default
+	var c := Color.html(s) if Color.html_is_valid(s) else default
+	c.a = 1.0
+	return c
 
 
 ## A random integer in [lo, hi] (either order); lo == hi is just that value.
@@ -383,6 +479,11 @@ func set_image_png(png: PackedByteArray) -> bool:
 		# it from the decoded pixels, not as the file had it: whatever else a
 		# PNG from a shared loop carried (extra chunks, text, trailing
 		# bytes) never reaches another parser.
+		# Opaque: the editor draws a template's alpha, the scans compare colour
+		# alone - a see-through template would show as nothing (or as another
+		# picture) and match all the same.
+		if img.get_format() != Image.FORMAT_RGB8:
+			img.convert(Image.FORMAT_RGB8)
 		png = img.save_png_to_buffer()
 		if png.is_empty():
 			return false
@@ -553,10 +654,20 @@ func describe() -> String:
 			var press := press_text()
 			# The list shows the start (the editor has it all): an 8K line
 			# costs the list milliseconds to lay out, per action.
-			var shown := keys_shown()
-			if shown.length() > DESCRIBE_KEYS_CHARS:
-				shown = shown.left(DESCRIBE_KEYS_CHARS - 1) + "…"
-			return "Key%s: \"%s\"" % [" " + press if not press.is_empty() else "", shown]
+			# Worked out once per text (a list of tens of thousands is
+			# described whole on every rebuild; comparing is far cheaper).
+			if keys != _described_keys or _described_shown.is_empty():
+				var shown := plain_text(keys, DESCRIBE_KEYS_CHARS)
+				# Longer or not by the whole text (clean already): cleaning the
+				# cut can take a joiner off its end, and the cut would then pass
+				# for all of it.
+				if keys.length() > DESCRIBE_KEYS_CHARS or shown.length() < keys.length():
+					# Its start and its end: what runs last in a long text is as much
+					# a part of it as what runs first ("notepad", spaces, "$rcmd~").
+					shown = keys.left(DESCRIBE_KEYS_CHARS - 60) + " … " + keys.right(57)
+				_described_keys = keys
+				_described_shown = ltr_marked(shown)
+			return "Key%s: \"%s\"" % [" " + press if not press.is_empty() else "", _described_shown]
 		Type.WAIT:
 			return "Delay %s ms" % range_text(wait_ms, wait_ms_max)
 		Type.PIXEL_DETECT:
@@ -588,7 +699,24 @@ func describe() -> String:
 ## the same characters in another order, and reading a loop's Key actions
 ## is how a loop from someone else is checked before it runs.
 func keys_shown() -> String:
-	return plain_text(keys, KEYS_MAX_CHARS)
+	return ltr_marked(plain_text(keys, KEYS_MAX_CHARS))
+
+
+## `text` (a Key's, already plain) for showing only: left to right is not
+## enough on its own - SendKeys' characters between two right-to-left
+## letters are still laid out right to left ("ש^~ת" shows "~^", Enter then
+## Ctrl, for Ctrl+Enter) - so with right-to-left letters in it each of them
+## gets a left-to-right mark on either side. Lengths and cuts are taken
+## before this (the marks are not part of the text).
+static func ltr_marked(text: String) -> String:
+	if _rtl == null:
+		_rtl = RegEx.create_from_string("[\\x{0590}-\\x{08FF}\\x{FB1D}-\\x{FDFF}\\x{FE70}-\\x{FEFF}\\x{10800}-\\x{10FFF}\\x{1E800}-\\x{1EFFF}]")
+		_special = RegEx.create_from_string("([~^+%$(){}\\[\\]])")
+	if _rtl.search(text) == null:
+		return text
+	return _special.sub(text, char(0x200E) + "$1" + char(0x200E), true)
+static var _rtl: RegEx = null
+static var _special: RegEx = null
 
 
 ## `raw` as a Key's text: one line with nothing in it that does not show
@@ -711,6 +839,9 @@ static func from_dict(d: Dictionary) -> Self:
 	# else, and it can be looked at and deleted.
 	if a.type < Type.MOVE or a.type > Type.SCROLL:
 		a.enabled = false
+		# One number for every unknown type: a file's own would be kept and
+		# shared again by Export with nothing showing it.
+		a.type = -1
 	a.comment = plain_text(read_string(d, "comment", ""), COMMENT_MAX_CHARS)
 	# A missing "<name>_max" (files from before ranges) means a fixed value.
 	a.x = read_coord(d, "x", 0)
@@ -728,7 +859,10 @@ static func from_dict(d: Dictionary) -> Self:
 	a.button = read_int(d, "button", BUTTON_LEFT)
 	if a.button < BUTTON_LEFT or a.button > BUTTON_MIDDLE:
 		a.button = BUTTON_LEFT
-	a.keys = clean_keys(read_string(d, "keys", ""))
+	# Only a Key has text: any other action's would be kept, saved and shared
+	# again with nothing showing it (and nothing typing it).
+	if a.type == Type.KEY:
+		a.keys = clean_keys(read_string(d, "keys", ""))
 	a.wait_ms = read_int(d, "wait_ms", 100)
 	a.wait_ms_max = read_int(d, "wait_ms_max", a.wait_ms)
 	a.duration_ms = read_int(d, "duration_ms", 0)
@@ -776,8 +910,75 @@ static func from_dict(d: Dictionary) -> Self:
 	a.wiggle = read_bool(d, "wiggle", false)
 	a.keys_paced = read_bool(d, "keys_paced", false)
 	# A template that does not decode (or is too big) is dropped, not kept.
-	a.set_image_png(Marshalls.base64_to_raw(read_string(d, "image", "")))
+	# Only an Image Detect has one: a template on any other action would be
+	# kept, saved and shared again with nothing in the editor showing it.
+	if a.type == Type.IMAGE_DETECT:
+		a.set_image_png(Marshalls.base64_to_raw(read_string(d, "image", "")))
+	a._reset_unused()
+	a.keep_to_limits()
 	return a
+
+
+## The fields each type uses (what its editor shows and its run reads); the
+## rest are the defaults (see _reset_unused).
+const _POINT_A := ["x", "x_max", "y", "y_max"]
+const _TRAVEL := ["duration_ms", "duration_ms_max", "wiggle"]
+const _DETECT := ["x", "x_max", "y", "y_max", "w", "w_max", "h", "h_max", "tolerance", "tolerance_max",
+	"follow_cursor", "wait", "skip", "if_found", "safe_continue", "wait_ms", "wait_ms_max",
+	"wait_timeout", "wait_timeout_ms", "wait_timeout_ms_max"]
+static func _used_fields(t: int) -> Array:
+	match t:
+		Type.MOVE: return _POINT_A + _TRAVEL + ["captures", "ghost_cursor"]
+		Type.CLICK: return _POINT_A + _TRAVEL + ["captures", "ghost_cursor", "button", "move_to", "press_mode", "hold_ms", "hold_ms_max"]
+		Type.DRAG: return _POINT_A + _TRAVEL + ["captures", "ghost_cursor", "button", "x2", "x2_max", "y2", "y2_max"]
+		Type.KEY: return ["keys", "keys_paced", "press_mode", "hold_ms", "hold_ms_max"]
+		Type.WAIT: return ["wait_ms", "wait_ms_max"]
+		Type.PIXEL_DETECT: return _DETECT + ["color"]
+		Type.IMAGE_DETECT: return _DETECT + ["ignore_colour", "mismatch", "mismatch_max"]
+		Type.CAPTURE: return _TRAVEL + ["capture_mode"]
+		Type.STOP: return ["stop_scope", "stop_after"]
+		Type.SCROLL: return _TRAVEL + ["scroll_dir", "notches", "notches_max"]
+	return []
+
+
+## Every setting this action's type does not use back at its default: a
+## file's value there would be kept, saved and shared again by Export with
+## nothing in the editor showing it (a payload riding on a Move). An
+## unknown type keeps none.
+func _reset_unused() -> void:
+	var fresh := Self.new_of_type(type)
+	var used := _used_fields(type)
+	for f in to_dict().keys():
+		if f in ["type", "enabled", "comment", "image"] or f in used:
+			continue
+		set(f, fresh.get(f))
+	# The Hold time only with a Hold (the editor shows it for nothing else).
+	if press_mode != PressMode.HOLD:
+		hold_ms = fresh.hold_ms
+		hold_ms_max = fresh.hold_ms_max
+
+
+## Keeps every number to the range the editor's box for it takes (a file,
+## or a long recording, may hold more): what the editor shows is then what
+## runs.
+func keep_to_limits() -> void:
+	for f in ["x", "x_max", "y", "y_max", "x2", "x2_max", "y2", "y2_max"]:
+		set(f, clampi(get(f), COORD_MIN, COORD_MAX))
+	for f in ["w", "w_max", "h", "h_max"]:
+		set(f, clampi(get(f), 1, COORD_MAX))
+	for f in ["wait_ms", "wait_ms_max"]:
+		set(f, clampi(get(f), 0, WAIT_MS_MAX))
+	for f in ["hold_ms", "hold_ms_max"]:
+		set(f, clampi(get(f), 0, HOLD_MS_MAX))
+	for f in ["wait_timeout_ms", "wait_timeout_ms_max"]:
+		set(f, clampi(get(f), 0, TIMEOUT_MS_MAX))
+	for f in ["duration_ms", "duration_ms_max"]:
+		set(f, clampi(get(f), 0, DURATION_MS_MAX))
+	for f in ["tolerance", "tolerance_max"]:
+		set(f, clampi(get(f), 0, 255))
+	for f in ["mismatch", "mismatch_max"]:
+		set(f, clampi(get(f), 0, MISMATCH_MAX))
+	stop_after = clampi(stop_after, 1, STOP_AFTER_MAX)
 
 
 func duplicate_action() -> Self:

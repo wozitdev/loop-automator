@@ -9,6 +9,10 @@ class_name InputBackend
 var avoid_pid: int = 0
 ## True when the most recent input command was skipped because of `avoid_pid`.
 var last_skipped: bool = false
+## True when the most recent input command may not have happened: it failed,
+## or the helper ended without answering (a button meant to come up may
+## still be down).
+var last_failed: bool = false
 ## Set when a key command was not sent at all (no way to send it safely);
 ## stays set until the engine clears it for a new run.
 var keys_refused: bool = false
@@ -39,11 +43,33 @@ func shutdown(_wait: bool = false) -> void:
 func settled() -> bool:
 	return true
 
+## True while the backend is still getting ready (a helper starting) and a
+## command now would wait for that on the calling thread.
+func warming() -> bool:
+	return false
+
+## True when the backend's helper is not running (it died, or a stop ended
+## it) and the next command would start it on the calling thread.
+func helper_down() -> bool:
+	return false
+
+## True when the backend's helper could not be started a moment ago (and
+## is not tried again yet): input would go to a process started per command
+## on the calling thread, a second or so each, nothing able to cut it short.
+func helper_unavailable() -> bool:
+	return false
+
 ## Cuts short a command the backend is in the middle of on another thread
 ## (a captured action runs for its whole dwell as one helper command, the
 ## real cursor pinned meanwhile): the call waiting on it returns with
 ## nothing, and the backend is usable again afterwards. Main thread.
 func interrupt() -> void:
+	pass
+
+## Forgets an interrupt nothing spent (a stop between two commands of an
+## action): a new run's first command is not the one it was meant for.
+## Main thread, with no worker of the last run left.
+func clear_interrupt() -> void:
 	pass
 
 func move_to(pos: Vector2i) -> void:

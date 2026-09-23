@@ -13,7 +13,7 @@ const NAMED := {
 	"DELETE": 0x2E, "DEL": 0x2E, "INSERT": 0x2D, "INS": 0x2D,
 	"HOME": 0x24, "END": 0x23, "PGUP": 0x21, "PGDN": 0x22,
 	"UP": 0x26, "DOWN": 0x28, "LEFT": 0x25, "RIGHT": 0x27,
-	"CAPSLOCK": 0x14, "NUMLOCK": 0x90, "SCROLLLOCK": 0x91,
+	"CAPSLOCK": 0x14, "NUMLOCK": 0x90, "SCROLLLOCK": 0x91, "CLEAR": 0x0C,
 	"PRTSC": 0x2C, "BREAK": 0x03, "HELP": 0x2F,
 	"ADD": 0x6B, "SUBTRACT": 0x6D, "MULTIPLY": 0x6A, "DIVIDE": 0x6F,
 	"F1": 0x70, "F2": 0x71, "F3": 0x72, "F4": 0x73, "F5": 0x74, "F6": 0x75,
@@ -114,7 +114,10 @@ static func parse(stroke: String) -> Dictionary:
 			else:
 				return {}
 			if parts.size() == 2:
-				if not parts[1].is_valid_int() or int(parts[1]) < 1 or int(parts[1]) > REPEAT_MAX:
+				# Plain digits only, as SendKeys reads a count ("+30" is
+				# refused there, so it is not a count here either).
+				if parts[1].is_empty() or not parts[1].lstrip("0123456789").is_empty() \
+						or parts[1].length() > 9 or int(parts[1]) < 1 or int(parts[1]) > REPEAT_MAX:
 					return {}
 				repeat = int(parts[1])
 	elif rest.begins_with("(") and rest.ends_with(")"):
@@ -128,6 +131,11 @@ static func parse(stroke: String) -> Dictionary:
 		keys.append("v%d" % VK_ENTER if rest == "~" else "c%d" % rest.unicode_at(0))
 	else:
 		return {}
+	# A character past U+FFFF (an emoji) is no key on any layout, and the
+	# helper cannot name it: SendKeys types it.
+	for k in keys:
+		if k.begins_with("c") and int(k.substr(1)) > 0xFFFF:
+			return {}
 	return {"mods": mods, "keys": keys, "repeat": repeat}
 
 
@@ -244,6 +252,21 @@ static func pieces(text: String, max_bytes: int, max_events: int = 0) -> PackedS
 	if not piece.is_empty():
 		out.append(piece)
 	return out
+
+
+## Whether `text` has a "$" outside braced keys (the Windows key, a name of
+## ours; a literal "$" is "{$}"): what SendKeys would type as a "$".
+static func has_bare_win(text: String) -> bool:
+	var i := 0
+	var n := text.length()
+	while i < n:
+		if text[i] == "{":
+			i = _brace_end(text, i)
+		elif text[i] == "$":
+			return true
+		else:
+			i += 1
+	return false
 
 
 ## Whether `press` (a parse result) has a key SendKeys cannot type (see

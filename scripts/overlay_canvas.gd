@@ -21,6 +21,7 @@ const TRACKER_TRAIL_MAX := 24
 ## what keeps _process polling the mouse.
 var _mouse: Vector2i = Vector2i.ZERO
 var _follows_mouse: bool = false
+var _follows_dirty: bool = true
 
 var _font: Font
 
@@ -39,8 +40,9 @@ func _ready() -> void:
 	material = ShaderMaterial.new()
 	material.shader = CaptureHoleShader
 	ProjectData.layers_changed.connect(_redraw)
-	ProjectData.actions_changed.connect(func(_i): _redraw())
-	ProjectData.action_modified.connect(func(_a, _b): _redraw())
+	ProjectData.actions_changed.connect(func(_i): _follows_dirty = true; _redraw())
+	ProjectData.action_modified.connect(func(_a, _b): _follows_dirty = true; _redraw())
+	ProjectData.project_replaced.connect(func(): _follows_dirty = true)
 	ProjectData.selection_changed.connect(_redraw)
 	ProjectData.overlay_view_changed.connect(_redraw)
 	ProjectData.project_replaced.connect(_redraw)
@@ -74,6 +76,8 @@ func _draw() -> void:
 	var offset := _screen_offset()
 	_mouse = DisplayServer.mouse_get_position()
 	_claimed.clear()
+	_draw_budget = OVERLAY_DRAW_MAX
+	_undrawn_labels = 0
 	_update_capture_holes(project, offset)
 
 	# Editor-style viewport chrome (grid, axes, rulers) underneath everything.
@@ -185,6 +189,8 @@ func _draw_layer(li: int, layer: LoopLayerT, offset: Vector2) -> void:
 	var step := 0
 	var tag_stack := 0  # stacked offset for consecutive position-less actions
 
+	var undrawn := 0
+
 	for ai in layer.actions.size():
 		var action: LoopActionT = layer.actions[ai]
 		if not action.enabled:
@@ -192,6 +198,27 @@ func _draw_layer(li: int, layer: LoopLayerT, offset: Vector2) -> void:
 		var is_current := (Playback.current_layer_index == li and Playback.current_action_index == ai)
 		var is_selected := (li == ProjectData.active_layer_index and ai == ProjectData.selected_action_index)
 		var positioned := action.positioned()
+		# Past OVERLAY_DRAW_MAX a layer's actions are counted, not drawn (a
+		# file may hold tens of thousands, and every redraw - each step of a
+		# run - would measure and draw them all, on the thread that reads F8);
+		# the running and the selected one always are.
+		if _draw_budget <= 0 and not is_current and not is_selected:
+			# The rest of the layer is not looked at either (tens of
+			# thousands, every frame), past its running and selected action.
+			var last := ai
+			if Playback.current_layer_index == li:
+				last = maxi(last, Playback.current_action_index)
+			if ProjectData.active_layer_index == li:
+				last = maxi(last, ProjectData.selected_action_index)
+			if last == ai:
+				undrawn += layer.actions.size() - ai
+				break
+			undrawn += 1
+			if positioned:
+				step += 1
+				has_prev = false
+			continue
+		_draw_budget -= 1
 		var p := action.overlay_point(_mouse)
 		# Where the chips of the position-less actions that follow hang from.
 		# A detect's inside is left clear so the target stays visible:
@@ -255,7 +282,8 @@ func _draw_layer(li: int, layer: LoopLayerT, offset: Vector2) -> void:
 			tag_stack += 1
 			var text := ""
 			if action.type == LoopActionT.Type.KEY:
-				var ktxt: String = action.keys if action.keys.length() <= 14 else action.keys.substr(0, 13) + "…"
+				var shown := LoopActionT.ltr_marked(LoopActionT.plain_text(action.keys, 15))   # (reads its first 30 characters only)
+				var ktxt: String = shown if action.keys.length() <= 14 else shown.substr(0, 13) + "…"   # (longer by the whole text, as describe() judges it)
 				text = "KEY  " + ktxt
 				if action.press_mode != LoopActionT.PressMode.TAP:
 					text = "KEY %s  %s" % [action.press_text().to_upper(), ktxt]
@@ -285,6 +313,10 @@ func _draw_layer(li: int, layer: LoopLayerT, offset: Vector2) -> void:
 			draw_line(anchor, chip.position + Vector2(0, 10), link, 1.0)
 			if is_current:
 				draw_arc(chip.position + Vector2(8, 10), 16, 0, TAU, 28, Color.WHITE, 2.5)
+	if undrawn > 0 and _undrawn_labels < 20:
+		# Below the HUD lines (see _draw_hud), the name quoted.
+		_label(Vector2(RULER + 8, RULER + 90 + _undrawn_labels * 16), "%s: %d more action(s) not drawn" % [char(0x2066) + JSON.stringify(layer.name) + char(0x2069), undrawn], col, 12)
+		_undrawn_labels += 1
 
 
 # ------------------------------------------------------------- guide helpers
@@ -514,6 +546,11 @@ const CLAIM_STEPS: Array[Vector2] = [
 ## (a file may hold anything) would cost minutes a frame; past this the
 ## rest are only kept on screen.
 const CLAIM_MAX := 256
+## The most actions drawn on the overlay in one frame, every layer shown
+## together (see _draw_layer), and what is left of it this frame.
+const OVERLAY_DRAW_MAX := 500
+var _draw_budget := OVERLAY_DRAW_MAX
+var _undrawn_labels := 0
 
 
 ## `rect` fitted on screen (see _fit) and moved off anything written
@@ -559,7 +596,7 @@ func _draw_hud(project: LoopProjectT, _offset: Vector2) -> void:
 	var view := "all visible layers"
 	if not ProjectData.overlay_show_all:
 		var idx := clampi(ProjectData.overlay_layer_index, 0, project.layers.size() - 1)
-		view = "layer %d/%d: %s" % [idx + 1, project.layers.size(), project.layers[idx].name]
+		view = "layer %d/%d: %s" % [idx + 1, project.layers.size(), char(0x2066) + JSON.stringify(project.layers[idx].name) + char(0x2069)]
 	if hud_note.is_empty():
 		lines.append("OVERLAY · %s" % view)
 	else:
@@ -632,6 +669,11 @@ func _update_capture_holes(project: LoopProjectT, offset: Vector2) -> void:
 	material.set_shader_parameter("rect_count", rects.size())
 	material.set_shader_parameter("rects", rects)
 	# Follow-cursor rects move with the mouse: keep _process watching it.
+	# Worked out again only after an edit (see _ready), not on every draw:
+	# a loop may have tens of thousands of actions.
+	if not _follows_dirty:
+		return
+	_follows_dirty = false
 	_follows_mouse = false
 	for layer in project.layers:
 		for a in layer.actions:

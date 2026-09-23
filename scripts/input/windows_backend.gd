@@ -25,10 +25,26 @@ const PIPE_LINE_MAX := 4000
 const KEY_PIECE_BYTES := 2400
 ## ...and of at most this many keystrokes (see KeyStrokes.events).
 const KEY_PIECE_EVENTS := 2000
+## The most key presses one keystroke sent to SendKeys may make (a braced
+## key's repeats, a group's keys): SendKeys queues them all at once, and a
+## stop cannot take back what is queued. The engine sends a longer repeat
+## of a key it can read in pieces (see Playback._type_plain).
+const STROKE_EVENTS_MAX := 100
 ## An encoded path (see MousePath.encode) longer than this is sent ahead in
 ## pieces of PATH_PIECE_CHARS ('pathpart'); the command then says "@".
 const PATH_INLINE_MAX := 3000
 const PATH_PIECE_CHARS := 3000
+## The modifiers argument of a key command that has none. Not "-": on a
+## one-shot command line PowerShell reads a lone "-" as a parameter name and
+## fails before the script runs (a release that never happens).
+const NO_MODS := "n"
+## The commands that let go of something: run even after shutdown (see
+## _run_sync), one-shot if need be.
+const RELEASE_COMMANDS := ["release", "kup", "kupall", "cursors-restore"]
+## A one-shot 'kupall' lets go of every key: the releases of a stop that
+## follow within this long are covered by it (see _run_sync).
+const KUPALL_COVERS_MS := 3000
+var _kupall_at: int = -1
 
 ## Absolute path of the helper script, "" when it could not be written (no
 ## helper then; every call answers "failed"). The script is rewritten right
@@ -71,9 +87,20 @@ const CUT_SHORT_MS := 2000
 ## runs on the main thread while a worker holds the lock and may be
 ## replacing `_server` itself: an int is read whole, a Dictionary is not.
 var _server_pid: int = -1
+## True while a thread is inside _server_call (read by interrupt(), which
+## does not take the lock).
+var _in_call := false
+## True while a worker thread is starting the server (see _server_ready).
+var _starting := false
 ## Whether the last _run_sync got an "error ..." answer (the helper ran the
 ## command and failed it, as opposed to ending without an answer).
 var _last_error := false
+## Whether the last _run_sync's command was dropped unsent (its action cut
+## short by a stop before it went; see _server_call).
+var _last_dropped := false
+## Whether the last _run_sync's command was not sent because there was no
+## helper for it on the main thread (see _server_ready): nothing happened.
+var _last_unsent := false
 
 const HELPER_SCRIPT := """param([Parameter(ValueFromRemainingArguments=$true)][string[]]$a)
 # 'guard <pid> <command...>': clicks and keys that would land on a window of
@@ -96,7 +123,21 @@ using System.Runtime.InteropServices;
 [StructLayout(LayoutKind.Sequential, Pack=1)] public struct Win32Blend { public byte op; public byte flags; public byte alpha; public byte fmt; }
 [StructLayout(LayoutKind.Sequential)] public struct Win32MouseInput { public int dx; public int dy; public uint mouseData; public uint dwFlags; public uint time; public IntPtr extra; }
 [StructLayout(LayoutKind.Sequential)] public struct Win32Input { public uint type; public Win32MouseInput mi; }
+[StructLayout(LayoutKind.Sequential)] public struct Win32Rect { public int L; public int T; public int R; public int B; }
+[StructLayout(LayoutKind.Sequential)] public struct Win32MonInfo { public int cbSize; public Win32Rect mon; public Win32Rect work; public int flags; }
 public class Win32In {
+  [DllImport(\"user32.dll\")] static extern IntPtr MonitorFromPoint(Win32Pt pt,uint flags);
+  [DllImport(\"user32.dll\")] static extern bool GetMonitorInfoW(IntPtr mon,ref Win32MonInfo mi);
+  // (x, y) moved onto the nearest monitor (MONITOR_DEFAULTTONEAREST): where
+  // a press sent there lands, off-screen or between two screens.
+  public static Win32Pt OnScreen(int x,int y) {
+    Win32Pt p = new Win32Pt(); p.X = x; p.Y = y;
+    Win32MonInfo mi = new Win32MonInfo(); mi.cbSize = Marshal.SizeOf(typeof(Win32MonInfo));
+    if (!GetMonitorInfoW(MonitorFromPoint(p,2),ref mi)) return p;
+    p.X = Math.Max(mi.mon.L, Math.Min(mi.mon.R - 1, x));
+    p.Y = Math.Max(mi.mon.T, Math.Min(mi.mon.B - 1, y));
+    return p;
+  }
   [DllImport(\"user32.dll\")] public static extern bool SetCursorPos(int x,int y);
   [DllImport(\"user32.dll\")] public static extern bool GetCursorPos(out Win32Pt p);
   [DllImport(\"user32.dll\")] public static extern IntPtr WindowFromPoint(Win32Pt p);
@@ -115,6 +156,7 @@ public class Win32In {
   [DllImport(\"winmm.dll\")] public static extern uint timeEndPeriod(uint ms);
   [DllImport(\"user32.dll\")] public static extern bool ShowWindow(IntPtr h,int n);
   [DllImport(\"user32.dll\")] public static extern void keybd_event(byte vk,byte scan,uint flags,IntPtr extra);
+  [DllImport(\"user32.dll\")] public static extern short GetAsyncKeyState(int vk);
   [DllImport(\"user32.dll\")] public static extern uint MapVirtualKeyW(uint code,uint type);
   [DllImport(\"user32.dll\", CharSet=CharSet.Unicode)] public static extern short VkKeyScanW(char ch);
   [DllImport(\"user32.dll\")] public static extern int GetWindowLongW(IntPtr h,int i);
@@ -242,6 +284,8 @@ $script:pinned = $false; $script:px = 0; $script:py = 0
 # A path too long for one line, sent ahead in pieces (the server's
 # 'pathpart'); the next 'cap' whose path says '@' takes it.
 $script:pathBuf = ''
+# The server's abort file (see Wait-Until): set once it is serving.
+$script:abortFile = ''; $script:tick = 0
 function Read-Motion {
   $p = Read-Cursor
   $script:ux += $p.X - $script:lx; $script:uy += $p.Y - $script:ly
@@ -354,6 +398,12 @@ function Ghost-Stop {
 # gets the freshest position).
 function Wait-Until($sw, [int]$due) {
   do {
+    # A stop asks for the action to end by creating the abort file (see
+    # WindowsBackend.interrupt): thrown, so the 'cap' finally lets go of
+    # the button in place, shows the cursors again and restores the cursor
+    # at once, rather than the helper being killed with all of that undone.
+    $script:tick++
+    if ($script:abortFile -ne '' -and ($script:tick % 8) -eq 0 -and [System.IO.File]::Exists($script:abortFile)) { throw 'aborted' }
     Read-Motion
     if ($script:ghost -ne [IntPtr]::Zero) {
       Ghost-Move
@@ -363,6 +413,15 @@ function Wait-Until($sw, [int]$due) {
   } while ($sw.ElapsedMilliseconds -lt $due)
 }
 function Wait-Ms([int]$ms) { Wait-Until ([System.Diagnostics.Stopwatch]::StartNew()) $ms }
+# A plain sleep of $ms that a stop can end (the abort file, see Wait-Until):
+# it throws 'aborted', and the command's finally lets go of what it has down.
+function Nap([int]$ms) {
+  $sw = [System.Diagnostics.Stopwatch]::StartNew()
+  while ($sw.ElapsedMilliseconds -lt $ms) {
+    if ($script:abortFile -ne '' -and [System.IO.File]::Exists($script:abortFile)) { throw 'aborted' }
+    [System.Threading.Thread]::Sleep([math]::Max(1, [math]::Min(5, $ms - $sw.ElapsedMilliseconds)))
+  }
+}
 # Walks the pinned cursor along a path (\"x,y;x,y;...\", the points evenly
 # spaced in time) over $ms: each point is due at its share of the time, and
 # the last one is exactly where the travel ends.
@@ -382,6 +441,13 @@ function Guarded([IntPtr]$h) {
   $owner = [uint32]0
   [Win32In]::GetWindowThreadProcessId($h, [ref]$owner) | Out-Null
   return ($owner -eq [uint32]$script:guard)
+}
+# (x, y) kept on the virtual screen, where the input lands anyway: a point
+# off every screen has no window for the guard to see, while the press goes
+# to the edge pixel - which may be this app's own window.
+function On-Screen([int]$x,[int]$y) {
+  $p = [Win32In]::OnScreen($x, $y)
+  return @($p.X, $p.Y)
 }
 # True when a click at (x, y) would land on the guarded process. The overlay
 # is hit-test transparent, so WindowFromPoint looks straight through it.
@@ -421,12 +487,14 @@ switch ($cmd) {
     } finally { if ($timerRes) { [Win32In]::timeEndPeriod(1) | Out-Null } }
   }
   'down' {
-    if (Guarded-Point ([int]$a[1]) ([int]$a[2])) { Write-Output 'skipped'; break }
-    [Win32In]::MouseAt([int]$a[1],[int]$a[2],(Down-Flag $a[3]))
+    $at = On-Screen ([int]$a[1]) ([int]$a[2])
+    if (Guarded-Point $at[0] $at[1]) { Write-Output 'skipped'; break }
+    [Win32In]::MouseAt($at[0],$at[1],(Down-Flag $a[3]))
   }
   'up' {
-    if (Guarded-Point ([int]$a[1]) ([int]$a[2])) { Write-Output 'skipped'; break }
-    [Win32In]::MouseAt([int]$a[1],[int]$a[2],(Up-Flag $a[3]))
+    $at = On-Screen ([int]$a[1]) ([int]$a[2])
+    if (Guarded-Point $at[0] $at[1]) { Write-Output 'skipped'; break }
+    [Win32In]::MouseAt($at[0],$at[1],(Up-Flag $a[3]))
   }
   'release' {
     # release <button>: lets go of a mouse button where the cursor is,
@@ -488,7 +556,9 @@ switch ($cmd) {
     # cursor jumps. A path of '@' is the one sent ahead in pieces (see
     # 'pathpart'). Prints \"savedX,savedY,restoredX,restoredY\".
     $kind = $a[1]; $useGhost = ($a[2] -eq '1'); $btn = $a[3]
-    $x = [int]$a[4]; $y = [int]$a[5]; $x2 = [int]$a[6]; $y2 = [int]$a[7]; $ms = [int]$a[8]
+    $at = On-Screen ([int]$a[4]) ([int]$a[5]); $x = $at[0]; $y = $at[1]
+    $at = On-Screen ([int]$a[6]) ([int]$a[7]); $x2 = $at[0]; $y2 = $at[1]
+    $ms = [int]$a[8]
     $path = ''; if ($a.Count -gt 9) { $path = [string]$a[9] }
     if ($path -eq '@') { $path = $script:pathBuf }
     $script:pathBuf = ''
@@ -506,25 +576,36 @@ switch ($cmd) {
     # leave the pin / ghost updating at a stuttery ~60 Hz.
     $timerRes = ([Win32In]::timeBeginPeriod(1) -eq 0)
     # Set while the button is down, so a failure part-way lets go of it.
-    $held = $false
+    $held = $false; $skipped = $false
     try {
       if ($useGhost) { Ghost-Start }
       switch ($kind) {
         'move' {
           if ($path -ne '') { Glide $path $ms } else { Jump $x $y; Wait-Ms $ms }
         }
+        # The guard is asked again right before each press and release: the
+        # window under the point can change during the travel (this app
+        # brought to the front), and the check at the start was before it.
+        # A release refused there is made in place by the finally below.
         'click' {
           if ($path -ne '') { Glide $path $ms } else { Jump $x $y }
           Wait-Ms 15
-          $held = $true; [Win32In]::MouseAt($x,$y,(Down-Flag $btn)); Wait-Ms 15; [Win32In]::MouseAt($x,$y,(Up-Flag $btn)); $held = $false
+          if (Guarded-Point $x $y) { $skipped = $true }
+          else { $held = $true; [Win32In]::MouseAt($x,$y,(Down-Flag $btn)); Wait-Ms 15; [Win32In]::MouseAt($x,$y,(Up-Flag $btn)); $held = $false }
         }
         'drag' {
           Jump $x $y
           Wait-Ms 15
-          $held = $true; [Win32In]::MouseAt($x,$y,(Down-Flag $btn))
-          if ($path -ne '') { Glide $path $ms } else { Wait-Ms $ms; Jump $x2 $y2 }
-          Wait-Ms 15
-          [Win32In]::MouseAt($x2,$y2,(Up-Flag $btn)); $held = $false
+          if (Guarded-Point $x $y) { $skipped = $true }
+          else {
+            $held = $true; [Win32In]::MouseAt($x,$y,(Down-Flag $btn))
+            if ($path -ne '') { Glide $path $ms } else { Wait-Ms $ms; Jump $x2 $y2 }
+            Wait-Ms 15
+            # Refused: let go right here, the cursor still pinned at the
+            # end point - not after it has been put back at the user's hand.
+            if (Guarded-Point $x2 $y2) { $skipped = $true; [Win32In]::ButtonOnly((Up-Flag $btn)); $held = $false }
+            else { [Win32In]::MouseAt($x2,$y2,(Up-Flag $btn)); $held = $false }
+          }
         }
       }
       Read-Motion
@@ -533,11 +614,19 @@ switch ($cmd) {
       [Win32In]::SetCursorPos($tx,$ty) | Out-Null
       $script:lx = $tx; $script:ly = $ty
     } finally {
+      # Let go where the cursor is (the action's point), then - cut short
+      # by a stop (see Wait-Until) - give the user the cursor back where
+      # their hand has it, as the end of the action would have.
       if ($held) { [Win32In]::ButtonOnly((Up-Flag $btn)) }
+      if ($script:pinned) {
+        Read-Motion; $script:pinned = $false
+        [Win32In]::SetCursorPos(($s.X + $script:ux), ($s.Y + $script:uy)) | Out-Null
+      }
       Ghost-Stop
       if ($timerRes) { [Win32In]::timeEndPeriod(1) | Out-Null }
     }
-    Write-Output (\"{0},{1},{2},{3}\" -f $s.X,$s.Y,$tx,$ty)
+    if ($skipped) { Write-Output 'skipped' }
+    else { Write-Output (\"{0},{1},{2},{3}\" -f $s.X,$s.Y,$tx,$ty) }
   }
   'cursors-restore' {
     # Reload the user's cursor scheme (undoes ghost blanking after a crash).
@@ -554,15 +643,13 @@ switch ($cmd) {
     # refused whole, nothing typed. Its message quotes what it did not
     # like ('Keyword \"PASSWORD\" is not valid.') and the answer ends up in
     # Loop Automator's log, so the quoted part is left out of it.
+    # SendKeys' own message quotes the text (in single quotes, or in
+    # whatever a translated .NET uses), so none of it is passed on.
     try { Send-Keys $text }
-    catch {
-      $why = $_.Exception.Message
-      if ($null -ne $_.Exception.InnerException) { $why = $_.Exception.InnerException.Message }
-      throw ('the text is not valid SendKeys syntax: ' + ($why -replace '\"[^\"]*\"', '\"...\"'))
-    }
+    catch { throw 'the text is not valid SendKeys syntax' }
   }
   'hold' {
-    # hold <mods|-> <keys> <lead> <hold> <gap> <trail>: one keystroke with
+    # hold <mods|n> <keys> <lead> <hold> <gap> <trail>: one keystroke with
     # real timing (~Keys). The modifiers (letters c / s / a / w) go down, $lead
     # ms later each key (\"c<code>\" a character found on the keyboard
     # layout, \"v<vk>\" a virtual key) is held $hold ms, $gap ms apart, and
@@ -576,9 +663,13 @@ switch ($cmd) {
     if ($mods.Contains('s')) { $down += 0x10 }
     if ($mods.Contains('a')) { $down += 0x12 }
     if ($mods.Contains('w')) { $down += 0x5B }
+    # The key (and the Shift for it) down right now, for the finally: a stop
+    # asks this command to end (Nap throws), and what it has down is let go
+    # of here, at once, rather than by a helper started after a kill.
+    $cur = $null
     try {
       foreach ($m in $down) { Key-Event $m 0 }
-      if ($down.Count -gt 0) { [System.Threading.Thread]::Sleep($lead) }
+      if ($down.Count -gt 0) { Nap $lead }
       for ($i = 0; $i -lt $keys.Count; $i++) {
         $k = $keys[$i]; $vk = 0; $shift = $false
         if ($k.StartsWith('v')) { $vk = [int]$k.Substring(1) }
@@ -591,28 +682,34 @@ switch ($cmd) {
             Add-Type -AssemblyName System.Windows.Forms
             $t = [string]$ch; if ('+^%~(){}[]'.Contains($t)) { $t = '{' + $t + '}' }
             Send-Keys $t
-            if ($i -lt $keys.Count - 1) { [System.Threading.Thread]::Sleep($gap) }
+            if ($i -lt $keys.Count - 1) { Nap $gap }
             continue
           }
           $vk = $scan -band 0xFF; $shift = ((($scan -shr 8) -band 1) -eq 1) -and -not $mods.Contains('s')
         }
         # KEYEVENTF_EXTENDEDKEY for the navigation keys, as the keyboard sends them.
         $ext = 0; if (($vk -ge 0x21 -and $vk -le 0x28) -or $vk -eq 0x2D -or $vk -eq 0x2E) { $ext = 1 }
+        $cur = @($vk, $ext, $shift)
         if ($shift) { Key-Event 0x10 0 }
         Key-Event $vk $ext
-        [System.Threading.Thread]::Sleep($hold)
+        Nap $hold
         Key-Event $vk ($ext -bor 2)
         if ($shift) { Key-Event 0x10 2 }
-        if ($i -lt $keys.Count - 1) { [System.Threading.Thread]::Sleep($gap) }
+        $cur = $null
+        if ($i -lt $keys.Count - 1) { Nap $gap }
       }
-      if ($down.Count -gt 0) { [System.Threading.Thread]::Sleep($trail) }
+      if ($down.Count -gt 0) { Nap $trail }
     } finally {
+      if ($null -ne $cur) {
+        Key-Event $cur[0] ($cur[1] -bor 2)
+        if ($cur[2]) { Key-Event 0x10 2 }
+      }
       [array]::Reverse($down)
       foreach ($m in $down) { Key-Event $m 2 }
     }
   }
   'kdown' {
-    # kdown <mods|-> <keys>: the modifiers go down, then each key (the forms
+    # kdown <mods|n> <keys>: the modifiers go down, then each key (the forms
     # of 'hold'), and they stay down - a Key action's Down, or the start of
     # its Hold; 'kup' is the reverse. A character the layout has no key for
     # cannot be held: SendKeys types it once instead.
@@ -643,13 +740,15 @@ switch ($cmd) {
     }
   }
   'kup' {
-    # kup <mods|-> <keys>: lets go of what kdown pressed, keys first (last
+    # kup <mods|n> <keys>: lets go of what kdown pressed, keys first (last
     # down first), then the modifiers. Never refused (see Guarded): a key
     # left down would be far worse than a release landing on this app.
     $mods = [string]$a[1]; $keys = ([string]$a[2]).Split(',')
     [array]::Reverse($keys)
+    # Key by key, each on its own: one that cannot be read (a code past
+    # U+FFFF) must not keep the rest - and the modifiers - down.
     foreach ($k in $keys) {
-      $r = Resolve-Key $k $mods
+      try { $r = Resolve-Key $k $mods } catch { continue }
       if ($null -eq $r) { continue }
       Key-Event $r.vk ($r.ext -bor 2)
       if ($r.shift) { Key-Event 0x10 2 }
@@ -657,6 +756,20 @@ switch ($cmd) {
     $down = @(Mod-Vks $mods)
     [array]::Reverse($down)
     foreach ($m in $down) { Key-Event $m 2 }
+  }
+  'kupall' {
+    # Lets go of every key that is down (not the mouse buttons): the
+    # one-shot form of a stop's kup, whose key list would say on a command
+    # line what a Key Down typed.
+    # The navigation keys, right Ctrl / Alt and numpad / come up as the
+    # extended keys they are (a program reading scan codes tells them apart).
+    $extended = @(0x21,0x22,0x23,0x24,0x25,0x26,0x27,0x28,0x2D,0x2E,0x6F,0x90,0xA3,0xA5)
+    for ($vk = 8; $vk -le 254; $vk++) {
+      if (([Win32In]::GetAsyncKeyState($vk) -band 0x8000) -ne 0) {
+        $f = 2; if ($extended -contains $vk) { $f = 3 }
+        Key-Event $vk $f
+      }
+    }
   }
   'cursor' {
     # Where the real cursor is right now, as "x,y" (Capture actions).
@@ -713,7 +826,9 @@ if ($cmd -ne 'serve') { Run-Cmd $a; exit 0 }
 #     when it is big enough to have an inside; every offset is tried, the template's centre pixel
 #     first, so a miss costs about one comparison per offset), \"none\", or
 #     \"notpl\" when `id` is not loaded (send a tpl and try again). `guard` as for find.
-#   pathpart chars               -> \"ok\": a piece of a captured action's
+#   pathpart first chars         -> \"ok\": a piece of a captured action's
+#     (first 0: the first piece, which drops any pieces a cut-short
+#     action left behind)
 #     path on its way (a long travel is more points than one line holds);
 #     the next 'cap' whose path argument is '@' uses the pieces so far.
 #   pixel x y                    -> \"r,g,b\"
@@ -764,11 +879,29 @@ public class Scan {
       return d.Stride;
     }
   }
+  // The server's abort file (see Wait-Until): a stop asks a long scan to end
+  // through it, rather than the helper being killed - and a new one started,
+  // a second or more, before whatever the loop holds down can be let go.
+  public static string AbortFile = \"\";
+  // Called for every row or offset of a scan: the file is looked at every
+  // 10 ms at most, so a scan with heavy offsets (a big template, many
+  // mismatches allowed) still ends well within the grace a stop gives it.
+  // (A Stopwatch: Environment.TickCount is negative for half of every 49
+  // days of uptime.)
+  static System.Diagnostics.Stopwatch abortClock = System.Diagnostics.Stopwatch.StartNew();
+  static long lastAbortCheck = -1000;
+  static void Abort() {
+    long now = abortClock.ElapsedMilliseconds;
+    if (now - lastAbortCheck < 10) return;
+    lastAbortCheck = now;
+    if (AbortFile.Length > 0 && File.Exists(AbortFile)) throw new Exception(\"aborted\");
+  }
   public static string Find(int x, int y, int w, int h, int r, int g, int b, int tol, int step, int guard) {
     int stride = Grab(x, y, w, h);
     int cx = w / 2, cy = h / 2, c = cy * stride + cx * 4;
     if (Near(buf, c, r, g, b, tol) && !Guarded(x + cx, y + cy, guard)) return (x + cx) + \",\" + (y + cy);
     for (int yy = 0; yy < h; yy += step) {
+      Abort();
       int row = yy * stride;
       for (int xx = 0; xx < w; xx += step)
         if (Near(buf, row + xx * 4, r, g, b, tol) && !Guarded(x + xx, y + yy, guard)) return (x + xx) + \",\" + (y + yy);
@@ -826,7 +959,9 @@ public class Scan {
   }
   public static string Image(int x, int y, int w, int h, string id, int tol, int guard, bool grey, int miss, int edge) {
     Tpl t;
-    if (!tpls.TryGetValue(id, out t)) return \"notpl\";
+    // Not loaded: it is uploaded again from its first piece, so pieces an
+    // upload a stop cut short left behind must not be put in front of them.
+    if (!tpls.TryGetValue(id, out t)) { parts.Remove(id); return \"notpl\"; }
     if (t.w > w || t.h > h) return \"none\";
     int stride = Grab(x, y, w, h);
     // miss % of the template's pixels may be off; with none allowed the
@@ -838,6 +973,7 @@ public class Scan {
     for (int oy = 0; oy + t.h <= h; oy++) {
       int row = (oy + tcy) * stride;
       for (int ox = 0; ox + t.w <= w; ox++) {
+        Abort();
         if (allowed == 0 && !Same(buf, row + (ox + tcx) * 4, t.px, tc, tol, grey)) continue;
         if (At(stride, ox, oy, t, tol, grey, allowed, e) && !Guarded(x + ox + tcx, y + oy + tcy, guard)) return (x + ox) + \",\" + (y + oy);
       }
@@ -847,6 +983,9 @@ public class Scan {
 }
 \"@
 $out = [Console]::Out
+$script:abortFile = Join-Path (Split-Path -Parent $PSCommandPath) ('abort-' + $PID + '.flag')
+[Scan]::AbortFile = $script:abortFile
+if ([System.IO.File]::Exists($script:abortFile)) { [System.IO.File]::Delete($script:abortFile) }
 $out.WriteLine('ready'); $out.Flush()
 while ($true) {
   $line = [Console]::In.ReadLine()
@@ -858,7 +997,7 @@ while ($true) {
       'pixel' { $out.WriteLine([Scan]::Pixel([int]$p[1],[int]$p[2])) }
       'tplpart' { $out.WriteLine([Scan]::Part($p[1], $p[2])) }
       'tpl' { $out.WriteLine([Scan]::Load($p[1], $p[2])) }
-      'pathpart' { $script:pathBuf += [string]$p[1]; $out.WriteLine('ok') }
+      'pathpart' { if ($p[1] -eq '0') { $script:pathBuf = '' }; $script:pathBuf += [string]$p[2]; $out.WriteLine('ok') }
       'image' { $out.WriteLine([Scan]::Image([int]$p[1],[int]$p[2],[int]$p[3],[int]$p[4],$p[5],[int]$p[6],[int]$p[7],($p[8] -eq '1'),[int]$p[9],[int]$p[10])) }
       'cursor' { $c = [System.Windows.Forms.Cursor]::Position; $out.WriteLine(('{0},{1}' -f $c.X,$c.Y)) }
       default {
@@ -866,7 +1005,13 @@ while ($true) {
         if ($res.Count -eq 0) { $out.WriteLine('ok') } else { $out.WriteLine([string]$res[-1]) }
       }
     }
-  } catch { $out.WriteLine('error ' + $_.Exception.Message.Replace(\"`n\",' ').Replace(\"`r\",' ')) }
+  } catch {
+    # A .NET method's exception comes wrapped (\"Exception calling ...\"):
+    # its own message is the answer (\"aborted\" from a scan, see Scan.Abort).
+    $e = $_.Exception
+    if ($e -is [System.Management.Automation.MethodInvocationException] -and $null -ne $e.InnerException) { $e = $e.InnerException }
+    $out.WriteLine('error ' + $e.Message.Replace(\"`n\",' ').Replace(\"`r\",' '))
+  }
   $out.Flush()
 }
 """
@@ -916,6 +1061,25 @@ func settled() -> bool:
 	return _warm_thread == null and _server.is_empty()
 
 
+func warming() -> bool:
+	return _warm_thread != null and _warm_thread.is_alive()
+
+
+func helper_unavailable() -> bool:
+	return not _closing and _server_failed_at >= 0 and Time.get_ticks_msec() - _server_failed_at < SERVER_RETRY_MS
+
+
+func helper_down() -> bool:
+	if _closing or _helper_real_path.is_empty() or warming():
+		return false
+	# Not while a failed start is being held off: warm_up would only be
+	# refused too, and the one-shot path is what serves meanwhile.
+	if _server_failed_at >= 0 and Time.get_ticks_msec() - _server_failed_at < SERVER_RETRY_MS:
+		return false
+	var pid := _server_pid
+	return pid < 0 or not OS.is_process_running(pid)
+
+
 ## Ends the server process outright, whatever it is doing: the thread
 ## waiting on its answer sees it gone and returns "", and the next call
 ## starts a fresh server. Nothing here touches `_server` itself (the
@@ -925,12 +1089,87 @@ func settled() -> bool:
 func interrupt() -> void:
 	scan_generation += 1
 	var pid := _server_pid
-	if pid < 0:
-		return
-	if OS.is_process_running(pid):
+	if pid >= 0 and OS.is_process_running(pid):
 		_cut_short_at = Time.get_ticks_msec()
 		_cut_short = true
-		OS.kill(pid)
+		_abort_mutex.lock()
+		var asked := false
+		if _in_cap:
+			# A captured action is asked to end instead (the helper's abort
+			# file, see its Wait-Until): its own cleanup lets go of the
+			# button in place, shows the cursors again and gives the cursor
+			# back at once - a killed helper would leave the button down and
+			# the cursors blank until a new one had started. The thread
+			# waiting on it kills it if it has not answered by ABORT_GRACE_MS.
+			var flag := FileAccess.open(_abort_file(pid), FileAccess.WRITE)
+			if flag != null:
+				flag.close()
+				_abort_pid = pid
+				_abort_kill_at = Time.get_ticks_msec() + ABORT_GRACE_MS
+				asked = true
+		# Nothing sent yet (an idle helper, or a command about to go - see the
+		# check before it is sent), or a piece of a path or a template on its
+		# way: not ended. The piece is over in a moment and what follows it is
+		# dropped (the flag, and a command's gen); a killed helper would only
+		# have to be started again, a second or more, before the stop can let
+		# go of what the loop holds down.
+		# (Nor a release: a killed "cursors-restore" would leave every cursor
+		# blank, a killed "release" the button down.)
+		# A helper still starting is ended, though: its "ready" would keep the
+		# stop's releases waiting (the worker starting it holds the lock).
+		var piece := (_in_verb == "" and not _starting) or _in_verb in ["pathpart", "tplpart", "tpl", "path", "wheel", "key"] or _in_verb in RELEASE_COMMANDS
+		# Killed under the lock, so the command looked at is the one ended
+		# (not a release the worker went on to meanwhile).
+		if not asked and not piece:
+			OS.kill(pid)
+		_abort_mutex.unlock()
+	elif _in_call:
+		# A call is under way with no server yet: it is starting one (see
+		# _server_ready, which drops it on seeing this) rather than a
+		# command there is a process to end for.
+		_cut_short_at = Time.get_ticks_msec()
+		_cut_short = true
+
+
+func clear_interrupt() -> void:
+	_cut_short = false
+
+
+## How long a captured action asked to end (see interrupt) has to answer
+## before its helper is killed after all.
+const ABORT_GRACE_MS := 400
+## True while a 'cap' command is with the helper; when (ticks) the waiting
+## thread kills a helper that has not answered an abort request (0: none).
+var _in_cap := false
+## The command word of the command with the helper (""; under _abort_mutex).
+var _in_verb := ""
+## The commands a stop asks to end (the helper's abort file) rather than
+## killing the helper: a captured action (see its Wait-Until), the screen
+## scans (Scan.Abort) and a paced press (its Nap) - each lets go of what it
+## has down itself, at once. A SendKeys piece ('key') is let finish.
+const ABORTABLE_COMMANDS := ["cap", "find", "image", "hold"]
+var _abort_kill_at: int = 0
+var _abort_pid: int = -1
+## Taken around `_in_cap` changing (by the worker) and around an abort
+## request (by interrupt()), so the two cannot interleave.
+var _abort_mutex := Mutex.new()
+
+
+## Forgets an abort request - spent, or left from a stop that came as the
+## last 'cap' was answering - and its file. Under _abort_mutex.
+func _clear_abort() -> void:
+	if _abort_pid >= 0:
+		var file := _abort_file(_abort_pid)
+		if FileAccess.file_exists(file):
+			DirAccess.remove_absolute(file)
+	_abort_pid = -1
+	_abort_kill_at = 0
+
+
+## The abort file of the helper server with process id `pid` (see the
+## helper's Wait-Until), beside the helper script.
+func _abort_file(pid: int) -> String:
+	return _helper_real_path.get_base_dir().path_join("abort-%d.flag" % pid)
 
 
 func _notification(what: int) -> void:
@@ -946,7 +1185,17 @@ func _notification(what: int) -> void:
 ## first action. Safe to call any time; a call that needs the server while
 ## it is still starting simply waits for it.
 func warm_up() -> void:
-	if _warm_thread != null or not _server.is_empty() or _helper_real_path.is_empty():
+	if _helper_real_path.is_empty() or _closing:
+		return
+	if _warm_thread != null:
+		if _warm_thread.is_alive():
+			return
+		_warm_thread.wait_to_finish()
+		_warm_thread = null
+	# A server a stop has ended is started again here too, not by the next
+	# call from the main thread (a click), which would wait for it there.
+	var pid := _server_pid
+	if pid >= 0 and OS.is_process_running(pid):
 		return
 	_warm_thread = Thread.new()
 	_warm_thread.start(func(): _server_call("cursor"))
@@ -959,8 +1208,25 @@ func warm_up() -> void:
 ## answer — "" if the server did not answer in time (it is then restarted on
 ## the next call), "error ..." if the command itself failed. An input command
 ## that was served must not be run again either way. Thread-safe.
-func _server_call(cmd: String, timeout_ms: int = SERVER_READ_TIMEOUT_MS) -> Dictionary:
-	_server_mutex.lock()
+##
+## `gen` (a scan_generation taken when the action began, -1: none) ties the
+## command to that action: once a stop's interrupt() has moved the
+## generation on, the command is dropped (served, no answer) - whichever
+## thread spent the interrupt flag, and however long the lock took.
+func _server_call(cmd: String, timeout_ms: int = SERVER_READ_TIMEOUT_MS, gen: int = -1) -> Dictionary:
+	# The main thread does not wait behind a helper starting on the warm-up
+	# thread (a second or more, up to SERVER_START_TIMEOUT_MS, F8 unread):
+	# the call goes without the server (see _run_sync).
+	# It waits for a command under way on a worker (a moment's work), but
+	# gives up the moment that worker turns to starting one.
+	if OS.get_thread_caller_id() == OS.get_main_thread_id():
+		while not _server_mutex.try_lock():
+			if warming() or _starting:
+				return {"served": false, "line": ""}
+			OS.delay_msec(1)
+	else:
+		_server_mutex.lock()
+	_in_call = true
 	# A finished warm-up thread is joined by the next caller (never by itself).
 	if _warm_thread != null and not _warm_thread.is_alive() and OS.get_thread_caller_id() == OS.get_main_thread_id():
 		_warm_thread.wait_to_finish()
@@ -971,27 +1237,57 @@ func _server_call(cmd: String, timeout_ms: int = SERVER_READ_TIMEOUT_MS) -> Dict
 	# forgotten, rather than swallowing a command of a later run.
 	if _cut_short and Time.get_ticks_msec() - _cut_short_at > CUT_SHORT_MS:
 		_cut_short = false
-	if bytes > PIPE_LINE_MAX:
+	if gen >= 0 and gen != scan_generation:
+		result["served"] = true   # its action was cut short: not run
+		result["dropped"] = true
+		if OS.get_thread_caller_id() != OS.get_main_thread_id():
+			_cut_short = false   # the interrupt meant for it is spent
+	elif bytes > PIPE_LINE_MAX:
 		# Sent, it would be cut short (see PIPE_LINE_MAX): the helper would
 		# wait for the rest of the line and this side for the answer, and the
 		# timeout would kill a healthy helper. Refused here, whole.
 		result["served"] = true
 		result["line"] = "error the command is %d bytes; one line to the helper holds %d" % [bytes, PIPE_LINE_MAX]
-	elif _cut_short and OS.get_thread_caller_id() != OS.get_main_thread_id():
+	elif _cut_short and OS.get_thread_caller_id() != OS.get_main_thread_id() and not _releases(cmd):
 		# The interrupt landed between two commands of the action being cut
 		# short (a path piece and the action itself, say): the next command
 		# from its thread is the one meant, and it is not run on a fresh
 		# server. (A main-thread command meanwhile - the stop letting go of
-		# a button - goes through and starts one.)
+		# a button - goes through and starts one; so does a release from a
+		# worker, which is cleaning up after what was cut short.)
 		result["served"] = true
+		result["dropped"] = true
 		_cut_short = false
 		if not _server.is_empty() and not OS.is_process_running(_server_pid):
 			_stop_server()
-	elif _server_ready():
+	elif _server_ready(gen, _releases(cmd)):
 		result["served"] = true
 		var io: FileAccess = _server["stdio"]
+		# Under the abort lock, so that a stop's interrupt() either sees this
+		# 'cap' under way and asks it to end, or does not: never an abort
+		# request left over for a later command (see _clear_abort).
+		_abort_mutex.lock()
+		_clear_abort()
+		# A stop since the checks above (interrupt() leaves a helper with
+		# nothing sent to it alone): the command is not sent at all.
+		if (gen >= 0 and gen != scan_generation) or (_cut_short and not _releases(cmd) and OS.get_thread_caller_id() != OS.get_main_thread_id()):
+			_abort_mutex.unlock()
+			if OS.get_thread_caller_id() != OS.get_main_thread_id():
+				_cut_short = false
+			result["dropped"] = true
+			_in_call = false
+			_server_mutex.unlock()
+			return result
+		_in_verb = _verb(cmd)
+		_in_cap = _in_verb in ABORTABLE_COMMANDS
+		_abort_mutex.unlock()
 		io.store_line(cmd)
 		var line := _server_read_line(timeout_ms)
+		_abort_mutex.lock()
+		_in_cap = false
+		_in_verb = ""
+		_clear_abort()
+		_abort_mutex.unlock()
 		# An empty answer is the interrupt this thread was waiting through
 		# (not a fault), or the helper stuck.
 		if line.is_empty():
@@ -999,12 +1295,29 @@ func _server_call(cmd: String, timeout_ms: int = SERVER_READ_TIMEOUT_MS) -> Dict
 				push_warning("WindowsBackend: helper server did not answer %s; restarting it on the next call." % JSON.stringify(_loggable(cmd)))
 			_stop_server()
 		result["line"] = line
-		# An interrupt that came after the answer had arrived is spent too.
-		_cut_short = false
+		# An interrupt that came after the answer had arrived is spent too -
+		# by the worker it was meant for. A main-thread command (a stop
+		# letting go of a key) leaves it for the worker, which may be about
+		# to send the rest of what was cut short.
+		if OS.get_thread_caller_id() != OS.get_main_thread_id():
+			_cut_short = false
 	if _closing:
 		_stop_server()   # shut down meanwhile: this thread ends the server
+	_in_call = false
 	_server_mutex.unlock()
 	return result
+
+
+## Whether the command line `cmd` (with its 'guard <pid>' prefix, if any) is
+## one of RELEASE_COMMANDS.
+static func _releases(cmd: String) -> bool:
+	return _verb(cmd) in RELEASE_COMMANDS
+
+
+## The command word of the command line `cmd` (after its 'guard <pid>').
+static func _verb(cmd: String) -> String:
+	var parts := cmd.split(" ", false, 3)
+	return parts[2] if parts.size() > 2 and parts[0] == "guard" else (parts[0] if not parts.is_empty() else "")
 
 
 ## `cmd` as it may appear in a log line: the text of a 'key' command (which
@@ -1039,7 +1352,7 @@ func _server_read(cmd: String) -> String:
 
 ## True with a live server (starting one if needed). Holds off for a while
 ## after a failed start so a broken helper does not cost a start-up per read.
-func _server_ready() -> bool:
+func _server_ready(gen: int = -1, releasing: bool = false) -> bool:
 	if _closing:
 		return false
 	if not _server.is_empty():
@@ -1050,6 +1363,23 @@ func _server_ready() -> bool:
 		return false
 	if _server_failed_at >= 0 and Time.get_ticks_msec() - _server_failed_at < SERVER_RETRY_MS:
 		return false
+	# Never started on the main thread: that is a second or more (up to
+	# SERVER_START_TIMEOUT_MS) with the UI and F8 unread, maybe with a button
+	# the helper that died had down. It is started on its own thread
+	# instead, and this call goes without it (see _run_sync).
+	if OS.get_thread_caller_id() == OS.get_main_thread_id():
+		warm_up()
+		return false
+	# Marked while under way, so the main thread does not wait behind it
+	# for the lock (see _server_call).
+	_starting = true
+	var ok := _start_server(gen, releasing)
+	_starting = false
+	return ok
+
+
+## Starts the server for _server_ready (a worker thread, with the lock).
+func _start_server(gen: int, releasing: bool) -> bool:
 	var args := _spawn_args(PackedStringArray(["serve"]))
 	var started := OS.execute_with_pipe(PowerShellHostT.executable(), args, false) if not args.is_empty() else {}
 	if started.is_empty():
@@ -1059,6 +1389,11 @@ func _server_ready() -> bool:
 	_server = started
 	_server_pid = int(started["pid"])
 	_server_pending = PackedByteArray()
+	if (gen >= 0 and gen != scan_generation) or (_cut_short and not releasing and OS.get_thread_caller_id() != OS.get_main_thread_id()):
+		# A stop landed while the process was being started, before there
+		# was a pid to end: the command this start is for is not run on it.
+		_stop_server()
+		return false
 	var hello := _server_read_line(SERVER_START_TIMEOUT_MS)
 	if hello != "ready":
 		# An interrupt() while it was coming up is not the helper's fault (see
@@ -1090,6 +1425,10 @@ func _server_read_line(timeout_ms: int) -> String:
 			continue
 		var now := Time.get_ticks_msec()
 		if now >= deadline:
+			return ""
+		# An abort request (see interrupt) not answered in time: ended.
+		if _in_cap and _abort_kill_at != 0 and now >= _abort_kill_at:
+			OS.kill(_server["pid"])
 			return ""
 		if now >= next_alive_check:
 			if not OS.is_process_running(_server["pid"]):
@@ -1159,46 +1498,80 @@ func _run_once(extra: PackedStringArray) -> Dictionary:
 ## pid (see the helper's 'guard'); a command the guard refused sets
 ## `last_skipped`. `timeout_ms` bounds how long the server may take — a
 ## captured action legitimately runs for its whole dwell.
-func _run_sync(extra: PackedStringArray, timeout_ms: int = SERVER_READ_TIMEOUT_MS) -> String:
-	if _helper_real_path.is_empty():
+func _run_sync(extra: PackedStringArray, timeout_ms: int = SERVER_READ_TIMEOUT_MS, gen: int = -1) -> String:
+	last_skipped = false
+	_last_error = false
+	_last_dropped = false
+	_last_unsent = false
+	last_failed = true
+	# A key press on its way is not covered by a one-shot 'kupall' before it,
+	# answered or not (its helper may die with the key down).
+	if extra[0] in ["key", "hold", "kdown"]:
+		_kupall_at = -1
+	# What lets go of something (a button, a key, the blanked cursors) is
+	# still done once the backend is shut down - a Live stop switches to Safe
+	# in the same frame, before a cut-off captured action has been cleaned
+	# up after - on a one-shot process if need be. Anything else is not: a
+	# worker thread finishing its piece of a run at quit gets nothing done,
+	# rather than a process of its own nothing would end.
+	var releasing := extra[0] in RELEASE_COMMANDS
+	if _helper_real_path.is_empty() or (_closing and not releasing):
+		_last_dropped = _closing   # never sent: nothing to let go of after it
 		return ""
 	var cmd := PackedStringArray()
 	if avoid_pid > 0:
 		cmd.append_array(PackedStringArray(["guard", str(avoid_pid)]))
 	cmd.append_array(extra)
-	last_skipped = false
-	_last_error = false
-	var served := _server_call(" ".join(cmd), timeout_ms)
+	var served := _server_call(" ".join(cmd), timeout_ms, gen)
 	var line: String = served["line"]
+	_last_dropped = served.get("dropped", false)
 	if served["served"]:
 		if line.begins_with("error "):
 			_last_error = true
 			var why := line.substr(6)
-			# PowerShell quotes the value it could not use ('Cannot convert
-			# value "128512" to type "System.Char"'): for a key command that
-			# is a piece of what the loop types, and the log is what gets
-			# attached to bug reports (see _loggable).
-			if extra[0] in ["key", "hold", "kdown", "kup"]:
-				why = RegEx.create_from_string("\"[^\"]*\"").sub(why, "\"...\"", true)
-			push_warning("WindowsBackend: %s failed in the helper: %s" % [extra[0], why])
+			# The message of a failed key command quotes what it could not
+			# use - in double quotes ('Cannot convert value "128512"'), in
+			# single ones (SendKeys: "SendKeys string 'hunter2)' is not
+			# valid"), or in whatever a translated .NET uses - and that is a
+			# piece of what the loop types; the log is what gets attached to
+			# bug reports (see _loggable). None of it is logged.
+			if extra[0] in ["key", "hold", "kdown", "kup", "kupall"]:
+				why = "(the message is not logged: it may quote what was typed)"
+			# A captured action a stop asked to end (see interrupt) answers
+			# "error aborted": meant, not a fault.
+			if line != "error aborted":
+				push_warning("WindowsBackend: %s failed in the helper: %s" % [extra[0], why])
 			if extra[0] in ["key", "hold", "kdown"]:
 				keys_refused = true
 			return ""
-		if line.is_empty() and extra[0] in ["key", "hold", "kdown"]:
-			# Ended without an answer (timed out and killed): SendKeys may have
-			# had a modifier of a "+(…)" or "^{…}" down, and the helper that
-			# would have let go of it is gone. Let go of all four.
+		if line.is_empty() and not _last_dropped and extra[0] in ["key", "hold", "kdown"]:
+			# Ended without an answer (timed out, or killed by a stop): SendKeys
+			# may have had a modifier of a "+(…)" or "^{…}" down, and a press
+			# its key down, and the helper that would have let go of them is
+			# gone. Let go of the press's own keys and of all four modifiers.
+			if extra[0] != "key":
+				_run_sync(PackedStringArray(["kup", extra[1], extra[2]]))
 			_run_sync(PackedStringArray(["kup", "csaw", "v17"]))
 			keys_refused = true
+			last_failed = true
 			return ""
 		if line == "ok":
 			line = ""
-	elif _cut_short and OS.get_thread_caller_id() != OS.get_main_thread_id():
+		elif line.is_empty():
+			return ""   # no answer: the command may or may not have happened
+	elif _closing and not releasing:
+		_last_dropped = true
+		return ""   # shut down while this call waited for the helper
+	elif gen >= 0 and gen != scan_generation:
+		_last_dropped = true
+		return ""   # its action was cut short (see _server_call)
+	elif _cut_short and not releasing and OS.get_thread_caller_id() != OS.get_main_thread_id():
 		# The interrupt landed while the server was coming up for this very
 		# command (a captured action right after Run, or after the last stop
 		# ended the server): the command is the one meant, and it is not run
 		# on a one-shot process, where nothing could cut it short.
 		_cut_short = false
+		_last_dropped = true
 		return ""
 	elif extra[0] in ["key", "hold", "kdown"]:
 		# No server, and what a loop types (a password, say) is not put on
@@ -1208,13 +1581,44 @@ func _run_sync(extra: PackedStringArray, timeout_ms: int = SERVER_READ_TIMEOUT_M
 			push_warning("WindowsBackend: %s not sent: the helper server is not running." % extra[0])
 		keys_refused = true
 		return ""
+	elif not releasing and OS.get_thread_caller_id() == OS.get_main_thread_id():
+		# No helper for an input command on the main thread (it died during
+		# the action; one is being started meanwhile, see _server_ready): not
+		# done, rather than done by a process started here and waited for.
+		# The run notices (see Playback._run_loop) before its next action.
+		_last_unsent = true
+		return ""
+	elif extra[0] in ["cap", "path", "wheel"]:
+		# A captured action pins the real cursor for its whole dwell, and a
+		# travel or a slow wheel takes its time too: on a one-shot process
+		# nothing - no stop - could cut that short.
+		push_warning("WindowsBackend: %s not run: the helper server is not running." % extra[0])
+		_last_error = true
+		return ""
 	else:
-		# No server: one process for this call.
+		# No server: one process for this call. A key release says which
+		# keys it lets go of - what a Key Down typed - so it does not go on
+		# a command line either: the one-shot 'kupall' lets go of every key
+		# that is down instead - once for a whole stop's worth of releases,
+		# not a process for each.
+		if extra[0] == "kup":
+			if _kupall_at >= 0 and Time.get_ticks_msec() - _kupall_at < KUPALL_COVERS_MS:
+				last_failed = false
+				return ""
+			cmd = PackedStringArray(["kupall"])
 		var once := _run_once(cmd)
 		if int(once["code"]) != 0:
+			if extra[0] in ["kup", "release"]:
+				push_warning("WindowsBackend: %s failed (exit %d): something may still be held down." % [cmd[0], int(once["code"])])
 			return ""
+		if cmd[0] == "kupall":
+			_kupall_at = Time.get_ticks_msec()
 		line = once["line"]
+	last_failed = false
 	last_skipped = (line == "skipped")
+	# A key pressed since the last one-shot 'kupall' is not covered by it.
+	if extra[0] in ["key", "hold", "kdown"]:
+		_kupall_at = -1
 	return line
 
 
@@ -1237,6 +1641,24 @@ func mouse_button(button: int, pressed: bool, pos: Vector2i) -> void:
 	_run_sync(PackedStringArray([verb, str(pos.x), str(pos.y), str(button)]))
 
 
+## A click is two commands, each guarded: the window under the point can
+## change between them, and an up refused there - or not carried out at all
+## (no answer, a failed one-shot) - would leave the button down with nothing
+## tracking it, so it is let go of in place instead.
+func click(button: int, pos: Vector2i) -> void:
+	mouse_button(button, true, pos)
+	if last_skipped or _last_unsent:
+		# Nothing went down: nothing to send, or let go of, after it (and
+		# nothing for the engine to let go of either).
+		last_failed = false
+		return
+	mouse_button(button, false, pos)
+	if last_skipped or last_failed:
+		var skipped := last_skipped
+		release_button(button)
+		last_skipped = skipped
+
+
 func release_button(button: int) -> void:
 	_run_sync(PackedStringArray(["release", str(button)]))
 
@@ -1247,6 +1669,13 @@ func button_here(button: int, pressed: bool) -> void:
 
 func click_here(button: int) -> void:
 	_run_sync(PackedStringArray(["tap", str(button)]))
+	# Sent but not answered (the helper hung or died between its down and
+	# up): let go in place, as click() does - a button left down would turn
+	# every later move of an endless run into a drag.
+	if _last_unsent:
+		last_failed = false   # nothing went down (see click)
+	elif last_failed and not last_skipped:
+		release_button(button)
 
 
 func scroll(dir: int, notches: int, ms: int = 0, uneven: bool = false) -> void:
@@ -1265,18 +1694,23 @@ func move_path(path: PackedVector2Array, ms: int) -> void:
 
 func run_captured(kind: String, button: int, from: Vector2i, to: Vector2i, ms: int, ghost: bool, path: PackedVector2Array) -> Array:
 	last_cut_off = false
+	# Every command of this action is tied to it (see _server_call): a stop
+	# between them, or while one waits for the lock, drops the rest.
+	var gen := scan_generation
 	var cmd := PackedStringArray([
 		"cap", kind, "1" if ghost else "0", str(button),
 		str(from.x), str(from.y), str(to.x), str(to.y), str(ms)])
 	if path.size() > 2:
-		var arg := _path_arg(MousePathT.encode(path))
+		var arg := _path_arg(MousePathT.encode(path), gen)
 		if arg.is_empty():
 			# The server went away while the path was on its way (a stop's
 			# interrupt): the action is not run on a fresh one.
 			return []
 		cmd.append(arg)
-	var line := _run_sync(cmd, ms + 10000)
-	last_cut_off = line.is_empty() and not last_skipped and not _last_error
+	var line := _run_sync(cmd, ms + 10000, gen)
+	# (Not when a stop dropped the command before it was sent: nothing was
+	# pressed, and a release would let go of a button the user holds.)
+	last_cut_off = line.is_empty() and not last_skipped and not _last_error and not _last_dropped
 	if last_skipped:
 		return []
 	var saved := _parse_point(line, 0)
@@ -1298,12 +1732,12 @@ func run_captured(kind: String, button: int, from: Vector2i, to: Vector2i, ms: i
 ## pieces the server keeps ('pathpart') and "@" in its place. With no server
 ## the whole path goes on the one-shot command line, which has the room. ""
 ## when the server stopped taking pieces (it was ended meanwhile).
-func _path_arg(encoded: String) -> String:
+func _path_arg(encoded: String, gen: int = -1) -> String:
 	if encoded.length() <= PATH_INLINE_MAX:
 		return encoded
 	var at := 0
 	while at < encoded.length():
-		var call := _server_call("pathpart " + encoded.substr(at, PATH_PIECE_CHARS))
+		var call := _server_call("pathpart %d %s" % [0 if at == 0 else 1, encoded.substr(at, PATH_PIECE_CHARS)], SERVER_READ_TIMEOUT_MS, gen)
 		if not call["served"]:
 			return encoded
 		if call["line"] != "ok":
@@ -1326,6 +1760,28 @@ func send_keys(text: String) -> void:
 	var clean := KeyStrokesT.clamp_repeats(text.replace("\r", "").replace("\n", ""))
 	if clean.is_empty():
 		return
+	# What SendKeys would type differently from what the text says is not
+	# typed at all: a repeat count past KeyStrokes.REPEAT_MAX (it would be
+	# cut to that), a "$" outside braces anywhere (the Windows key, a name
+	# of ours, which SendKeys would type as a "$": "$" on its own, "${FOO}",
+	# "(a$b)"), and a single keystroke of more than STROKE_EVENTS_MAX key
+	# presses ("{CLEAR 1000}", "({ENTER 999}{TAB 999})", a count after a
+	# no-break space) - SendKeys queues all of one at once, past any stop.
+	# (Compared by the presses they make: clamp_repeats also writes a count
+	# SendKeys reads the same - "{TAB  3}", "{TAB 03}" - in one plain form.)
+	if KeyStrokesT.events(clean) != KeyStrokesT.events(text.replace("\r", "").replace("\n", "")):
+		push_warning("WindowsBackend: key text not sent: a repeat count in it is over %d, or not written as a plain number after a space." % KeyStrokesT.REPEAT_MAX)
+		keys_refused = true
+		return
+	for stroke in KeyStrokesT.split(clean):
+		if KeyStrokesT.has_bare_win(stroke):
+			push_warning("WindowsBackend: key text not sent: a Windows key (\"$\") on a stroke only SendKeys could type.")
+			keys_refused = true
+			return
+		if KeyStrokesT.events(stroke) > STROKE_EVENTS_MAX:
+			push_warning("WindowsBackend: key text not sent: one keystroke of it makes more than %d key presses at once." % STROKE_EVENTS_MAX)
+			keys_refused = true
+			return
 	var send := KeyStrokesT.pieces(clean, KEY_PIECE_BYTES, KEY_PIECE_EVENTS)
 	for piece in send:
 		if KeyStrokesT.events(piece) > KEY_PIECE_EVENTS:
@@ -1345,14 +1801,14 @@ func hold_keys(mods: String, keys: PackedStringArray, lead: int, hold: int, gap:
 	if keys.is_empty():
 		return
 	var total := lead + trail + keys.size() * (hold + gap)
-	_run_sync(PackedStringArray(["hold", mods if not mods.is_empty() else "-", ",".join(keys),
+	_run_sync(PackedStringArray(["hold", mods if not mods.is_empty() else NO_MODS, ",".join(keys),
 		str(lead), str(hold), str(gap), str(trail)]), total + SERVER_READ_TIMEOUT_MS)
 
 
 func press_keys(mods: String, keys: PackedStringArray, pressed: bool) -> void:
 	if keys.is_empty():
 		return
-	_run_sync(PackedStringArray(["kdown" if pressed else "kup", mods if not mods.is_empty() else "-", ",".join(keys)]))
+	_run_sync(PackedStringArray(["kdown" if pressed else "kup", mods if not mods.is_empty() else NO_MODS, ",".join(keys)]))
 
 
 func get_cursor_pos() -> Vector2i:
@@ -1424,12 +1880,15 @@ func _read_abandoned() -> bool:
 func find_color(rect: Rect2i, color: Color, tolerance: int, step: int) -> Dictionary:
 	if _helper_real_path.is_empty():
 		return {}
+	# Tied to the stop it may be cut short by (see _server_call).
+	var gen := scan_generation
 	# The last argument is the guard pid: with ~Self off a match on a Loop
 	# Automator window is skipped (see the helper's Scan.Guarded), so a detect
 	# never triggers on the app running it; 0 (~Self on) reads everything.
-	var line := _server_read("find %d %d %d %d %d %d %d %d %d %d" % [
+	var call := _server_call("find %d %d %d %d %d %d %d %d %d %d" % [
 		rect.position.x, rect.position.y, maxi(1, rect.size.x), maxi(1, rect.size.y),
-		color.r8, color.g8, color.b8, tolerance, maxi(1, step), avoid_pid])
+		color.r8, color.g8, color.b8, tolerance, maxi(1, step), avoid_pid], SERVER_READ_TIMEOUT_MS, gen)
+	var line: String = call["line"]
 	if line.begins_with("none,"):
 		var centre := _parse_rgb(line.substr(5))
 		if centre.a > 0.0:
@@ -1438,7 +1897,9 @@ func find_color(rect: Rect2i, color: Color, tolerance: int, step: int) -> Dictio
 		var hit := _parse_point(line)
 		if hit != Vector2i(-1, -1):
 			return {"hit": hit, "centre": color}
-	if _read_abandoned():
+	# A served scan that got no answer (a stop ended it, or it stuck) is not
+	# done again in script: a screen read nothing can cut short.
+	if call["served"] or _read_abandoned():
 		return {}
 	return super.find_color(rect, color, tolerance, step)
 
@@ -1454,18 +1915,27 @@ func find_color(rect: Rect2i, color: Color, tolerance: int, step: int) -> Dictio
 func find_image(rect: Rect2i, png: PackedByteArray, tolerance: int, grey: bool = false, mismatch: int = 0, edge: int = 0) -> Dictionary:
 	if _helper_real_path.is_empty() or png.is_empty():
 		return {}
-	var id := "%d_%08x" % [png.size(), hash(png)]
+	# Every command of the scan - the template upload and the second try
+	# after it too - is tied to the stop it may be cut short by (see
+	# _server_call): none of it runs after one.
+	var gen := scan_generation
+	# By SHA-256 of the bytes: a 32-bit hash could be made to collide, and a
+	# template the helper already holds under that id would be used instead.
+	var sha := HashingContext.new()
+	sha.start(HashingContext.HASH_SHA256)
+	sha.update(png)
+	var id := sha.finish().hex_encode()
 	var cmd := "image %d %d %d %d %s %d %d %d %d %d" % [
 		rect.position.x, rect.position.y, maxi(1, rect.size.x), maxi(1, rect.size.y),
 		id, tolerance, avoid_pid, 1 if grey else 0, mismatch, edge]
-	var call := _server_call(cmd, IMAGE_SCAN_TIMEOUT_MS)
+	var call := _server_call(cmd, IMAGE_SCAN_TIMEOUT_MS, gen)
 	if not call["served"]:
 		if _read_abandoned():
 			return {}
 		return super.find_image(rect, png, tolerance, grey, mismatch, edge)
 	var line: String = call["line"]
-	if line == "notpl" and _upload_template(id, png):
-		line = String(_server_call(cmd, IMAGE_SCAN_TIMEOUT_MS)["line"])
+	if line == "notpl" and _upload_template(id, png, gen):
+		line = String(_server_call(cmd, IMAGE_SCAN_TIMEOUT_MS, gen)["line"])
 	if line == "none":
 		return {"hit": Vector2i(-1, -1)}
 	var hit := _parse_point(line)
@@ -1479,18 +1949,18 @@ func find_image(rect: Rect2i, png: PackedByteArray, tolerance: int, grey: bool =
 ## (tplpart …) with the last one on the tpl command that decodes it. True
 ## when the server took it.
 const TEMPLATE_PIECE_CHARS := 2048
-func _upload_template(id: String, png: PackedByteArray) -> bool:
+func _upload_template(id: String, png: PackedByteArray, gen: int = -1) -> bool:
 	var b64 := Marshalls.raw_to_base64(png)
 	var at := 0
 	while b64.length() - at > TEMPLATE_PIECE_CHARS:
-		if _server_read("tplpart %s %s" % [id, b64.substr(at, TEMPLATE_PIECE_CHARS)]) != "ok":
+		if _server_call("tplpart %s %s" % [id, b64.substr(at, TEMPLATE_PIECE_CHARS)], SERVER_READ_TIMEOUT_MS, gen)["line"] != "ok":
 			return false
 		at += TEMPLATE_PIECE_CHARS
-	return _server_read("tpl %s %s" % [id, b64.substr(at)]) == "ok"
+	return _server_call("tpl %s %s" % [id, b64.substr(at)], SERVER_READ_TIMEOUT_MS, gen)["line"] == "ok"
 
 
 func read_rect(rect: Rect2i) -> Image:
-	if _helper_real_path.is_empty():
+	if _helper_real_path.is_empty() or _closing:
 		return null
 	var first_error := ""
 	for attempt in 2:

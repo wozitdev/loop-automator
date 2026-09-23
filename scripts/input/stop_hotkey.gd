@@ -116,7 +116,9 @@ func poll() -> bool:
 		elif line.begins_with("error"):
 			state = State.UNAVAILABLE
 			reason = line.substr(6).strip_edges()
-	if state == State.STARTING and not OS.is_process_running(_proc["pid"]):
+	# Armed too: a helper that dies later (killed, crashed) holds F8 no more,
+	# and the status line must not go on saying F8 stops the loop.
+	if (state == State.STARTING or state == State.ARMED) and not OS.is_process_running(_proc["pid"]):
 		state = State.UNAVAILABLE
 		reason = "the helper exited (exit code %d)" % OS.get_process_exit_code(_proc["pid"])
 	return pressed

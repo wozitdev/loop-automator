@@ -14,6 +14,10 @@ const LayerNamesT := preload("res://scripts/model/layer_names.gd")
 const STORE_VERSION := 1
 const STORE_INDEX_PATH := "user://loop_store.json"
 const STORE_LOOPS_DIR := "user://loops"
+## What an imported loop's name starts with (see import_loop), and how much
+## of the file's own name it keeps after it.
+const IMPORTED_MARK := "(imported)"
+const IMPORTED_BASE_CHARS := 60
 
 signal project_replaced                  ## A whole new project was loaded/created
 signal layers_changed                    ## Layers added/removed/reordered/renamed
@@ -187,7 +191,8 @@ func _view_follows_active() -> void:
 func rename_layer(index: int, new_name: String) -> void:
 	if index < 0 or index >= project.layers.size():
 		return
-	project.layers[index].name = LoopLayerT.clean_name(new_name)
+	var name := LoopLayerT.clean_name(new_name)
+	project.layers[index].name = name if not LoopLayerT.is_blank(name) else "Layer %d" % (index + 1)
 	_mark_pending()
 	_sync_loop_name()
 	emit_signal("layers_changed")
@@ -201,8 +206,11 @@ func _sync_loop_name() -> void:
 	var name := project.layers[0].name.strip_edges()
 	if name.is_empty():
 		name = str(active_loop_id)
-	project.name = name
 	var idx := _loop_index_from_id(active_loop_id)
+	# An imported loop keeps its mark whatever its first layer is called.
+	if idx >= 0 and bool(loop_stack[idx].get("imported", false)) and not name.begins_with(IMPORTED_MARK):
+		name = "%s %s" % [IMPORTED_MARK, name]
+	project.name = name
 	if idx < 0 or String(loop_stack[idx].get("name", "")) == name:
 		return
 	loop_stack[idx]["name"] = name
@@ -283,6 +291,14 @@ func move_action(index: int, delta: int) -> void:
 	emit_signal("selection_changed")
 
 
+## A layer's Visible, Enabled or colour was changed in place: the loop is
+## unsaved, as after any other edit (an imported loop is saved on import,
+## and a layer switched off there must not run again after a restart).
+func notify_layer_modified() -> void:
+	_mark_pending()
+	emit_signal("layers_changed")
+
+
 func notify_action_modified() -> void:
 	_mark_pending()
 	emit_signal("action_modified", active_layer_index, selected_action_index)
@@ -339,7 +355,8 @@ func create_loop(open_now: bool = true, source: LoopProjectT = null) -> int:
 	# not list (the index was lost or reset, and numbering started over).
 	# It is never written over: the new loop takes the next free number, and
 	# the old file stays where Share → Import can bring it back.
-	while FileAccess.file_exists(_loop_file_path(id)):
+	while FileAccess.file_exists(_loop_file_path(id)) or FileAccess.file_exists(_loop_file_path(id) + ".tmp") \
+			or FileAccess.file_exists(_loop_file_path(id) + ".broken"):
 		id += 1
 	_next_loop_id = id + 1
 	var p := source
@@ -433,7 +450,9 @@ static func _within_limits(data: Dictionary) -> bool:
 		if actions > LOOP_ACTIONS_MAX:
 			return false
 		for a in list:
-			if typeof(a) != TYPE_DICTIONARY or typeof((a as Dictionary).get("image")) != TYPE_STRING:
+			# (Only an Image Detect keeps a template, see LoopAction.from_dict.)
+			if typeof(a) != TYPE_DICTIONARY or typeof((a as Dictionary).get("image")) != TYPE_STRING \
+					or LoopActionT.read_int(a, "type", -1) != LoopActionT.Type.IMAGE_DETECT:
 				continue
 			# The whole string, as the load decodes it (the decoder skips
 			# line breaks, so the first characters are not the first bytes).
@@ -465,7 +484,9 @@ func peek_loop(p: LoopProjectT) -> Dictionary:
 		actions += layer.actions.size()
 		for a in layer.actions:
 			if a.type == LoopActionT.Type.KEY:
-				keys.append(a.keys_shown())
+				# As it is typed; the question marks it for showing (see
+				# LoopAction.ltr_marked) after measuring and cutting it.
+				keys.append(a.keys)   # (cleaned when it was read)
 	return {"name": p.layers[0].name, "layers": p.layers.size(), "actions": actions, "keys": keys}
 
 
@@ -473,12 +494,50 @@ func peek_loop(p: LoopProjectT) -> Dictionary:
 ## to the store right away, so it is there next time) and opens it. Returns
 ## the new loop's id.
 func import_loop(source: LoopProjectT) -> int:
+	# The Safe dry-run the import question asks for walks every detect
+	# through (see LoopAction.safe_continue): a file that turned that off
+	# could have a guard skip, in Safe, the very layer Live then runs.
+	for layer in source.layers:
+		for a in layer.actions:
+			a.safe_continue = true
+	# Never under the name of a loop already here: a stranger's file named
+	# like one of the user's would sit beside it in the picker, told apart
+	# by nothing but its place.
+	# Compared as they look, not as they are spelled: a no-break space, a
+	# decomposed accent or another case reads the same in the picker.
+	var taken: Array = []
+	for existing in loop_names():
+		taken.append(_name_skeleton(existing))
+	# Always marked as imported, not only when a name matches: a look-alike
+	# letter (a Cyrillic "а") passes any comparison and reads the same.
+	# In front, where a picker or status line cut to its width still shows it.
+	var base := source.layers[0].name.left(IMPORTED_BASE_CHARS)
+	var name := "%s %s" % [IMPORTED_MARK, base]
+	var n := 2
+	while _name_skeleton(name) in taken:
+		name = "%s %d %s" % [IMPORTED_MARK, n, base]
+		n += 1
+	source.layers[0].name = name
 	var id := create_loop(false, source)
+	# ...and remembered with the loop: it is named after whichever layer is
+	# first, and a layer moved up or the first one deleted must not give it
+	# an unmarked name (see _sync_loop_name).
+	loop_stack[_loop_index_from_id(id)]["imported"] = true
 	var key := str(id)
 	if _write_project_file(_loop_file_path(id), _session_projects_by_id[key]) == OK:
 		_pending_by_id[key] = false
 	_open_project_for_id(id)
 	return id
+
+
+## `name` as it reads rather than as it is spelled, for telling two names
+## apart: no accents, no case, no spaces of any kind.
+static func _name_skeleton(name: String) -> String:
+	if _spaces == null:
+		_spaces = RegEx.create_from_string("[\\p{Z}\\s]+")
+	var plain := TextServerManager.get_primary_interface().strip_diacritics(name).to_lower()
+	return _spaces.sub(plain, "", true)
+static var _spaces: RegEx = null
 
 
 ## Adds a copy of the current loop to the store and opens it: the same
@@ -493,7 +552,16 @@ func duplicate_loop() -> int:
 	# Through the file format, so nothing is shared with the original.
 	var copy := LoopProjectT.from_dict(project.to_dict())
 	copy.layers[0].name = copy_name(project.layers[0].name, loop_names())
-	return create_loop(true, copy)
+	# A copy of an imported loop is still someone else's loop: it keeps the
+	# mark (see import_loop).
+	var idx := _loop_index_from_id(active_loop_id)
+	var imported := idx >= 0 and bool(loop_stack[idx].get("imported", false))
+	var id := create_loop(false, copy)
+	if imported:
+		loop_stack[_loop_index_from_id(id)]["imported"] = true
+		_save_store_index()
+	_open_project_for_id(id)
+	return id
 
 
 ## "<original> copy", or "<original> copy N" from 2 up when that is in `taken`.
@@ -524,6 +592,13 @@ func delete_loop(loop_id: int) -> bool:
 	var file := String(entry.get("file", ""))
 	if not file.is_empty() and FileAccess.file_exists(file):
 		DirAccess.remove_absolute(ProjectSettings.globalize_path(file))
+	# ...and a copy a save cut short left beside it (it can hold all of the
+	# loop - what Rec recorded typing too): the question says the file goes.
+	# (And one set aside as unreadable - see _read_project_file - which can
+	# hold all of it too.)
+	for leftover in [file + ".tmp", file + ".broken"]:
+		if not file.is_empty() and FileAccess.file_exists(leftover):
+			DirAccess.remove_absolute(ProjectSettings.globalize_path(leftover))
 	if loop_stack.is_empty():
 		active_loop_id = -1
 		create_loop(true)
@@ -652,6 +727,7 @@ func _ensure_store_dirs() -> void:
 
 
 func _load_or_init_store() -> void:
+	_recover_tmp(STORE_INDEX_PATH)
 	if not FileAccess.file_exists(STORE_INDEX_PATH):
 		loop_stack = []
 		active_loop_id = -1
@@ -686,6 +762,7 @@ func _load_or_init_store() -> void:
 			"id": id,
 			"name": LoopLayerT.clean_name(LoopActionT.read_string(e, "name", str(id))),
 			"file": _store_loop_file(id, LoopActionT.read_string(e, "file", "")),
+			"imported": LoopActionT.read_bool(e, "imported", false),
 		})
 	_next_loop_id = maxi(1, LoopActionT.read_int(data, "next_loop_id", 1))
 	for e in loop_stack:
@@ -735,6 +812,7 @@ static func _store_loop_file(loop_id: int, raw: String) -> String:
 ## otherwise write over it - and the loop opens empty. One that cannot be
 ## opened at all (held by another program) is left where it is.
 func _read_project_file(path: String, fallback_name: String) -> LoopProjectT:
+	_recover_tmp(path)
 	if FileAccess.file_exists(path):
 		var abs := ProjectSettings.globalize_path(path)
 		var f := FileAccess.open(path, FileAccess.READ)
@@ -758,6 +836,19 @@ func _read_project_file(path: String, fallback_name: String) -> LoopProjectT:
 	if not fallback_name.strip_edges().is_empty():
 		p.layers[0].name = fallback_name
 	return p
+
+
+## Puts `path`'s ".tmp" in its place when `path` itself is missing: on
+## Windows the rename in _write_text_file removes the old file first, so a
+## crash right then leaves the whole new file as the .tmp and nothing else -
+## which the next write of the same file would empty. (A .tmp beside a file
+## that is there is a write cut short, and is left alone.)
+static func _recover_tmp(path: String) -> void:
+	var tmp := path + ".tmp"
+	if FileAccess.file_exists(path) or not FileAccess.file_exists(tmp):
+		return
+	if DirAccess.rename_absolute(ProjectSettings.globalize_path(tmp), ProjectSettings.globalize_path(path)) == OK:
+		push_warning("ProjectData: %s was missing; restored it from %s." % [path.get_file(), tmp.get_file()])
 
 
 func _write_project_file(path: String, value: LoopProjectT) -> Error:
