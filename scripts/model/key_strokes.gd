@@ -277,10 +277,12 @@ static func pieces(text: String, max_bytes: int, max_events: int = 0) -> PackedS
 		piece += stroke
 		piece_bytes += bytes
 		piece_events += count
-		# SendKeys keeps a modifier down past "~" ("%~{F4}" is Alt+Enter and
-		# Alt+F4): a piece ends there, and the modifier with it - as the text
-		# is shown and as paced typing presses it (Alt+Enter, then F4).
-		if is_modified_enter(stroke):
+		# SendKeys keeps a modifier down past "~", and past a character the
+		# layout has no key for (sent as the character itself): "%~{F4}" and
+		# "%<a CJK character>{F4}" are Alt+F4 at the end. A piece ends after
+		# every keystroke with a modifier, and SendKeys lets go of it there -
+		# as the text is shown and as paced typing presses it.
+		if has_modifiers(stroke):
 			out.append(piece)
 			piece = ""
 			piece_bytes = 0
@@ -290,12 +292,9 @@ static func pieces(text: String, max_bytes: int, max_events: int = 0) -> PackedS
 	return out
 
 
-## Whether `stroke` is modifiers and a bare "~" (Enter): see pieces.
-static func is_modified_enter(stroke: String) -> bool:
-	var i := 0
-	while i < stroke.length() and stroke[i] in "^+%$":
-		i += 1
-	return i > 0 and stroke.substr(i) == "~"
+## Whether `stroke` starts with a modifier (^ + % $): see pieces.
+static func has_modifiers(stroke: String) -> bool:
+	return not stroke.is_empty() and stroke[0] in "^+%$"
 
 
 ## Whether `stroke` is a group with a modifier or another group inside it

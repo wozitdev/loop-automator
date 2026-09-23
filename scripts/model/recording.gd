@@ -284,6 +284,10 @@ static func _stroke(vk: int, mods: String, _extended: bool, ch: int = 0) -> Stri
 	for letter in mods:
 		prefix += {"c": "^", "s": "+", "a": "%", "w": "$"}.get(letter, "")
 	var key := ""
+	# A dead key (an accent waiting for its letter) types nothing of its
+	# own: left out (counted), not written as the US character on its code.
+	if ch < 0:
+		return ""
 	if vk >= 0x41 and vk <= 0x5A:
 		key = char(vk).to_lower()
 		if shift and mods == "s":
@@ -297,7 +301,7 @@ static func _stroke(vk: int, mods: String, _extended: bool, ch: int = 0) -> Stri
 	elif vk >= 0x60 and vk <= 0x69:
 		key = char(vk - 0x60 + 0x30)   # numpad digits
 	elif vk == 0x6E:
-		key = "."
+		key = char(ch) if ch > 0x20 else "."   # "," on a German or French numpad
 	elif vk == 0x20:
 		key = " "
 	elif ch > 0x20 and not (vk >= 0x60 and vk <= 0x6F):

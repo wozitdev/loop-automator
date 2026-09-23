@@ -987,7 +987,8 @@ func _fit_described(described: String, room: float, a: LoopActionT) -> String:
 			hi -= 1
 			end_done = true
 		if widths[lo] > half:
-			start = _squeezed(pieces[lo], left - used)
+			# (Leaving the end its whole width when that was not squeezed.)
+			start = _squeezed(pieces[lo], left - used if end_done else left - widths[hi - 1])
 			used += _px(start)
 			lo += 1
 			start_done = true

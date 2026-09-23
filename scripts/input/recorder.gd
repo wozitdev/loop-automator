@@ -164,8 +164,9 @@ public class Rec : NativeWindow {
         // \"&\" on a French one), not the US one its code is named for.
         uint pid; uint tid = GetWindowThreadProcessId(fg, out pid);
         uint ch = MapVirtualKeyEx((uint)vk, 2, GetKeyboardLayout(tid));
-        if ((ch & 0x80000000) != 0) ch = 0;
-        Out(\"k \" + t + \" \" + vk + \" \" + (up ? 0 : 1) + \" \" + ext + \" \" + (ch & 0xFFFF));
+        // A dead key (the top bit) is -1: it types nothing of its own.
+        string chs = (ch & 0x80000000) != 0 ? \"-1\" : (ch & 0xFFFF).ToString();
+        Out(\"k \" + t + \" \" + vk + \" \" + (up ? 0 : 1) + \" \" + ext + \" \" + chs);
       }
     }
   }

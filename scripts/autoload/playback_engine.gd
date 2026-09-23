@@ -323,6 +323,7 @@ func start() -> void:
 		return
 	is_running = true
 	_generation += 1
+	_cursor_unplaced = false
 	# F8 with a modifier down stops it too, while it runs (see StopHotkey).
 	_stop_hotkey.set_modifiers(true)
 	_user_cursor = _mouse_pos()
@@ -540,14 +541,23 @@ func _execute_action(action: LoopActionT) -> int:
 			# (Windows would stop the cursor at the nearest screen's edge, and a
 			# click or scroll where it is would land there, unseen.)
 			if _off_screens(action, [p]):
+				# ...nor where it was before: a click or scroll "where the
+				# cursor is" after this Move is meant for its point, not for
+				# the last action's target. Skipped too, until a point lands.
+				_cursor_unplaced = true
 				return LoopActionT.OnFail.CONTINUE
+			_cursor_unplaced = false
 			await _travel(_mouse_pos(), p, action.roll_duration_ms(), action.wiggle, "MOVE")
 		LoopActionT.Type.CLICK:
 			# ~Move: get to the point first (over the duration, like a Move);
 			# off, the press is wherever the cursor is.
 			var p := _mouse_pos()
+			if not action.move_to and _cursor_unplaced and action.press_mode != LoopActionT.PressMode.UP:
+				emit_signal("status", "Click skipped: the Move before it was to no screen.")
+				return LoopActionT.OnFail.CONTINUE
 			if action.move_to:
 				p = action.roll_point()
+				_cursor_unplaced = false
 				if _off_screens(action, [p]):
 					# An Up is let go of all the same, where the cursor is: the
 					# button a Down pressed would otherwise stay down, every
@@ -605,6 +615,9 @@ func _execute_action(action: LoopActionT) -> int:
 		LoopActionT.Type.SCROLL:
 			# The wheel turns where the cursor is (a Move before it puts it
 			# somewhere).
+			if _cursor_unplaced:
+				emit_signal("status", "Scroll skipped: the Move before it was to no screen.")
+				return LoopActionT.OnFail.CONTINUE
 			var n := action.roll_notches()
 			var ms := action.roll_duration_ms()
 			_set_tracker(_mouse_pos(), true, "SCROLL")
@@ -1502,7 +1515,12 @@ func _scan_off_thread(reader: InputBackendT, scan: Callable) -> Dictionary:
 	return result
 
 
-## True (and said on the status line) when one of points of a press or a
+## Set when a Move was skipped for having no screen to go to (see MOVE):
+## what presses "where the cursor is" waits for a point that lands.
+var _cursor_unplaced := false
+
+
+## True (and said on the status line) when one of `points` of a press or a
 ## drag is on no screen: Windows would press it at the nearest screen's edge
 ## (a window's Close button, the taskbar's corner), where nothing shows it.
 func _off_screens(action: LoopActionT, points: Array) -> bool:
