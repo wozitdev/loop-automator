@@ -120,6 +120,13 @@ static func _items(events: Array) -> Array:
 				_flush_move(items, run, keys, mods)
 				run = {}
 				_touch(buttons, keys, mods, true)
+				# The same button pressed again with no release seen: the first
+				# press is let go of here rather than lost (and left down).
+				if buttons.has(e["button"]):
+					var old: Dictionary = buttons[e["button"]]
+					buttons.erase(e["button"])
+					items.append(_item("down", old["t"], old["t"], {"button": e["button"], "x": old["x"], "y": old["y"]}))
+					items.append(_item("up", t, t, {"button": e["button"], "x": old["x2"], "y": old["y2"]}))
 				var d := {"t": t, "x": e["x"], "y": e["y"], "x2": e["x"], "y2": e["y"], "other": false}
 				# A press while another is down makes both plain down / up.
 				if not buttons.is_empty():
@@ -174,6 +181,9 @@ static func _items(events: Array) -> Array:
 				if MODIFIERS.has(vk):
 					if e["down"]:
 						if not mods.has(vk):
+							# Motion that ended before it went down is not its.
+							_flush_move(items, run, keys, mods)
+							run = {}
 							# (Down during a press: held for the mouse, a Ctrl-drag.)
 							mods[vk] = {"t": t, "used": not buttons.is_empty(), "mouse": not buttons.is_empty()}
 							# Held across it, a key or button is a down ... up (so the
@@ -223,8 +233,8 @@ static func _items(events: Array) -> Array:
 					if k["other"]:
 						items.append(_item("keydown", k["t"], k["t"], {"text": text}))
 						items.append(_item("keyup", t, t, {"text": text}))
-					elif int(k.get("repeats", 0)) > 0 and text.ends_with("}") and text.contains("{") and not text.ends_with("{}}"):
-						# A named key held till it repeated (Backspace, an arrow):
+					elif int(k.get("repeats", 0)) > 0 and (text.ends_with("{BACKSPACE}") or text.ends_with("{DELETE}")):
+						# Backspace or Delete held till it repeated (clearing a field):
 						# the presses it made, counted - injected input does not
 						# repeat by itself, and a hold would press it once.
 						var n := mini(int(k["repeats"]) + 1, KeyStrokesT.REPEAT_MAX)

@@ -1363,6 +1363,7 @@ func _init() -> void:
 	_restore_cursors_left_blank()
 
 
+const GHOST_MARKER_STALE_S := 180
 ## A helper killed while its ghost cursor was up (the app ended from Task
 ## Manager, helpers and all) left every system cursor blank - for the whole
 ## session, not just this app's: its marker says so, and the scheme is
@@ -1377,8 +1378,14 @@ func _restore_cursors_left_blank() -> void:
 		var pid := file.trim_prefix("ghost-").trim_suffix(".flag")
 		if pid.is_valid_int() and OS.is_process_running(int(pid)):
 			continue
+		# (A one-shot helper - started and waited for, so not one this
+		# process can see running - may still be in its dwell: a marker
+		# younger than the longest captured action is left to it.)
+		var path := dir.path_join(file)
+		if Time.get_unix_time_from_system() - FileAccess.get_modified_time(path) < GHOST_MARKER_STALE_S:
+			continue
 		_run_once(PackedStringArray(["cursors-restore"]))
-		DirAccess.remove_absolute(dir.path_join(file))
+		DirAccess.remove_absolute(path)
 
 
 func backend_name() -> String:

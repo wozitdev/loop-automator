@@ -103,11 +103,23 @@ public class Rec : NativeWindow {
   static void Out(string s) { Ev e; e.line = s; e.atPoint = false; e.pt = new Pt(); Push(e); }
   static void OutAt(string s, Pt p) { Ev e; e.line = s; e.atPoint = true; e.pt = p; Push(e); }
   static void Push(Ev e) { lock (lines) { if (lines.Count < MaxQueued || !e.atPoint) lines.Enqueue(e); Monitor.Pulse(lines); } }
+  static System.Collections.Generic.HashSet<string> heldButtons = new System.Collections.Generic.HashSet<string>();
+  static System.Collections.Generic.HashSet<int> heldKeys = new System.Collections.Generic.HashSet<int>();
   static void Writer() {
     while (true) {
       Ev e;
       lock (lines) { while (lines.Count == 0) Monitor.Wait(lines); e = lines.Dequeue(); }
-      if (e.atPoint && Guarded(WindowFromPoint(e.pt))) continue;
+      if (e.atPoint) {
+        // A button whose press went out has its release go out too, and the
+        // motion while it is down, wherever they land (a drag let go over
+        // this app's window): dropped, the replay would hold it for good.
+        char kind = e.line[0];
+        string b = (kind == 'd' || kind == 'u') ? e.line.Split(' ')[2] : null;
+        bool owed = (kind == 'u' && heldButtons.Contains(b)) || (kind == 'm' && heldButtons.Count > 0);
+        if (!owed && Guarded(WindowFromPoint(e.pt))) continue;
+        if (kind == 'd') heldButtons.Add(b);
+        else if (kind == 'u') heldButtons.Remove(b);
+      }
       try { Console.Out.WriteLine(e.line); Console.Out.Flush(); } catch { done = true; return; }
     }
   }
@@ -157,7 +169,10 @@ public class Rec : NativeWindow {
       if (vk == 0xFF) return;  // the fake shift some keys are padded with
       // F8 ends the recording (WM_HOTKEY, below) and is never in it.
       IntPtr fg = GetForegroundWindow();
-      if (vk != 0x77 && (any || !injected) && !Guarded(fg)) {
+      // (A key whose press went out has its release go out too, even with
+      // this app in front by then: dropped, the replay would hold it.)
+      if (vk != 0x77 && (any || !injected) && (!Guarded(fg) || (up && heldKeys.Contains(vk)))) {
+        if (up) heldKeys.Remove(vk); else heldKeys.Add(vk);
         // The key's own character on the layout of the window typed into
         // (MAPVK_VK_TO_CHAR; 0 for none, or a dead key): what a digit or
         // punctuation key types is the layout's (\"+\" on a German keyboard,
