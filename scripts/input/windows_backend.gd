@@ -669,6 +669,18 @@ switch ($cmd) {
     # Loop Automator's log, so the quoted part is left out of it.
     # SendKeys' own message quotes the text (in single quotes, or in
     # whatever a translated .NET uses), so none of it is passed on.
+    # A character whose key is a dead key on this layout (the grave accent
+    # on German, ' and \" on US-International) would be pressed as that key
+    # by SendKeys and put its accent on the next letter: the text is
+    # refused, nothing typed, rather than typed as another text. (SendKeys'
+    # own characters are its syntax, and braced names are plain letters.)
+    foreach ($c in $text.ToCharArray()) {
+      if ('+^%~(){}[]'.Contains([string]$c)) { continue }
+      $s = [Win32In]::VkKeyScanW($c)
+      if ($s -ne -1 -and ((([uint32][Win32In]::MapVirtualKeyW([uint32]($s -band 0xFF), 2)) -shr 31) -eq 1)) {
+        throw 'the text has a character this keyboard layout types as a dead key'
+      }
+    }
     try { Send-Keys $text }
     catch { throw 'the text is not valid SendKeys syntax' }
   }
