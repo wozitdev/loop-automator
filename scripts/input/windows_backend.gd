@@ -160,6 +160,7 @@ public class Win32In {
   [DllImport(\"user32.dll\")] public static extern bool ShowWindow(IntPtr h,int n);
   [DllImport(\"user32.dll\")] public static extern void keybd_event(byte vk,byte scan,uint flags,IntPtr extra);
   [DllImport(\"user32.dll\")] public static extern short GetAsyncKeyState(int vk);
+  [DllImport(\"user32.dll\")] public static extern short GetKeyState(int vk);
   [DllImport(\"user32.dll\")] public static extern uint MapVirtualKeyW(uint code,uint type);
   [DllImport(\"user32.dll\", CharSet=CharSet.Unicode)] public static extern short VkKeyScanW(char ch);
   [DllImport(\"user32.dll\")] public static extern int GetWindowLongW(IntPtr h,int i);
@@ -265,6 +266,16 @@ function Mod-Vks([string]$mods) {
   if ($mods.Contains('w')) { $d += 0x5B }
   return $d
 }
+# True when VkKeyScanW's answer $scan is no plain key for its character: none
+# (-1), one that needs Ctrl / Alt (AltGr), or a dead key (\"^\" on German or
+# French layouts: pressed, it waits to put an accent on the next letter,
+# \"x{^}e\" typing \"xê\" - MAPVK_VK_TO_CHAR sets the top bit for one). Such a
+# character is typed as itself (TypeUnicode).
+function No-Plain-Key([int]$scan) {
+  if ($scan -eq -1 -or ((($scan -shr 8) -band 6) -ne 0)) { return $true }
+  $char = [uint32][Win32In]::MapVirtualKeyW([uint32]($scan -band 0xFF), 2)
+  return (($char -shr 31) -eq 1)
+}
 # A key of the kdown / kup commands (\"c<code>\" a character found on the
 # keyboard layout, \"v<vk>\" a virtual key) as @{ vk; shift; ext }: the key to
 # press, whether Shift is needed for the character (unless Shift is a
@@ -277,7 +288,7 @@ function Resolve-Key([string]$k, [string]$mods) {
     if ($vk -lt 1 -or $vk -gt 254) { throw ('not a key: ' + $k) }
   } else {
     $scan = [Win32In]::VkKeyScanW([char][int]$k.Substring(1))
-    if ($scan -eq -1 -or ((($scan -shr 8) -band 6) -ne 0)) { return $null }
+    if (No-Plain-Key $scan) { return $null }
     $vk = $scan -band 0xFF; $shift = ((($scan -shr 8) -band 1) -eq 1) -and -not $mods.Contains('s')
   }
   $ext = 0; if (($vk -ge 0x21 -and $vk -le 0x28) -or $vk -eq 0x2D -or $vk -eq 0x2E) { $ext = 1 }
@@ -691,12 +702,18 @@ switch ($cmd) {
           $scan = [Win32In]::VkKeyScanW($ch)
           # No key for it, or one that needs Ctrl / Alt (AltGr) on this
           # layout: typed as the character itself.
-          if ($scan -eq -1 -or ((($scan -shr 8) -band 6) -ne 0)) {
+          if (No-Plain-Key $scan) {
             [Win32In]::TypeUnicode($ch)
             if ($i -lt $keys.Count - 1) { Nap $gap }
             continue
           }
           $vk = $scan -band 0xFF; $shift = ((($scan -shr 8) -band 1) -eq 1) -and -not $mods.Contains('s')
+          # CapsLock on turns a letter's case round, as it does for a hand:
+          # Shift the other way, or \"Password\" is typed \"pASSWORD\" (SendKeys
+          # makes up for CapsLock, so plain typing would differ from paced).
+          if (-not $mods.Contains('s') -and ([char]::ToUpper($ch) -ne [char]::ToLower($ch)) -and (([Win32In]::GetKeyState(0x14) -band 1) -eq 1)) {
+            $shift = -not $shift
+          }
         }
         # KEYEVENTF_EXTENDEDKEY for the navigation keys, as the keyboard sends them.
         $ext = 0; if (($vk -ge 0x21 -and $vk -le 0x28) -or $vk -eq 0x2D -or $vk -eq 0x2E) { $ext = 1 }
@@ -1780,6 +1797,10 @@ func send_keys(text: String) -> void:
 	# SendKeys reads the same - "{TAB  3}", "{TAB 03}" - in one plain form.)
 	if KeyStrokesT.events(clean) != KeyStrokesT.events(text.replace("\r", "").replace("\n", "")):
 		push_warning("WindowsBackend: key text not sent: a repeat count in it is over %d, or not written as a plain number after a space." % KeyStrokesT.REPEAT_MAX)
+		keys_refused = true
+		return
+	if KeyStrokesT.has_us_keyword(clean):
+		push_warning("WindowsBackend: key text not sent: a \"{^}\", \"{%}\" or \"{+}\" SendKeys would type as another character on this layout.")
 		keys_refused = true
 		return
 	for stroke in KeyStrokesT.split(clean):

@@ -2827,13 +2827,16 @@ static func _quoted_parts(line: String) -> Array:
 		var end := line.find(char(0x2069), at)
 		if end < 0:
 			break
-		parts.append(line.substr(at + 2, end - at - 3))
+		var raw: Variant = JSON.parse_string(line.substr(at + 1, end - at - 1))
+		parts.append(raw if typeof(raw) == TYPE_STRING else "")
 		at = line.find(char(0x2066), end)
 	return parts
 
 
 ## `line` with every quoted part longer than 2 × `keep` characters cut to
-## its first and last `keep`, " … " between them, still in its quotes.
+## its first and last `keep` - the text itself, not its escaped form, so a
+## cut never splits a \" - each half in quotes of its own, with the " … "
+## and the part's length outside them, where file text cannot put words.
 static func _cut_quoted(line: String, keep: int) -> String:
 	var out := ""
 	var from := 0
@@ -2842,10 +2845,15 @@ static func _cut_quoted(line: String, keep: int) -> String:
 		var end := line.find(char(0x2069), at)
 		if end < 0:
 			break
-		var inner := line.substr(at + 2, end - at - 3)
-		if inner.length() > 2 * keep + 1:
-			inner = inner.left(keep) + " … " + inner.right(keep)
-		out += line.substr(from, at + 2 - from) + inner + line.substr(end - 1, 2)
+		var segment := line.substr(at, end - at + 1)
+		var raw: Variant = JSON.parse_string(line.substr(at + 1, end - at - 1))
+		if typeof(raw) == TYPE_STRING and (raw as String).length() > 2 * keep + 1:
+			var text: String = raw
+			segment = "%s … %s  (%d characters)" % [
+				char(0x2066) + JSON.stringify(text.left(keep)) + char(0x2069),
+				char(0x2066) + JSON.stringify(text.right(keep)) + char(0x2069),
+				text.replace(char(0x200E), "").length()]
+		out += line.substr(from, at - from) + segment
 		from = end + 1
 		at = line.find(char(0x2066), from)
 	return out + line.substr(from)

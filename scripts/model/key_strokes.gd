@@ -121,10 +121,21 @@ static func parse(stroke: String) -> Dictionary:
 					return {}
 				repeat = int(parts[1])
 	elif rest.begins_with("(") and rest.ends_with(")"):
-		for ch in rest.substr(1, rest.length() - 2):
+		var inner := rest.substr(1, rest.length() - 2)
+		var j := 0
+		while j < inner.length():
+			var ch := inner[j]
+			# A single braced character ("{^}", "{}}") is that character, as
+			# SendKeys reads it inside a group too - read here, so the group
+			# goes to the helper ("{^}" through SendKeys types Shift+6).
+			if ch == "{" and j + 2 < inner.length() and inner[j + 2] == "}":
+				keys.append("c%d" % inner.unicode_at(j + 1))
+				j += 3
+				continue
 			if ch in "{}()^+%$":
-				return {}   # nested syntax inside a group: leave it to SendKeys
+				return {}   # other nested syntax inside a group: leave it to SendKeys
 			keys.append("v%d" % VK_ENTER if ch == "~" else "c%d" % ch.unicode_at(0))
+			j += 1
 		if keys.is_empty():
 			return {}
 	elif rest.length() == 1:
@@ -266,6 +277,28 @@ static func has_bare_win(text: String) -> bool:
 			return true
 		else:
 			i += 1
+	return false
+
+
+## Whether `text` has a braced key SendKeys would read as "^", "%" or "+" -
+## with a count, after any kind of space, inside a group ("{^ 3}",
+## "{^<no-break space>3}", "(a{+ 2})"). SendKeys takes these from a
+## US-layout table (Shift+6, Shift+5, numpad Add): another character on
+## many layouts. (A plain "{^}" is pressed by the helper, see helper_only.)
+static func has_us_keyword(text: String) -> bool:
+	var i := text.find("{")
+	while i >= 0:
+		var end := _brace_end(text, i)
+		var inner := text.substr(i + 1, end - i - 2) if text.substr(end - 1, 1) == "}" else text.substr(i + 1)
+		var j := 0
+		# "{}}" / "{} 3}": the keyword is "}".
+		if inner.begins_with("}"):
+			j = 1
+		while j < inner.length() and not _is_space(inner[j]):
+			j += 1
+		if inner.left(j) in ["^", "%", "+"]:
+			return true
+		i = text.find("{", end)
 	return false
 
 

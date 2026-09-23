@@ -511,7 +511,8 @@ func import_loop(source: LoopProjectT) -> int:
 	# Always marked as imported, not only when a name matches: a look-alike
 	# letter (a Cyrillic "а") passes any comparison and reads the same.
 	# In front, where a picker or status line cut to its width still shows it.
-	var base := source.layers[0].name.left(IMPORTED_BASE_CHARS)
+	# (Cleaned again after the cut: it can leave a joiner last.)
+	var base := LoopLayerT.clean_name(source.layers[0].name.left(IMPORTED_BASE_CHARS))
 	var name := "%s %s" % [IMPORTED_MARK, base]
 	var n := 2
 	while _name_skeleton(name) in taken:
@@ -534,7 +535,8 @@ func import_loop(source: LoopProjectT) -> int:
 ## apart: no accents, no case, no spaces of any kind.
 static func _name_skeleton(name: String) -> String:
 	if _spaces == null:
-		_spaces = RegEx.create_from_string("[\\p{Z}\\s]+")
+		# (Joiners and selectors too: they show as nothing.)
+		_spaces = RegEx.create_from_string("[\\p{Z}\\s\\x{200C}\\x{200D}\\x{FE0E}\\x{FE0F}]+")
 	var plain := TextServerManager.get_primary_interface().strip_diacritics(name).to_lower()
 	return _spaces.sub(plain, "", true)
 static var _spaces: RegEx = null
