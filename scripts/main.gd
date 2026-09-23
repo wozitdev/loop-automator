@@ -644,7 +644,12 @@ func _connect_signals() -> void:
 		play_btn.text = "Run!"
 		_refresh_edit_lock()
 		# ~Edit unchecked: this window is minimised for the run (the taskbar
-		# brings it back; F8 stops the loop from anywhere with ~F8 on).
+		# brings it back; F8 stops the loop from anywhere with ~F8 on). Not
+		# a Live run without the global F8, though: its stop keys work only
+		# while this window has the focus, and its Stop button would be
+		# out of sight while the loop drives the real mouse and keyboard.
+		if Playback.backend != null and Playback.backend.is_real() and not Playback.global_hotkey_armed():
+			return
 		_lower_builder())
 	Playback.playback_stopped.connect(func():
 		var was_real := Playback.backend != null and Playback.backend.is_real()
@@ -1136,8 +1141,9 @@ func _add_keys_field(a: LoopActionT) -> void:
 	le.text = a.keys
 	le.placeholder_text = "e.g. abc, {ENTER}, ^c"
 	le.text_changed.connect(func(t: String):
-		# Single line, always (a paste could carry line breaks).
-		a.keys = t.replace("\r", "").replace("\n", "")
+		# Single line of what shows, always (a paste could carry line breaks
+		# or invisible control characters, which would be typed as keys).
+		a.keys = LoopActionT.clean_keys(t)
 		_after_edit())
 	row.add_child(le)
 	# Capture: an icon-only button that opens the on-screen keyboard; what is
@@ -1168,7 +1174,7 @@ func _open_key_capture(le: LineEdit, a: LoopActionT) -> void:
 			if is_instance_valid(_key_capture_field):
 				_key_capture_field.text = t
 			if _key_capture_action != null:
-				_key_capture_action.keys = t
+				_key_capture_action.keys = LoopActionT.clean_keys(t)
 				_after_edit()
 				status_label.text = "Keys set to %s" % JSON.stringify(t))
 		# The window is resizable; the size it was last closed at is kept.
@@ -1890,7 +1896,10 @@ func _start_recording() -> void:
 	if _recorder.f8_taken and not Playback.global_hotkey_armed():
 		# Another program holds F8 as its hotkey, so its press never reaches
 		# the recorder (with ~F8 on, the run's helper holds it and ends the
-		# recording itself).
+		# recording itself). The builder comes back, then: minimised, the one
+		# way to stop a recording that sees every key typed would be out of
+		# sight, and so would the line saying so.
+		_restore_builder_after_pick()
 		status_label.text = "Recording… F8 is taken by another program: stop with the button or Esc here."
 	else:
 		status_label.text = "Recording… press F8 to stop."
@@ -2439,10 +2448,13 @@ const IMPORT_KEY_CHARS := 60
 ## actions, and the text of its Key actions, which is what a loop types —
 ## and what a loop can do. Nothing is loaded unless Import is pressed.
 func _ask_import(path: String) -> void:
-	var peek := ProjectData.peek_loop(path)
-	if peek.is_empty():
-		status_label.text = "Import failed: %s is not a readable .loop file." % path.get_file()
+	# Read once: the question describes this copy and Import brings in this
+	# copy, never whatever the file holds by the time Import is pressed.
+	var source := ProjectData.read_import(path)
+	if source == null:
+		status_label.text = "Import failed: %s is not a readable .loop file, or holds more than a loop may (%d layers, %d actions, %d MP of Image Detect templates)." % [path.get_file(), ProjectData.LOOP_LAYERS_MAX, ProjectData.LOOP_ACTIONS_MAX, ProjectData.LOOP_TEMPLATE_PIXELS_MAX / (1024 * 1024)]
 		return
+	var peek := ProjectData.peek_loop(source)
 	var keys: Array = peek["keys"]
 	var text := "Import \"%s\" as a new loop?\n\n" % path.get_file()
 	text += "A loop is like a script: run in Live mode it can type anything and click anywhere. "
@@ -2464,11 +2476,8 @@ func _ask_import(path: String) -> void:
 		# Run would drive the real mouse and keyboard with a loop nobody has
 		# read yet.
 		_switch_to_safe_backend_if_needed()
-		var id := ProjectData.import_loop(path)
-		if id < 0:
-			status_label.text = "Import failed: %s is not a readable .loop file." % path.get_file()
-		else:
-			status_label.text = "Imported \"%s\" as loop %d." % [ProjectData.active_loop_display_name(), _active_loop_number()]
+		ProjectData.import_loop(source)
+		status_label.text = "Imported \"%s\" as loop %d." % [ProjectData.active_loop_display_name(), _active_loop_number()]
 	_confirm(text, do_import, "Import")
 
 

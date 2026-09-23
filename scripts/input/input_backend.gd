@@ -9,6 +9,15 @@ class_name InputBackend
 var avoid_pid: int = 0
 ## True when the most recent input command was skipped because of `avoid_pid`.
 var last_skipped: bool = false
+## Set when a key command was not sent at all (no way to send it safely);
+## stays set until the engine clears it for a new run.
+var keys_refused: bool = false
+## Set by run_captured when the helper ended without answering (a stop's
+## interrupt, or a timeout): it may have died with the button down.
+var last_cut_off: bool = false
+## Bumped by interrupt() and shutdown(): an image scan in script (find_image,
+## which nothing else can cut short) that started before gives up.
+var scan_generation: int = 0
 
 func backend_name() -> String:
 	return "Abstract"
@@ -184,8 +193,13 @@ func find_image(rect: Rect2i, png: PackedByteArray, tolerance: int, grey: bool =
 	var tc := (th / 2 * tw + tw / 2) * 4
 	var tcx := tw / 2
 	var tcy := th / 2
+	var gen := scan_generation
 	for oy in h - th + 1:
 		for ox in w - tw + 1:
+			# Per offset: with mismatches allowed one offset can cost a whole
+			# template's worth of comparisons.
+			if scan_generation != gen:
+				return {}
 			if allowed == 0 and not _same(data, ((oy + tcy) * w + ox + tcx) * 4, tdata, tc, tolerance, grey):
 				continue
 			if _template_at(data, w, ox, oy, tdata, tw, th, tolerance, grey, allowed, e):

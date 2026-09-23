@@ -23,6 +23,8 @@ const PIPE_LINE_MAX := 4000
 ## Key text goes in pieces of at most this many UTF-8 bytes (base64 makes
 ## them a third bigger), cut between keystrokes.
 const KEY_PIECE_BYTES := 2400
+## ...and of at most this many keystrokes (see KeyStrokes.events).
+const KEY_PIECE_EVENTS := 2000
 ## An encoded path (see MousePath.encode) longer than this is sent ahead in
 ## pieces of PATH_PIECE_CHARS ('pathpart'); the command then says "@".
 const PATH_INLINE_MAX := 3000
@@ -69,6 +71,9 @@ const CUT_SHORT_MS := 2000
 ## runs on the main thread while a worker holds the lock and may be
 ## replacing `_server` itself: an int is read whole, a Dictionary is not.
 var _server_pid: int = -1
+## Whether the last _run_sync got an "error ..." answer (the helper ran the
+## command and failed it, as opposed to ending without an answer).
+var _last_error := false
 
 const HELPER_SCRIPT := """param([Parameter(ValueFromRemainingArguments=$true)][string[]]$a)
 # 'guard <pid> <command...>': clicks and keys that would land on a window of
@@ -485,6 +490,8 @@ switch ($cmd) {
     # 1 ms timer resolution: Thread.Sleep(1) is otherwise ~16 ms, which would
     # leave the pin / ghost updating at a stuttery ~60 Hz.
     $timerRes = ([Win32In]::timeBeginPeriod(1) -eq 0)
+    # Set while the button is down, so a failure part-way lets go of it.
+    $held = $false
     try {
       if ($useGhost) { Ghost-Start }
       switch ($kind) {
@@ -494,15 +501,15 @@ switch ($cmd) {
         'click' {
           if ($path -ne '') { Glide $path $ms } else { Jump $x $y }
           Wait-Ms 15
-          [Win32In]::MouseAt($x,$y,(Down-Flag $btn)); Wait-Ms 15; [Win32In]::MouseAt($x,$y,(Up-Flag $btn))
+          $held = $true; [Win32In]::MouseAt($x,$y,(Down-Flag $btn)); Wait-Ms 15; [Win32In]::MouseAt($x,$y,(Up-Flag $btn)); $held = $false
         }
         'drag' {
           Jump $x $y
           Wait-Ms 15
-          [Win32In]::MouseAt($x,$y,(Down-Flag $btn))
+          $held = $true; [Win32In]::MouseAt($x,$y,(Down-Flag $btn))
           if ($path -ne '') { Glide $path $ms } else { Wait-Ms $ms; Jump $x2 $y2 }
           Wait-Ms 15
-          [Win32In]::MouseAt($x2,$y2,(Up-Flag $btn))
+          [Win32In]::MouseAt($x2,$y2,(Up-Flag $btn)); $held = $false
         }
       }
       Read-Motion
@@ -511,6 +518,7 @@ switch ($cmd) {
       [Win32In]::SetCursorPos($tx,$ty) | Out-Null
       $script:lx = $tx; $script:ly = $ty
     } finally {
+      if ($held) { [Win32In]::ButtonOnly((Up-Flag $btn)) }
       Ghost-Stop
       if ($timerRes) { [Win32In]::timeEndPeriod(1) | Out-Null }
     }
@@ -872,6 +880,7 @@ func is_real() -> bool:
 ## PREDELETE below is the last resort.
 func shutdown(wait: bool = false) -> void:
 	_closing = true
+	scan_generation += 1
 	if _warm_thread != null and _warm_thread.is_alive() and not wait:
 		# The lock is free only while the thread is not inside _server_call:
 		# then the server (if it got up) is ended here, since the thread
@@ -899,6 +908,7 @@ func settled() -> bool:
 ## A ghost cursor the killed helper had blanked is put back by the caller
 ## that gets the empty answer (see run_captured).
 func interrupt() -> void:
+	scan_generation += 1
 	var pid := _server_pid
 	if pid < 0:
 		return
@@ -1142,10 +1152,12 @@ func _run_sync(extra: PackedStringArray, timeout_ms: int = SERVER_READ_TIMEOUT_M
 		cmd.append_array(PackedStringArray(["guard", str(avoid_pid)]))
 	cmd.append_array(extra)
 	last_skipped = false
+	_last_error = false
 	var served := _server_call(" ".join(cmd), timeout_ms)
 	var line: String = served["line"]
 	if served["served"]:
 		if line.begins_with("error "):
+			_last_error = true
 			var why := line.substr(6)
 			# PowerShell quotes the value it could not use ('Cannot convert
 			# value "128512" to type "System.Char"'): for a key command that
@@ -1154,6 +1166,15 @@ func _run_sync(extra: PackedStringArray, timeout_ms: int = SERVER_READ_TIMEOUT_M
 			if extra[0] in ["key", "hold", "kdown", "kup"]:
 				why = RegEx.create_from_string("\"[^\"]*\"").sub(why, "\"...\"", true)
 			push_warning("WindowsBackend: %s failed in the helper: %s" % [extra[0], why])
+			if extra[0] in ["key", "hold", "kdown"]:
+				keys_refused = true
+			return ""
+		if line.is_empty() and extra[0] in ["key", "hold", "kdown"]:
+			# Ended without an answer (timed out and killed): SendKeys may have
+			# had a modifier of a "+(…)" or "^{…}" down, and the helper that
+			# would have let go of it is gone. Let go of all four.
+			_run_sync(PackedStringArray(["kup", "csaw", "v17"]))
+			keys_refused = true
 			return ""
 		if line == "ok":
 			line = ""
@@ -1163,6 +1184,14 @@ func _run_sync(extra: PackedStringArray, timeout_ms: int = SERVER_READ_TIMEOUT_M
 		# ended the server): the command is the one meant, and it is not run
 		# on a one-shot process, where nothing could cut it short.
 		_cut_short = false
+		return ""
+	elif extra[0] in ["key", "hold", "kdown"]:
+		# No server, and what a loop types (a password, say) is not put on
+		# a process's command line, where process auditing and any program
+		# of the user's can read it: the press is not made.
+		if not keys_refused:
+			push_warning("WindowsBackend: %s not sent: the helper server is not running." % extra[0])
+		keys_refused = true
 		return ""
 	else:
 		# No server: one process for this call.
@@ -1220,6 +1249,7 @@ func move_path(path: PackedVector2Array, ms: int) -> void:
 
 
 func run_captured(kind: String, button: int, from: Vector2i, to: Vector2i, ms: int, ghost: bool, path: PackedVector2Array) -> Array:
+	last_cut_off = false
 	var cmd := PackedStringArray([
 		"cap", kind, "1" if ghost else "0", str(button),
 		str(from.x), str(from.y), str(to.x), str(to.y), str(ms)])
@@ -1231,6 +1261,7 @@ func run_captured(kind: String, button: int, from: Vector2i, to: Vector2i, ms: i
 			return []
 		cmd.append(arg)
 	var line := _run_sync(cmd, ms + 10000)
+	last_cut_off = line.is_empty() and not last_skipped and not _last_error
 	if last_skipped:
 		return []
 	var saved := _parse_point(line, 0)
@@ -1272,12 +1303,26 @@ func send_keys(text: String) -> void:
 	# as a command, and it crosses the one-shot command line unchanged too. A
 	# long text is more than one line holds: it goes in pieces, one command
 	# each, cut between keystrokes (a "{ENTER}" or a "^(ab)" is never split).
-	var clean := text.replace("\r", "").replace("\n", "")
+	# Each command also makes at most KEY_PIECE_EVENTS keystrokes: SendKeys
+	# queues all of a command's keystrokes at once, and a stop cannot take
+	# back what is queued. A single keystroke (a group) that makes more is
+	# refused, text and all, as is the rest of the text after a piece the
+	# helper refused: typing what is left of a text is typing another text.
+	var clean := KeyStrokesT.clamp_repeats(text.replace("\r", "").replace("\n", ""))
 	if clean.is_empty():
 		return
-	for piece in KeyStrokesT.pieces(clean, KEY_PIECE_BYTES):
+	var send := KeyStrokesT.pieces(clean, KEY_PIECE_BYTES, KEY_PIECE_EVENTS)
+	for piece in send:
+		if KeyStrokesT.events(piece) > KEY_PIECE_EVENTS:
+			push_warning("WindowsBackend: key text not sent: one keystroke of it makes more than %d." % KEY_PIECE_EVENTS)
+			keys_refused = true
+			return
+	for piece in send:
 		_run_sync(PackedStringArray(["key", Marshalls.utf8_to_base64(piece)]), 30000)
 		if last_skipped:
+			return
+		if _last_error:
+			keys_refused = true
 			return
 
 
@@ -1346,6 +1391,19 @@ func get_pixel(pos: Vector2i) -> Color:
 	return Color(0, 0, 0, 0)
 
 
+## Whether a scan that got no server should be dropped rather than done here
+## (a screen read and a scan in script, which nothing can cut short): the
+## backend is shut down, or an interrupt() - a stop - landed while this
+## call was starting the server. The interrupt is spent.
+func _read_abandoned() -> bool:
+	if _closing:
+		return true
+	if _cut_short and Time.get_ticks_msec() - _cut_short_at <= CUT_SHORT_MS:
+		_cut_short = false
+		return true
+	return false
+
+
 ## The read server scans in-process and answers "x,y" or "none,r,g,b"; without
 ## one the rect is fetched as an image and scanned here (InputBackend).
 func find_color(rect: Rect2i, color: Color, tolerance: int, step: int) -> Dictionary:
@@ -1365,6 +1423,8 @@ func find_color(rect: Rect2i, color: Color, tolerance: int, step: int) -> Dictio
 		var hit := _parse_point(line)
 		if hit != Vector2i(-1, -1):
 			return {"hit": hit, "centre": color}
+	if _read_abandoned():
+		return {}
 	return super.find_color(rect, color, tolerance, step)
 
 
@@ -1385,6 +1445,8 @@ func find_image(rect: Rect2i, png: PackedByteArray, tolerance: int, grey: bool =
 		id, tolerance, avoid_pid, 1 if grey else 0, mismatch, edge]
 	var call := _server_call(cmd, IMAGE_SCAN_TIMEOUT_MS)
 	if not call["served"]:
+		if _read_abandoned():
+			return {}
 		return super.find_image(rect, png, tolerance, grey, mismatch, edge)
 	var line: String = call["line"]
 	if line == "notpl" and _upload_template(id, png):

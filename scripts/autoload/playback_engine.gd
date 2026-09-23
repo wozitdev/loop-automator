@@ -80,7 +80,7 @@ var _stop_counts: Dictionary = {}
 # order they went down. A stop lets go of all of it, so nothing stays stuck
 # down after F8.
 var _held_buttons: Dictionary = {}
-var _held_keys: Array[Dictionary] = []
+var _held_keys: Dictionary = {}   # _held_key(press) -> press, in the order they went down
 
 # The worker thread of a captured action under way (see _execute_captured):
 # the helper runs the whole action as one command with the real cursor
@@ -91,6 +91,15 @@ var _captured_thread: Thread = null
 # go of at quit if the action was cut short, since the coroutine that does
 # it after a stop never resumes once the tree is going.
 var _captured_button: int = -1
+# The worker thread of an Image Detect scan under way, and the backend it
+# asked: a scan that allows mismatches on a big rect can take the helper
+# many seconds, so it runs off the main thread (F8 and the UI keep working)
+# and a stop ends it the way it ends a captured action.
+var _detect_thread: Thread = null
+var _detect_reader: InputBackendT = null
+# Every scan thread not yet joined, the stopped runs' included: joined at
+# quit (only the latest is `_detect_thread`).
+var _scan_threads: Array[Thread] = []
 
 # Lazily-created real backend used purely for reading screen pixels (so colour
 # sampling works even while the active playback backend is Preview).
@@ -147,6 +156,12 @@ func _exit_tree() -> void:
 	if _captured_thread != null:
 		_captured_thread.wait_to_finish()
 		_captured_thread = null
+	# Image Detect scans still under way (one per run a stop cut short):
+	# joined so none is destroyed mid-flight.
+	for t in _scan_threads:
+		t.wait_to_finish()
+	_scan_threads.clear()
+	_detect_thread = null
 
 
 func _process(_dt: float) -> void:
@@ -289,6 +304,7 @@ func start() -> void:
 	_stop_counts.clear()
 	_held_buttons.clear()
 	_held_keys.clear()
+	backend.keys_refused = false
 	# A global F8 another program owned last time is tried again for this run.
 	if _stop_hotkey.state == StopHotkeyT.State.UNAVAILABLE:
 		_stop_hotkey.stop()
@@ -365,6 +381,12 @@ func _run_loop(gen: int) -> void:
 				_note_user_motion()
 				var result := await _execute_action(action)
 				_note_loop_cursor(action)
+				# Keys the backend would not send (see WindowsBackend._run_sync):
+				# a run that went on clicking without its typing would be a
+				# different loop from the one that was read.
+				if is_running and gen == _generation and backend.keys_refused:
+					stop("Stopped: a Key action could not be typed as written (see the log): the rest of the loop is not run without it.")
+					return
 				if result == LoopActionT.OnFail.STOP_LOOP:
 					stop("%s Loop stopped." % _last_event)
 					return
@@ -450,10 +472,19 @@ func _execute_action(action: LoopActionT) -> int:
 			if backend.last_skipped:
 				_report_skipped(action)
 			else:
-				# The button is always released, a stop mid-drag included.
+				# Held while it travels, so a stop mid-drag lets go of it (on
+				# the real backend, before a Live run's stop swaps in Safe).
+				_held_buttons[action.button] = p
+				var gen := _generation
 				await _travel(p, p2, action.roll_duration_ms(), action.wiggle, "DRAG")
-				_set_tracker(p2, true, "DRAG END")
-				backend.mouse_button(action.button, false, p2)
+				if gen == _generation and _held_buttons.has(action.button):
+					_set_tracker(p2, true, "DRAG END")
+					backend.mouse_button(action.button, false, p2)
+					# Refused by ~Self: still held, so the stop lets go of it.
+					if backend.last_skipped:
+						_report_skipped(action)
+					else:
+						_held_buttons.erase(action.button)
 		LoopActionT.Type.SCROLL:
 			# The wheel turns where the cursor is (a Move before it puts it
 			# somewhere).
@@ -649,6 +680,13 @@ func _press_keys(action: LoopActionT) -> void:
 			typed.append(stroke)
 		else:
 			presses.append({"mods": press["mods"], "keys": press["keys"]})
+	# Each press is a helper call on this thread, and each down one to let go
+	# of on a stop: a Key Down of thousands of characters would hold the UI
+	# (and F8) for as long as they take, twice.
+	if presses.size() > KEY_GROUP_MAX:
+		stop("Stopped: a Key %s holds %d presses; one holds %d at most." % [
+			"Up" if action.press_mode == LoopActionT.PressMode.UP else "Down / Hold", presses.size(), KEY_GROUP_MAX])
+		return
 	if action.press_mode == LoopActionT.PressMode.UP:
 		_set_tracker(tracker_pos, tracker_visible, "KEY UP")
 		presses.reverse()
@@ -664,13 +702,19 @@ func _press_keys(action: LoopActionT) -> void:
 		if backend.last_skipped:
 			_report_skipped(action)
 			return
-		_held_keys.append(press)
+		# Once in the list however often it goes down (a Key Down in a
+		# loop): the stop's one release lets go of it, and a list that grew
+		# every pass would be as many releases, one after another.
+		if not _is_held(press):
+			_held_keys[_held_key(press)] = press
 	if not typed.is_empty():
 		var gen_typed := _generation
 		for piece in KeyStrokesT.pieces("".join(typed), PLAIN_PIECE_BYTES):
 			if not is_running or gen_typed != _generation:
 				return
 			await _off_thread(backend.send_keys.bind(piece))
+			if backend.keys_refused:
+				return
 		emit_signal("status", "Keys down: \"%s\" (\"%s\" cannot be held, typed instead)." % [action.keys, "".join(typed)])
 	if not hold:
 		if typed.is_empty():
@@ -685,24 +729,24 @@ func _press_keys(action: LoopActionT) -> void:
 		return
 	presses.reverse()
 	for press in presses:
-		if _held_index(press) >= 0:
+		if _is_held(press):
 			backend.press_keys(press["mods"], press["keys"], false)
 			_forget_held(press)
 
 
-## Where `press` (a {"mods", "keys"}) sits in the held list, or -1.
-func _held_index(press: Dictionary) -> int:
-	for i in range(_held_keys.size() - 1, -1, -1):
-		if _held_keys[i]["mods"] == press["mods"] and _held_keys[i]["keys"] == press["keys"]:
-			return i
-	return -1
+## The key of `press` (a {"mods", "keys"}) in the held list.
+static func _held_key(press: Dictionary) -> String:
+	return "%s|%s" % [press["mods"], ",".join(press["keys"])]
+
+
+## Whether `press` is in the held list.
+func _is_held(press: Dictionary) -> bool:
+	return _held_keys.has(_held_key(press))
 
 
 ## Drops `press` (a {"mods", "keys"} that was let go of) from the held list.
 func _forget_held(press: Dictionary) -> void:
-	var i := _held_index(press)
-	if i >= 0:
-		_held_keys.remove_at(i)
+	_held_keys.erase(_held_key(press))
 
 
 ## A captured action still running in the helper is cut short, so the
@@ -710,6 +754,8 @@ func _forget_held(press: Dictionary) -> void:
 ## for the helper, which would otherwise be the rest of the dwell. Returns
 ## whether there was one to cut short.
 func _interrupt_helper() -> bool:
+	if _detect_thread != null and _detect_thread.is_alive() and _detect_reader != null:
+		_detect_reader.interrupt()
 	if _captured_thread != null and _captured_thread.is_alive() and backend != null:
 		backend.interrupt()
 		return true
@@ -724,8 +770,10 @@ func _release_held() -> void:
 	for b in _held_buttons.keys():
 		backend.release_button(b)
 	_held_buttons.clear()
-	while not _held_keys.is_empty():
-		var press: Dictionary = _held_keys.pop_back()
+	var order := _held_keys.values()
+	_held_keys.clear()
+	order.reverse()
+	for press in order:
 		backend.press_keys(press["mods"], press["keys"], false)
 
 
@@ -772,18 +820,21 @@ func _execute_captured(action: LoopActionT) -> void:
 	_captured_thread = null
 	_captured_button = -1
 	if result.size() != 2:
+		var skipped := gen == _generation and b.last_skipped
+		if b.last_cut_off and kind != "move":
+			# Cut short by a stop, or timed out and ended: the helper may
+			# have died with a click's or a drag's button down (an error
+			# answer has let go of it already), so it is let go of here -
+			# off the main thread, since the first command after a kill
+			# starts a fresh helper (a second or so).
+			var release := Thread.new()
+			release.start(func(): b.release_button(action.button))
+			while release.is_alive():
+				await get_tree().process_frame
+			release.wait_to_finish()
 		if gen != _generation:
-			# Cut short: the helper was ended mid-action, so a button it had
-			# pressed (a click's, a drag's) is let go of here - off the main
-			# thread, since the first command after a kill starts a fresh
-			# helper (a second or so).
-			if kind != "move":
-				var release := Thread.new()
-				release.start(func(): b.release_button(action.button))
-				while release.is_alive():
-					await get_tree().process_frame
-				release.wait_to_finish()
-		elif b.last_skipped:
+			pass
+		elif skipped:
 			_report_skipped(action)
 		else:
 			emit_signal("status", "%s: could not capture the mouse position" % LoopActionT.type_name(action.type))
@@ -844,8 +895,11 @@ func _off_thread(work: Callable) -> void:
 ## modifiers, if any) is one press by the helper, in order. Each stretch
 ## goes in pieces (see PLAIN_PIECE_BYTES); a stop ends the typing between
 ## them.
+## Each piece and press is sent as it comes (a "{WIN 1000}" is a thousand
+## presses, and a text can hold hundreds of those: nothing is built ahead).
 func _type_plain(action: LoopActionT) -> void:
-	var runs: Array = []   # Strings for SendKeys, presses for the helper
+	var gen := _generation
+	var b := backend
 	var plain := ""
 	for stroke in KeyStrokesT.split(action.keys):
 		var press := KeyStrokesT.parse(stroke)
@@ -853,24 +907,43 @@ func _type_plain(action: LoopActionT) -> void:
 			plain += stroke
 			continue
 		if not plain.is_empty():
-			runs.append_array(Array(KeyStrokesT.pieces(plain, PLAIN_PIECE_BYTES)))
+			if not await _send_plain(action, b, gen, plain):
+				return
 			plain = ""
+		# One helper command per KEY_GROUP_MAX keys at most: a stop lands
+		# between commands, and "$(" with hundreds of keys ")" as one would
+		# hold the Windows key for as long as they take.
+		var keys: PackedStringArray = press["keys"]
 		for r in press["repeat"]:
-			runs.append(press)
+			for at in range(0, keys.size(), KEY_GROUP_MAX):
+				if not is_running or gen != _generation:
+					return
+				await _off_thread(b.hold_keys.bind(press["mods"], keys.slice(at, at + KEY_GROUP_MAX), 0, EXTRA_TAP_MS, 0, 0))
+				if not _typed_on(action, b):
+					return
 	if not plain.is_empty():
-		runs.append_array(Array(KeyStrokesT.pieces(plain, PLAIN_PIECE_BYTES)))
-	var gen := _generation
-	var b := backend
-	for run in runs:
+		await _send_plain(action, b, gen, plain)
+
+
+## `plain` to SendKeys in pieces (see PLAIN_PIECE_BYTES), for _type_plain.
+## False once the typing is to end: a stop, or a piece not typed.
+func _send_plain(action: LoopActionT, b: InputBackendT, gen: int, plain: String) -> bool:
+	for piece in KeyStrokesT.pieces(plain, PLAIN_PIECE_BYTES):
 		if not is_running or gen != _generation:
-			return
-		if run is String:
-			await _off_thread(b.send_keys.bind(run))
-		else:
-			await _off_thread(b.hold_keys.bind(run["mods"], run["keys"], 0, EXTRA_TAP_MS, 0, 0))
-		if b.last_skipped:
-			_report_skipped(action)
-			return
+			return false
+		await _off_thread(b.send_keys.bind(piece))
+		if not _typed_on(action, b):
+			return false
+	return true
+
+
+## Whether typing may go on after a key command: not when it was skipped
+## (~Self) or refused - what is left of a text is another text.
+func _typed_on(action: LoopActionT, b: InputBackendT) -> bool:
+	if b.last_skipped:
+		_report_skipped(action)
+		return false
+	return not b.keys_refused
 
 
 ## Types a Key action's text one keystroke at a time (see KeyStrokes.split:
@@ -882,41 +955,35 @@ func _type_plain(action: LoopActionT) -> void:
 func _type_paced(action: LoopActionT) -> void:
 	var gen := _generation
 	var b := backend
-	# One entry per press: a repeated key ("{ENTER 3}") is three presses, so
-	# a stop lands between them and each gets its own timing.
-	var presses: Array = []
+	# One press at a time: a repeated key ("{ENTER 3}") is three presses, so
+	# a stop lands between them and each gets its own timing. Taken as they
+	# come, not listed ahead (a text can make hundreds of thousands).
+	var first := true
 	for stroke in KeyStrokesT.split(action.keys):
-		var press := KeyStrokesT.parse(stroke)
-		if press.is_empty() or (press["keys"] as PackedStringArray).size() > KEY_GROUP_MAX:
-			presses.append(stroke)   # SendKeys sends it as it is
-		else:
-			for r in press["repeat"]:
-				presses.append(press)
-	for i in presses.size():
-		if not is_running or gen != _generation:
-			return
-		var press: Variant = presses[i]
-		# The helper blocks for the whole press, so it runs off the main thread.
-		var thread := Thread.new()
-		if press is String:
-			thread.start(func(): b.send_keys(press))
-		else:
-			var lead := randi_range(KEY_LEAD_MIN_MS, KEY_LEAD_MAX_MS)
-			var hold := randi_range(KEY_HOLD_MIN_MS, KEY_HOLD_MAX_MS)
-			var gap := randi_range(KEY_PAUSE_MIN_MS, KEY_PAUSE_MAX_MS)
-			var trail := randi_range(KEY_TRAIL_MIN_MS, KEY_TRAIL_MAX_MS)
-			thread.start(func(): b.hold_keys(press["mods"], press["keys"], lead, hold, gap, trail))
-		while thread.is_alive():
-			await get_tree().process_frame
-		thread.wait_to_finish()
-		if b.last_skipped:
-			_report_skipped(action)
-			return
-		if i < presses.size() - 1:
-			var pause := randi_range(KEY_PAUSE_MIN_MS, KEY_PAUSE_MAX_MS)
-			if randi_range(1, KEY_PAUSE_LONG_EVERY) == 1:
-				pause = randi_range(KEY_PAUSE_LONG_MIN_MS, KEY_PAUSE_LONG_MAX_MS)
-			await _sleep_ms(pause)
+		var parsed := KeyStrokesT.parse(stroke)
+		var whole := parsed.is_empty() or (parsed["keys"] as PackedStringArray).size() > KEY_GROUP_MAX
+		for r in (1 if whole else int(parsed["repeat"])):
+			if not is_running or gen != _generation:
+				return
+			if not first:
+				var pause := randi_range(KEY_PAUSE_MIN_MS, KEY_PAUSE_MAX_MS)
+				if randi_range(1, KEY_PAUSE_LONG_EVERY) == 1:
+					pause = randi_range(KEY_PAUSE_LONG_MIN_MS, KEY_PAUSE_LONG_MAX_MS)
+				await _sleep_ms(pause)
+				if not is_running or gen != _generation:
+					return
+			first = false
+			# The helper blocks for the whole press, so it runs off the main thread.
+			if whole:
+				await _off_thread(b.send_keys.bind(stroke))   # SendKeys sends it as it is
+			else:
+				var lead := randi_range(KEY_LEAD_MIN_MS, KEY_LEAD_MAX_MS)
+				var hold := randi_range(KEY_HOLD_MIN_MS, KEY_HOLD_MAX_MS)
+				var gap := randi_range(KEY_PAUSE_MIN_MS, KEY_PAUSE_MAX_MS)
+				var trail := randi_range(KEY_TRAIL_MIN_MS, KEY_TRAIL_MAX_MS)
+				await _off_thread(b.hold_keys.bind(parsed["mods"], parsed["keys"], lead, hold, gap, trail))
+			if not _typed_on(action, b):
+				return
 
 
 ## A move with a duration is sent to the helper in pieces of about this
@@ -1039,7 +1106,13 @@ func _detect_once(action: LoopActionT, gen: int) -> Vector2i:
 	if not is_running or gen != _generation:
 		detect_rect_pinned = false
 		return Vector2i(-1, -1)
-	var hit := _find_image(action, rect) if action.type == LoopActionT.Type.IMAGE_DETECT else _find_color(action, rect)
+	var hit := Vector2i(-1, -1)
+	if action.type == LoopActionT.Type.IMAGE_DETECT:
+		hit = await _find_image(action, rect)
+		if not is_running or gen != _generation:
+			hit = Vector2i(-1, -1)
+	else:
+		hit = _find_color(action, rect)
 	detect_rect_pinned = false
 	return hit
 
@@ -1098,7 +1171,21 @@ func _find_image(action: LoopActionT, rect: Rect2i) -> Vector2i:
 	reader.avoid_pid = 0 if feedback else OS.get_process_id()
 	var tolerance := action.roll_tolerance()
 	var mismatch := action.roll_mismatch()
-	var result := reader.find_image(rect, action.image_png, tolerance, action.ignore_colour, mismatch, LoopActionT.IMAGE_EDGE)
+	var png := action.image_png
+	var grey := action.ignore_colour
+	var thread := Thread.new()
+	_detect_thread = thread
+	_scan_threads.append(thread)
+	_detect_reader = reader
+	thread.start(func() -> Dictionary:
+		return reader.find_image(rect, png, tolerance, grey, mismatch, LoopActionT.IMAGE_EDGE))
+	while thread.is_alive():
+		await get_tree().process_frame
+	var result: Dictionary = thread.wait_to_finish()
+	_scan_threads.erase(thread)
+	if _detect_thread == thread:
+		_detect_thread = null
+		_detect_reader = null
 	if result.is_empty():
 		print("Image detect in [%d, %d, %d×%d]: screen read failed (see warning above) -> not found" % [rect.position.x, rect.position.y, rect.size.x, rect.size.y])
 		return Vector2i(-1, -1)

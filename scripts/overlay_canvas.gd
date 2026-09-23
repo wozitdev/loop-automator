@@ -209,7 +209,7 @@ func _draw_layer(li: int, layer: LoopLayerT, offset: Vector2) -> void:
 		if positioned and has_prev:
 			var d := col
 			d.a = 0.5
-			draw_dashed_line(prev_point, local, d, 1.5, 6.0)
+			_dashed(prev_point, local, d, 1.5, 6.0)
 
 		# Per-type visual guide (a Click that does not move to its point has
 		# none: it is a chip below). A point whose X / Y is a range is drawn at the
@@ -309,10 +309,37 @@ func _draw_range_box(extent: Rect2i, offset: Vector2, col: Color) -> void:
 	var tr := rect.position + Vector2(rect.size.x, 0)
 	var bl := rect.position + Vector2(0, rect.size.y)
 	var br := rect.end
-	draw_dashed_line(tl, tr, line, 1.0, 4.0)
-	draw_dashed_line(tr, br, line, 1.0, 4.0)
-	draw_dashed_line(br, bl, line, 1.0, 4.0)
-	draw_dashed_line(bl, tl, line, 1.0, 4.0)
+	_dashed(tl, tr, line, 1.0, 4.0)
+	_dashed(tr, br, line, 1.0, 4.0)
+	_dashed(br, bl, line, 1.0, 4.0)
+	_dashed(bl, tl, line, 1.0, 4.0)
+
+
+## draw_dashed_line for the part of a -> b that is on the canvas (a little
+## past its edges). Godot makes one point per dash, and a file's point can
+## be millions of pixels off screen: a line that long is millions of points,
+## every frame. Nothing is drawn for a line that misses the canvas.
+func _dashed(a: Vector2, b: Vector2, col: Color, width: float, dash: float) -> void:
+	var box := Rect2(Vector2.ZERO, size).grow(dash * 2.0)
+	# Liang-Barsky: the part of the segment inside the box, as t0 .. t1.
+	var d := b - a
+	var t0 := 0.0
+	var t1 := 1.0
+	for edge in [[-d.x, a.x - box.position.x], [d.x, box.end.x - a.x], [-d.y, a.y - box.position.y], [d.y, box.end.y - a.y]]:
+		var p: float = edge[0]
+		var q: float = edge[1]
+		if is_zero_approx(p):
+			if q < 0.0:
+				return
+			continue
+		var t := q / p
+		if p < 0.0:
+			t0 = maxf(t0, t)
+		else:
+			t1 = minf(t1, t)
+		if t0 > t1:
+			return
+	draw_dashed_line(a + d * t0, a + d * t1, col, width, dash)
 
 
 ## PIXEL_DETECT / IMAGE_DETECT: frame the rect with an outline and corner
@@ -482,9 +509,18 @@ const CLAIM_STEPS: Array[Vector2] = [
 ]
 
 
+## The most labels a frame moves out of each other's way. Each one is
+## checked against every label before it, so a loop of thousands of steps
+## (a file may hold anything) would cost minutes a frame; past this the
+## rest are only kept on screen.
+const CLAIM_MAX := 256
+
+
 ## `rect` fitted on screen (see _fit) and moved off anything written
 ## earlier this frame; claims the place it ends up at. Fresh from _draw.
 func _claim(rect: Rect2) -> Rect2:
+	if _claimed.size() >= CLAIM_MAX:
+		return _fit(rect)
 	var step := rect.size + Vector2(4.0, 4.0)
 	var placed := _fit(rect)
 	for offset in CLAIM_STEPS:

@@ -83,7 +83,13 @@ jobs:
           fi
           echo "version=$version" | tee -a "$GITHUB_OUTPUT"
 
+      # Not for a release build: the cache is saved after the steps that run
+      # the checked-out project (import, smoke test), so a bad commit on main
+      # could leave an altered editor or template in it, and only the
+      # downloads are checked against their hashes. A tag always starts from
+      # verified downloads.
       - name: Cache Godot and export templates
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/godot

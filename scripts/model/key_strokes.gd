@@ -54,21 +54,31 @@ static func split(text: String) -> PackedStringArray:
 			continue
 		var end := i + 1
 		if ch == "{":
-			# "{}}" is a literal "}"; otherwise the token runs to the next "}".
-			if i + 2 < n and text[i + 1] == "}" and text[i + 2] == "}":
-				end = i + 3
-			else:
-				var close := text.find("}", i + 1)
-				end = n if close < 0 else close + 1
+			end = _brace_end(text, i)
 		elif ch == "(":
-			var close := text.find(")", i + 1)
-			end = n if close < 0 else close + 1
+			# To the ")" that closes it: one inside a braced key ("{)}") does not.
+			end = i + 1
+			while end < n and text[end] != ")":
+				end = _brace_end(text, end) if text[end] == "{" else end + 1
+			end = mini(end + 1, n)
 		out.append(mods + text.substr(i, end - i))
 		mods = ""
 		i = end
 	if not mods.is_empty():
 		out.append(mods)
 	return out
+
+
+## Where the braced key starting at `text[i]` ("{") ends (one past its
+## "}"), read as SendKeys.ParseKeys reads it: "{}" with a "}" later on runs
+## to that one ("{}}" is a "}", "{} 5}" five of them); otherwise to the
+## next "}". The end of the text when nothing closes it.
+static func _brace_end(text: String, i: int) -> int:
+	var from := i + 1
+	if i + 2 < text.length() and text[i + 1] == "}" and text.find("}", i + 2) >= 0:
+		from = i + 2
+	var close := text.find("}", from)
+	return text.length() if close < 0 else close + 1
 
 
 ## One stroke as keys to press: {"mods": letters of c (Ctrl), s (Shift),
@@ -121,22 +131,116 @@ static func parse(stroke: String) -> Dictionary:
 	return {"mods": mods, "keys": keys, "repeat": repeat}
 
 
+## `text` with every braced key's repeat count kept to REPEAT_MAX ("{TAB
+## 999999999}" is "{TAB 1000}"). parse leaves a stroke over the bound to
+## SendKeys, which would build all of those presses in one go - a command
+## a stop cannot cut short - so whatever reaches SendKeys goes through here.
+## The braces are read the way SendKeys.ParseKeys reads them, not the way
+## split does: "{} 9…}" is "}" repeated, and any Unicode white space (a
+## no-break space, an ideographic space) goes before a count.
+static func clamp_repeats(text: String) -> String:
+	var out := ""
+	var i := 0
+	var n := text.length()
+	while i < n:
+		if text[i] != "{":
+			out += text[i]
+			i += 1
+			continue
+		var j := i + 1
+		# "{}" followed by a "}" somewhere later: the keyword is "}".
+		if j + 1 < n and text[j] == "}" and text.find("}", j + 1) >= 0:
+			j += 1
+		while j < n and text[j] != "}" and not _is_space(text[j]):
+			j += 1
+		if j >= n or not _is_space(text[j]):
+			# No count (or an unclosed brace, which SendKeys refuses).
+			out += text.substr(i, j - i + 1)
+			i = j + 1
+			continue
+		var head := text.substr(i, j - i)   # "{" and the keyword
+		while j < n and _is_space(text[j]):
+			j += 1
+		var digits := j
+		while j < n and text[j] >= "0" and text[j] <= "9":
+			j += 1
+		var count := text.substr(digits, j - digits).lstrip("0")
+		if count.length() > 4 or (not count.is_empty() and int(count) > REPEAT_MAX):
+			count = str(REPEAT_MAX)
+		elif count.is_empty() and j > digits:
+			count = "0"
+		# Anything else after the space (not a digit SendKeys takes) is left
+		# as it was: SendKeys refuses the text whole.
+		out += head + " " + count
+		i = j
+	return out
+
+
+## About how many keystrokes SendKeys makes of `text`: a braced key counts
+## its repeats ("{TAB 40}" is 40), anything else one per character. What
+## keeps one helper command short enough for a stop to wait out (see
+## pieces), whatever a group or a run of repeats packs into a few bytes.
+static func events(text: String) -> int:
+	var total := 0
+	var i := 0
+	var n := text.length()
+	while i < n:
+		if text[i] == "{":
+			var end := _brace_end(text, i)
+			total += _repeat_of(text.substr(i, end - i))
+			i = end
+		else:
+			total += 1
+			i += 1
+	return total
+
+
+## The repeat count of a braced key ("{TAB 40}" -> 40), 1 without one. The
+## count is the digits after the last white space, as SendKeys reads it.
+static func _repeat_of(token: String) -> int:
+	var inner := token.substr(1, token.length() - 2) if token.ends_with("}") else token.substr(1)
+	var j := inner.length()
+	while j > 0 and inner[j - 1] >= "0" and inner[j - 1] <= "9":
+		j -= 1
+	if j == inner.length() or j == 0 or not _is_space(inner[j - 1]):
+		return 1
+	var digits := inner.substr(j).lstrip("0")
+	if digits.is_empty():
+		return 1
+	return int(digits) if digits.length() <= 9 else 1000000000
+
+
+## Whether `ch` is white space to .NET's Char.IsWhiteSpace, which is what
+## SendKeys reads between a key's name and its repeat count.
+static func _is_space(ch: String) -> bool:
+	var c := ch.unicode_at(0)
+	return (c >= 0x09 and c <= 0x0D) or c == 0x20 or c == 0x85 or c == 0xA0 or c == 0x1680 \
+		or (c >= 0x2000 and c <= 0x200A) or c == 0x2028 or c == 0x2029 or c == 0x202F \
+		or c == 0x205F or c == 0x3000
+
+
 ## `text` cut into pieces of at most `max_bytes` (UTF-8), each a whole
 ## number of keystrokes (see split; the pieces joined are the text again),
 ## so a piece can be sent - or stopped after - on its own. A single
-## keystroke bigger than that is a piece of its own.
-static func pieces(text: String, max_bytes: int) -> PackedStringArray:
+## keystroke bigger than that is a piece of its own. With `max_events`, a
+## piece also makes at most that many keystrokes (see events), past a
+## single keystroke that makes more on its own.
+static func pieces(text: String, max_bytes: int, max_events: int = 0) -> PackedStringArray:
 	var out := PackedStringArray()
 	var piece := ""
 	var piece_bytes := 0
+	var piece_events := 0
 	for stroke in split(text):
 		var bytes := stroke.to_utf8_buffer().size()
-		if piece_bytes + bytes > max_bytes and not piece.is_empty():
+		var count := events(stroke) if max_events > 0 else 0
+		if (piece_bytes + bytes > max_bytes or (max_events > 0 and piece_events + count > max_events)) and not piece.is_empty():
 			out.append(piece)
 			piece = ""
 			piece_bytes = 0
+			piece_events = 0
 		piece += stroke
 		piece_bytes += bytes
+		piece_events += count
 	if not piece.is_empty():
 		out.append(piece)
 	return out

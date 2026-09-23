@@ -368,6 +368,19 @@ func create_loop(open_now: bool = true, source: LoopProjectT = null) -> int:
 ## The most a .loop file may be to be read at all: room for a few dozen
 ## screen-sized templates, well short of what would stall the app.
 const LOOP_FILE_MAX_BYTES := 64 * 1024 * 1024
+## What a loop file may hold, checked before any of it is built: every
+## action is an object of some seventy fields and every template is decoded
+## whole, so a small file of millions of "{}" or of tiny PNGs claiming 2048²
+## would otherwise take gigabytes to read. Far above any loop made here (a
+## long recording is some thousands of actions).
+const LOOP_LAYERS_MAX := 1000
+const LOOP_ACTIONS_MAX := 50000
+## Pixels of every Image Detect template together: a dozen screen-sized
+## ones, or hundreds of button-sized ones.
+const LOOP_TEMPLATE_PIXELS_MAX := 48 * 1024 * 1024
+## Objects, lists and list entries the JSON may have before it is parsed
+## at all (the parse is the first thing to cost memory per value).
+const LOOP_JSON_SEPARATORS_MAX := 4000000
 
 
 ## The loop in a .loop file, or null if `path` is not a readable loop file.
@@ -377,31 +390,75 @@ func _read_loop_file(path: String) -> LoopProjectT:
 	var f := FileAccess.open(path, FileAccess.READ)
 	if f == null:
 		return null
-	return _read_loop(f)
+	return _read_loop(f, true)
 
 
 ## The loop in the open file `f` (closed here), or null if its contents are
-## not a loop (or it is too big to read).
-func _read_loop(f: FileAccess) -> LoopProjectT:
-	if f.get_length() > LOOP_FILE_MAX_BYTES:
+## not a loop (or it is too big to read). `shared`: a file from anywhere
+## (Import), held to the LOOP_* limits. A loop of the store's own was built
+## in this app, which does not hold edits to them: it is read whatever its
+## size, rather than set aside as broken on the next launch.
+func _read_loop(f: FileAccess, shared: bool) -> LoopProjectT:
+	if shared and f.get_length() > LOOP_FILE_MAX_BYTES:
 		f.close()
 		return null
 	var text := f.get_as_text()
 	f.close()
+	if shared and text.count("{") + text.count("[") + text.count(",") > LOOP_JSON_SEPARATORS_MAX:
+		return null
 	var data: Variant = JSON.parse_string(text)
-	if typeof(data) != TYPE_DICTIONARY:
+	if typeof(data) != TYPE_DICTIONARY or (shared and not _within_limits(data)):
 		return null
 	return LoopProjectT.from_dict(data)
 
 
-## What a .loop file holds, for the question asked before it is imported:
-## {"name": its first layer's name, "layers": count, "actions": count,
-## "keys": the text of every Key action, in order}. Empty if the file is
-## not a readable loop file. Nothing is added to the store.
-func peek_loop(path: String) -> Dictionary:
-	var p := _read_loop_file(path)
-	if p == null:
-		return {}
+## Whether a parsed loop file keeps to LOOP_LAYERS_MAX, LOOP_ACTIONS_MAX and
+## LOOP_TEMPLATE_PIXELS_MAX. Templates are measured by the size their PNG
+## header declares, before anything is decoded.
+static func _within_limits(data: Dictionary) -> bool:
+	var layers: Variant = data.get("layers", [])
+	if typeof(layers) != TYPE_ARRAY:
+		return true
+	if (layers as Array).size() > LOOP_LAYERS_MAX:
+		return false
+	var actions := 0
+	var pixels := 0
+	for layer in layers:
+		if typeof(layer) != TYPE_DICTIONARY:
+			continue
+		var list: Variant = (layer as Dictionary).get("actions", [])
+		if typeof(list) != TYPE_ARRAY:
+			continue
+		actions += (list as Array).size()
+		if actions > LOOP_ACTIONS_MAX:
+			return false
+		for a in list:
+			if typeof(a) != TYPE_DICTIONARY or typeof((a as Dictionary).get("image")) != TYPE_STRING:
+				continue
+			# The whole string, as the load decodes it (the decoder skips
+			# line breaks, so the first characters are not the first bytes).
+			var declared := LoopActionT.png_size(Marshalls.base64_to_raw(String(a["image"])))
+			# One over the side limit is refused undecoded (see set_image_png).
+			if declared.x > LoopActionT.IMAGE_MAX_SIDE or declared.y > LoopActionT.IMAGE_MAX_SIDE:
+				continue
+			pixels += maxi(0, declared.x) * maxi(0, declared.y)
+			if pixels > LOOP_TEMPLATE_PIXELS_MAX:
+				return false
+	return true
+
+
+## The loop in a .loop file for Import, or null if `path` is not a readable
+## loop file. Nothing is added to the store: what peek_loop shows and what
+## import_loop brings in is this one read, so a file changed on disk while
+## the question is up is never imported unseen.
+func read_import(path: String) -> LoopProjectT:
+	return _read_loop_file(path)
+
+
+## What a loop read for Import holds, for the question asked before it is
+## imported: {"name": its first layer's name, "layers": count, "actions":
+## count, "keys": the text of every Key action, in order}.
+func peek_loop(p: LoopProjectT) -> Dictionary:
 	var actions := 0
 	var keys: Array[String] = []
 	for layer in p.layers:
@@ -412,13 +469,10 @@ func peek_loop(path: String) -> Dictionary:
 	return {"name": p.layers[0].name, "layers": p.layers.size(), "actions": actions, "keys": keys}
 
 
-## Brings a .loop file into the store as a new loop (written to the store
-## right away, so it is there next time) and opens it. Returns the new
-## loop's id, or -1 if `path` is not a readable loop file.
-func import_loop(path: String) -> int:
-	var source := _read_loop_file(path)
-	if source == null:
-		return -1
+## Brings a loop read by read_import into the store as a new loop (written
+## to the store right away, so it is there next time) and opens it. Returns
+## the new loop's id.
+func import_loop(source: LoopProjectT) -> int:
 	var id := create_loop(false, source)
 	var key := str(id)
 	if _write_project_file(_loop_file_path(id), _session_projects_by_id[key]) == OK:
@@ -687,7 +741,7 @@ func _read_project_file(path: String, fallback_name: String) -> LoopProjectT:
 		if f == null:
 			push_warning("ProjectData: could not open %s (error %d)." % [abs, FileAccess.get_open_error()])
 		else:
-			var loaded := _read_loop(f)
+			var loaded := _read_loop(f, false)
 			if loaded != null:
 				if loaded.name.strip_edges().is_empty():
 					loaded.name = fallback_name

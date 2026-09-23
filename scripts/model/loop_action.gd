@@ -201,6 +201,8 @@ const NOTCHES_MAX := 200
 ## trouble (a file may hold anything); the editor's boxes take no more.
 const KEYS_MAX_CHARS := 8192
 const COMMENT_MAX_CHARS := 2000
+## The most of a Key's text the action list shows (see describe).
+const DESCRIBE_KEYS_CHARS := 200
 
 
 ## Field `key` of a loop-file dictionary as a whole number: the number as
@@ -240,19 +242,13 @@ static func read_coord(d: Dictionary, key: String, default: int) -> int:
 ## What a name, a comment or a Key's text looks like on screen is then what
 ## it is. `max_chars` cuts it after that.
 static func plain_text(raw: String, max_chars: int) -> String:
-	var out := ""
-	for ch in raw.left(max_chars * 2):
-		var code := ch.unicode_at(0)
-		if code < 32 or (code >= 127 and code <= 159):
-			continue  # C0 / C1 control characters
-		if code == 0x2028 or code == 0x2029:
-			continue  # line / paragraph separators
-		if code == 0x200E or code == 0x200F or (code >= 0x202A and code <= 0x202E) or (code >= 0x2066 and code <= 0x2069):
-			continue  # bidi marks and overrides
-		out += ch
-		if out.length() >= max_chars:
-			break
-	return out
+	if _not_plain == null:
+		# C0 / C1 control characters, line / paragraph separators, bidi marks
+		# and overrides. One RegEx pass: a file of thousands of 8K texts is
+		# read, not stepped through a character at a time.
+		_not_plain = RegEx.create_from_string("[\\x{0}-\\x{1F}\\x{7F}-\\x{9F}\\x{2028}\\x{2029}\\x{200E}\\x{200F}\\x{202A}-\\x{202E}\\x{2066}-\\x{2069}]")
+	return _not_plain.sub(raw.left(max_chars * 2), "", true).left(max_chars)
+static var _not_plain: RegEx = null
 
 
 ## Field `key` as true / false: a boolean as written, a number as non-zero,
@@ -555,7 +551,12 @@ func describe() -> String:
 			return "Scroll %s ×%s%s" % [scroll_dir_name(scroll_dir), range_text(notches, notches_max), over]
 		Type.KEY:
 			var press := press_text()
-			return "Key%s: \"%s\"" % [" " + press if not press.is_empty() else "", keys_shown()]
+			# The list shows the start (the editor has it all): an 8K line
+			# costs the list milliseconds to lay out, per action.
+			var shown := keys_shown()
+			if shown.length() > DESCRIBE_KEYS_CHARS:
+				shown = shown.left(DESCRIBE_KEYS_CHARS - 1) + "…"
+			return "Key%s: \"%s\"" % [" " + press if not press.is_empty() else "", shown]
 		Type.WAIT:
 			return "Delay %s ms" % range_text(wait_ms, wait_ms_max)
 		Type.PIXEL_DETECT:
@@ -588,6 +589,14 @@ func describe() -> String:
 ## is how a loop from someone else is checked before it runs.
 func keys_shown() -> String:
 	return plain_text(keys, KEYS_MAX_CHARS)
+
+
+## `raw` as a Key's text: one line with nothing in it that does not show
+## (see plain_text). A control character is typed as a key of its own - a
+## \u0001 is Ctrl+A, \u001b is Esc - so text that hid one would type
+## something else than the list and the import question say it does.
+static func clean_keys(raw: String) -> String:
+	return plain_text(raw, KEYS_MAX_CHARS)
 
 
 ## What a detect does with its result, for the list: nothing for the
@@ -719,8 +728,7 @@ static func from_dict(d: Dictionary) -> Self:
 	a.button = read_int(d, "button", BUTTON_LEFT)
 	if a.button < BUTTON_LEFT or a.button > BUTTON_MIDDLE:
 		a.button = BUTTON_LEFT
-	# One line of SendKeys text; a file cannot smuggle line breaks into it.
-	a.keys = read_string(d, "keys", "").replace("\r", "").replace("\n", "").left(KEYS_MAX_CHARS)
+	a.keys = clean_keys(read_string(d, "keys", ""))
 	a.wait_ms = read_int(d, "wait_ms", 100)
 	a.wait_ms_max = read_int(d, "wait_ms_max", a.wait_ms)
 	a.duration_ms = read_int(d, "duration_ms", 0)
