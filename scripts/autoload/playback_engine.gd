@@ -125,6 +125,10 @@ var global_hotkey: bool = false
 func _ready() -> void:
 	set_process(false)
 	set_backend(BackendKind.PREVIEW)
+	# System cursors a killed helper left blank are put back at start, not
+	# only once a Live backend happens to be made (see WindowsBackend._init).
+	if OS.get_name() == "Windows" and not ProjectData.another_instance:
+		WindowsBackendT.new()
 	# Another loop opened (switched to, created, imported…): the run ends with
 	# the loop it was started for. (A Live run locks the builder, so this is
 	# what stops a Safe run when the loop is changed under it.) Deferred so

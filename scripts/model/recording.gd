@@ -193,6 +193,10 @@ static func _items(events: Array) -> Array:
 							for k in keys.values():
 								k["other"] = true
 					elif mods.has(vk):
+						# Motion while it was held is its (Shift while steering):
+						# flushed now, so it is a down ... Move ... up.
+						_flush_move(items, run, keys, mods)
+						run = {}
 						var m: Dictionary = mods[vk]
 						mods.erase(vk)
 						var text := _stroke(vk, "", false)
