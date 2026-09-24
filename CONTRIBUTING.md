@@ -33,7 +33,7 @@ short version:
 - **Native input backends** — a GDExtension implementing the `InputBackend`
   API for fast, robust input on Windows / Linux / macOS is the single most
   impactful contribution. The interface is small; nothing else needs to change.
-- **New action types** (scroll, image detect, OCR, conditionals).
+- **New action types** (OCR, text detect, conditionals beyond Wait / Skip).
 - **Cross-platform testing** of the overlay window behaviour.
 - **Docs and examples** — share `.loop` files in `examples/`.
 
