@@ -39,7 +39,60 @@ const NAME_MAX_CHARS := 200
 ## at most NAME_MAX_CHARS (a loop file may hold anything, and the loop is
 ## named after its first layer).
 static func clean_name(raw: String) -> String:
-	return LoopActionT.plain_text(raw, NAME_MAX_CHARS).strip_edges()
+	if _edge_spaces == null:
+		# Any kind of space at either end (strip_edges takes only ASCII ones).
+		_edge_spaces = RegEx.create_from_string("^[\\p{Z}\\s\\x{2800}]+|[\\p{Z}\\s\\x{2800}]+$")
+		# ...and a run of blanks inside one space: a name padded out with
+		# them would push what follows (an import's mark) out of sight.
+		_blank_runs = RegEx.create_from_string("[\\p{Z}\\s\\x{2800}]+")
+		_leading_marks = RegEx.create_from_string("^[\\p{M}\\x{200C}\\x{200D}\\s]+")
+	# Blanks collapsed first, then cleaned (a mark after a no-break space
+	# would otherwise end up on the plain space it becomes), and no mark at
+	# the start, where it would sit on whatever comes before the name.
+	# Until nothing changes: cleaning can join blanks an invisible character
+	# kept apart (" " U+200B " "), and every pass that changes the name
+	# shortens it.
+	var name := raw.left(NAME_MAX_CHARS * 2)
+	while true:
+		var before := name
+		name = _blank_runs.sub(name, " ", true)
+		name = _edge_spaces.sub(LoopActionT.plain_text(name, NAME_MAX_CHARS), "", true)
+		name = _leading_marks.sub(name, "", true)
+		if name == before:
+			break
+	return name
+static var _edge_spaces: RegEx = null
+static var _blank_runs: RegEx = null
+static var _leading_marks: RegEx = null
+
+
+## The lightness a layer colour is kept to at least: its name is drawn in
+## it on the dark layer list, and its guides on the overlay.
+const COLOR_MIN_LUMINANCE := 0.3
+
+
+## `c` light enough to read on the dark list (see COLOR_MIN_LUMINANCE):
+## a layer coloured like the background ("000000") would be a row with no
+## name that runs every pass all the same. Lightened toward white, so the
+## hue it had is kept.
+static func readable(c: Color) -> Color:
+	var lum := c.get_luminance()
+	if lum >= COLOR_MIN_LUMINANCE:
+		return c
+	var t := (COLOR_MIN_LUMINANCE - lum) / maxf(0.001, 1.0 - lum)
+	var out := c.lerp(Color.WHITE, clampf(t + 0.02, 0.0, 1.0))
+	out.a = 1.0
+	return out
+
+
+## Whether `name` shows as nothing: empty, or only spaces of any kind (a
+## no-break or ideographic space, the blank Braille pattern) - strip_edges
+## only takes the ASCII ones off.
+static func is_blank(name: String) -> bool:
+	if _blank == null:
+		_blank = RegEx.create_from_string("^[\\p{Z}\\s\\x{2800}\\x{200C}\\x{200D}\\x{FE0E}\\x{FE0F}]*$")
+	return _blank.search(name) != null
+static var _blank: RegEx = null
 
 
 func to_dict() -> Dictionary:
@@ -58,7 +111,7 @@ func to_dict() -> Dictionary:
 static func from_dict(d: Dictionary) -> Self:
 	var l := Self.new()
 	l.name = clean_name(LoopActionT.read_string(d, "name", "Layer"))
-	l.color = LoopActionT.read_color(d, "color", PALETTE[0])
+	l.color = readable(LoopActionT.read_color(d, "color", PALETTE[0]))
 	l.visible = LoopActionT.read_bool(d, "visible", true)
 	l.enabled = LoopActionT.read_bool(d, "enabled", true)
 	l.actions = []

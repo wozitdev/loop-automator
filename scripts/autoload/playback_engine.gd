@@ -80,7 +80,7 @@ var _stop_counts: Dictionary = {}
 # order they went down. A stop lets go of all of it, so nothing stays stuck
 # down after F8.
 var _held_buttons: Dictionary = {}
-var _held_keys: Array[Dictionary] = []
+var _held_keys: Dictionary = {}   # _held_key(press) -> press, in the order they went down
 
 # The worker thread of a captured action under way (see _execute_captured):
 # the helper runs the whole action as one command with the real cursor
@@ -91,6 +91,19 @@ var _captured_thread: Thread = null
 # go of at quit if the action was cut short, since the coroutine that does
 # it after a stop never resumes once the tree is going.
 var _captured_button: int = -1
+# ...and the backend it went down on.
+var _captured_backend: InputBackendT = null
+# The worker thread of an Image Detect scan under way, and the backend it
+# asked: a scan that allows mismatches on a big rect can take the helper
+# many seconds, so it runs off the main thread (F8 and the UI keep working)
+# and a stop ends it the way it ends a captured action.
+var _detect_thread: Thread = null
+var _detect_reader: InputBackendT = null
+# Every scan thread not yet joined, the stopped runs' included: joined at
+# quit (only the latest is `_detect_thread`).
+var _scan_threads: Array[Thread] = []
+# Every other worker thread not yet joined (see _start_worker).
+var _work_threads: Array[Thread] = []
 
 # Lazily-created real backend used purely for reading screen pixels (so colour
 # sampling works even while the active playback backend is Preview).
@@ -112,6 +125,10 @@ var global_hotkey: bool = false
 func _ready() -> void:
 	set_process(false)
 	set_backend(BackendKind.PREVIEW)
+	# System cursors a killed helper left blank are put back at start, not
+	# only once a Live backend happens to be made (see WindowsBackend._init).
+	if OS.get_name() == "Windows" and not ProjectData.another_instance:
+		WindowsBackendT.new()
 	# Another loop opened (switched to, created, imported…): the run ends with
 	# the loop it was started for. (A Live run locks the builder, so this is
 	# what stops a Safe run when the loop is changed under it.) Deferred so
@@ -126,14 +143,16 @@ func _ready() -> void:
 
 func _exit_tree() -> void:
 	# Closing the app mid-run: nothing stays pressed, F8 is given back.
-	var cut_short := _interrupt_helper()
+	_interrupt_helper()
 	_release_held()
-	# A captured click or drag cut short had its button down in the helper;
-	# after a stop the action's own coroutine lets go of it, but no frame
-	# comes now, so it is done here (the call waits for the killed helper to
-	# be noticed, then runs on a fresh one).
-	if cut_short and _captured_button >= 0 and backend != null:
-		backend.release_button(_captured_button)
+	# A captured click or drag under way (or cut short by a stop just now)
+	# may have its button down in the helper; the action's own coroutine
+	# would let go of it, but no frame comes now, so it is done here (the
+	# call waits for the killed helper to be noticed, then runs on a fresh
+	# one). A release of a button that is up changes nothing.
+	# On the backend the action ran on: a Live stop has switched to Safe since.
+	if _captured_button >= 0 and _captured_backend != null:
+		_captured_backend.release_button(_captured_button)
 	_stop_hotkey.stop()
 	# The backends end their helpers while the scripts are still loaded: a
 	# warm-up thread still running backend code at teardown is a crash.
@@ -142,11 +161,20 @@ func _exit_tree() -> void:
 	if _screen_sampler != null:
 		_screen_sampler.shutdown(true)
 	_sweep_retired(true)
-	# The thread of a captured action cut short above has nothing left to
-	# do; joined here so it is not destroyed mid-flight.
-	if _captured_thread != null:
-		_captured_thread.wait_to_finish()
-		_captured_thread = null
+	# Worker threads whose coroutines no frame will resume (a captured
+	# action cut short above, a piece of typing or travel under way): the
+	# backends are shut, so what is left of their work returns at once, and
+	# each is joined here so none is destroyed mid-flight.
+	for t in _work_threads:
+		t.wait_to_finish()
+	_work_threads.clear()
+	_captured_thread = null
+	# Image Detect scans still under way (one per run a stop cut short):
+	# joined so none is destroyed mid-flight.
+	for t in _scan_threads:
+		t.wait_to_finish()
+	_scan_threads.clear()
+	_detect_thread = null
 
 
 func _process(_dt: float) -> void:
@@ -170,6 +198,13 @@ func _process(_dt: float) -> void:
 			else:
 				emit_signal("status", "F8 starts and stops the loop from any window.")
 		StopHotkeyT.State.UNAVAILABLE:
+			# Lost in the middle of a Live run (its helper killed or crashed):
+			# the run was started counting on F8 from any window - the builder
+			# may be minimised out of sight - so it ends here rather than
+			# going on driving the mouse and keyboard with no stop key.
+			if is_running and before == StopHotkeyT.State.ARMED and backend.is_real():
+				stop("Stopped: the global F8 stopped working (%s)." % _stop_hotkey.reason)
+				return
 			emit_signal("status", "%s(global F8 unavailable: %s — F5 / F8 / Esc work while this window has the focus)" % [running, _stop_hotkey.reason])
 
 
@@ -191,6 +226,7 @@ func _refresh_hotkey() -> void:
 	var wanted := global_hotkey
 	if wanted and _stop_hotkey.state == StopHotkeyT.State.OFF:
 		_stop_hotkey.start()
+		_stop_hotkey.set_modifiers(is_running)
 	elif not wanted and _stop_hotkey.state != StopHotkeyT.State.OFF:
 		_stop_hotkey.stop()
 	set_process(_stop_hotkey.state != StopHotkeyT.State.OFF)
@@ -280,8 +316,20 @@ func start() -> void:
 	if ProjectData.project == null or ProjectData.project.layers.is_empty():
 		emit_signal("status", "Nothing to run.")
 		return
+	# Work of the last run still ending (a helper command a stop cut short,
+	# a scan, a release after a cut-off captured click): its coroutine acts
+	# when it is done - lets go of a button, unpins a detect rect - and must
+	# not do that in the middle of a new run.
+	# (Not yet joined, rather than alive: a thread that has just finished
+	# still has its coroutine to come back to.)
+	if not _work_threads.is_empty() or not _scan_threads.is_empty():
+		emit_signal("status", "Still ending the last run - press Run again in a moment.")
+		return
 	is_running = true
 	_generation += 1
+	_cursor_unplaced = false
+	# F8 with a modifier down stops it too, while it runs (see StopHotkey).
+	_stop_hotkey.set_modifiers(true)
 	_user_cursor = _mouse_pos()
 	_loop_moved = false
 	_has_last_hit = false
@@ -289,16 +337,24 @@ func start() -> void:
 	_stop_counts.clear()
 	_held_buttons.clear()
 	_held_keys.clear()
+	backend.keys_refused = false
+	# (No worker of the last run is left - see above - so an interrupt it
+	# did not spend is nobody's.)
+	backend.clear_interrupt()
+	var sampler := get_screen_sampler()
+	if sampler != null and sampler != backend:
+		sampler.clear_interrupt()
 	# A global F8 another program owned last time is tried again for this run.
 	if _stop_hotkey.state == StopHotkeyT.State.UNAVAILABLE:
 		_stop_hotkey.stop()
 	_refresh_hotkey()
-	if not backend.is_real():
-		# A Safe run still reads the screen for its Pixel Detects: get the
-		# reader's helper up now rather than at the first detect.
-		var reader := get_screen_sampler()
-		if reader != null and reader.has_method("warm_up"):
-			reader.call("warm_up")
+	# Get the helper up now (on its own thread) rather than at the first
+	# action: a Live run's clicks call it from this thread, and one the last
+	# stop ended would otherwise be started here, with F8 unread meanwhile.
+	# A Safe run still reads the screen for its Pixel Detects.
+	var reader := backend if backend.is_real() else get_screen_sampler()
+	if reader != null and reader.has_method("warm_up"):
+		reader.call("warm_up")
 	emit_signal("playback_started")
 	if _stop_hotkey.state == StopHotkeyT.State.ARMED:
 		emit_signal("status", "Running… F8 stops the loop from any window.")
@@ -314,9 +370,15 @@ func stop(reason: String = "Stopped.") -> void:
 	if not is_running:
 		return
 	is_running = false
+	_stop_hotkey.set_modifiers(false)
 	last_stop_reason = reason
 	_generation += 1
 	_interrupt_helper()
+	# Interrupted once: a later stop must not interrupt the backend again on
+	# behalf of these threads (it would end whatever that run has under way).
+	_detect_thread = null
+	_detect_reader = null
+	_captured_thread = null
 	_release_held()
 	_refresh_hotkey()
 	current_layer_index = -1
@@ -330,6 +392,10 @@ func stop(reason: String = "Stopped.") -> void:
 
 func _run_loop(gen: int) -> void:
 	var project := ProjectData.project
+	# The helper coming up (see start): its first command from this thread
+	# (a click) would wait for it here, with F8 unread meanwhile.
+	while backend.warming() and is_running and gen == _generation:
+		await get_tree().process_frame
 	while is_running and gen == _generation:
 		# The loop delay leads every pass (the first one too). With the "~" in
 		# front of it, it leads every action instead: the first action's is the
@@ -342,13 +408,41 @@ func _run_loop(gen: int) -> void:
 		for li in project.layers.size():
 			if not is_running or gen != _generation:
 				break
+			# A layer deleted during a Safe run (see the action guard below).
+			if li >= project.layers.size():
+				break
 			var layer: LoopLayerT = project.layers[li]
 			# Enabled, or the solo layer while one is set (see ProjectData).
 			if not ProjectData.layer_runs(li):
 				continue
 			var skip_layer := false
 			for ai in layer.actions.size():
+				# A pass of instant actions (clicks, jumps, key downs: helper
+				# calls on this thread that await nothing) would otherwise run
+				# whole without a frame - and F8 is read once a frame. A frame
+				# goes by whenever YIELD_EVERY_MS have passed without one.
+				if _frame_due():
+					await get_tree().process_frame
+				# A helper that died mid-run (a scan that timed out, a crash) is
+				# started again on its own thread before the next action, not
+				# by that action's first command on this one, with F8 unread.
+				if backend.helper_down():
+					backend.call("warm_up")
+				# (Waited out whoever started it: a command that found the
+				# helper down in the last action has already set one going.)
+				while backend.warming() and is_running and gen == _generation:
+					await get_tree().process_frame
+				# No helper to be had: a Live run is not carried on through a
+				# process per command on this thread (a second or more each,
+				# F8 unread meanwhile).
+				if backend.helper_unavailable() and is_running and gen == _generation:
+					stop("Stopped: the input helper (PowerShell) could not be started - see the log.")
+					return
 				if not is_running or gen != _generation:
+					break
+				# A Safe run leaves the builder open: an action deleted
+				# meanwhile makes the layer shorter than when this pass began.
+				if ai >= layer.actions.size():
 					break
 				var action: LoopActionT = layer.actions[ai]
 				if not action.enabled:
@@ -364,12 +458,22 @@ func _run_loop(gen: int) -> void:
 						break
 				_note_user_motion()
 				var result := await _execute_action(action)
+				# Stopped meanwhile (a long Hold outlived the run): nothing of
+				# this run's is noted into the next one's cursor tracking.
+				if not is_running or gen != _generation:
+					break
 				_note_loop_cursor(action)
+				# Keys the backend would not send (see WindowsBackend._run_sync):
+				# a run that went on clicking without its typing would be a
+				# different loop from the one that was read.
+				if is_running and gen == _generation and backend.keys_refused:
+					stop("Stopped: a Key action could not be typed as written (see the log): the rest of the loop is not run without it.")
+					return
 				if result == LoopActionT.OnFail.STOP_LOOP:
 					stop("%s Loop stopped." % _last_event)
 					return
 				if result == LoopActionT.OnFail.SKIP_LAYER:
-					_last_event = _last_event.trim_suffix(".") + ", skipped the rest of \"%s\"." % layer.name
+					_last_event = _last_event.trim_suffix(".") + ", skipped the rest of %s." % _quote(layer.name)
 					emit_signal("status", _last_event)
 					skip_layer = true
 				if skip_layer:
@@ -388,6 +492,24 @@ func _run_loop(gen: int) -> void:
 		# spin without ever letting a frame - or a stop - through.
 		await get_tree().process_frame
 	# Loop ended naturally (only happens if stopped).
+
+
+## How long a run may go without letting a frame through (see _run_loop).
+const YIELD_EVERY_MS := 12
+var _seen_frame: int = -1
+var _frame_at: int = 0
+
+
+## Whether YIELD_EVERY_MS have passed since the run first saw the frame it
+## is in: time for it to let one through.
+func _frame_due() -> bool:
+	var frame := Engine.get_process_frames()
+	var now := Time.get_ticks_msec()
+	if frame != _seen_frame:
+		_seen_frame = frame
+		_frame_at = now
+		return false
+	return now - _frame_at >= YIELD_EVERY_MS
 
 
 ## Waits one (rolled) loop delay, shown on the tracker and the status line
@@ -420,13 +542,34 @@ func _execute_action(action: LoopActionT) -> int:
 	match action.type:
 		LoopActionT.Type.MOVE:
 			var p := action.roll_point()
+			# (Windows would stop the cursor at the nearest screen's edge, and a
+			# click or scroll where it is would land there, unseen.)
+			if _off_screens(action, [p]):
+				# ...nor where it was before: a click or scroll "where the
+				# cursor is" after this Move is meant for its point, not for
+				# the last action's target. Skipped too, until a point lands.
+				_cursor_unplaced = true
+				return LoopActionT.OnFail.CONTINUE
 			await _travel(_mouse_pos(), p, action.roll_duration_ms(), action.wiggle, "MOVE")
 		LoopActionT.Type.CLICK:
 			# ~Move: get to the point first (over the duration, like a Move);
 			# off, the press is wherever the cursor is.
 			var p := _mouse_pos()
+			if not action.move_to and _cursor_unplaced and action.press_mode != LoopActionT.PressMode.UP:
+				emit_signal("status", "Click skipped: the Move before it was to no screen.")
+				return LoopActionT.OnFail.CONTINUE
 			if action.move_to:
 				p = action.roll_point()
+				if _off_screens(action, [p]):
+					# An Up is let go of all the same, where the cursor is: the
+					# button a Down pressed would otherwise stay down, every
+					# later move a drag.
+					if action.press_mode == LoopActionT.PressMode.UP and _held_buttons.has(action.button):
+						_let_go(action.button)
+					# (Nor did the cursor go where this Click meant it to.)
+					_cursor_unplaced = true
+					return LoopActionT.OnFail.CONTINUE
+				_cursor_unplaced = false
 				var ms := action.roll_duration_ms()
 				if ms > 0:
 					var gen := _generation
@@ -440,23 +583,48 @@ func _execute_action(action: LoopActionT) -> int:
 				else:
 					backend.click_here(action.button)
 				_report_skipped(action)
+				# Its up (or the release after it) not carried out: the button
+				# may be down - kept as held, and let go of as a Hold's is
+				# (tried again, the run stopped if that fails too).
+				if backend.last_failed:   # (a refused up whose release failed too included)
+					_held_buttons[action.button] = p
+					_let_go(action.button)
 			else:
 				await _press_button(action, p)
 		LoopActionT.Type.DRAG:
 			var p := action.roll_point()
 			var p2 := action.roll_point2()
+			if _off_screens(action, [p, p2]):
+				# (The cursor is not where the Drag would have left it.)
+				_cursor_unplaced = true
+				return LoopActionT.OnFail.CONTINUE
 			_set_tracker(p, true, "DRAG START")
 			backend.mouse_button(action.button, true, p)
 			if backend.last_skipped:
 				_report_skipped(action)
 			else:
-				# The button is always released, a stop mid-drag included.
+				# Held while it travels, so a stop mid-drag lets go of it (on
+				# the real backend, before a Live run's stop swaps in Safe).
+				_held_buttons[action.button] = p
+				var gen := _generation
 				await _travel(p, p2, action.roll_duration_ms(), action.wiggle, "DRAG")
-				_set_tracker(p2, true, "DRAG END")
-				backend.mouse_button(action.button, false, p2)
+				if gen == _generation and _held_buttons.has(action.button):
+					_set_tracker(p2, true, "DRAG END")
+					backend.mouse_button(action.button, false, p2)
+					# Refused by ~Self, or not carried out: let go of where the
+					# cursor is all the same (never refused), rather than held
+					# down for the rest of an endless run.
+					if backend.last_skipped or backend.last_failed:
+						_report_skipped(action)
+						_let_go(action.button)
+					else:
+						_held_buttons.erase(action.button)
 		LoopActionT.Type.SCROLL:
 			# The wheel turns where the cursor is (a Move before it puts it
 			# somewhere).
+			if _cursor_unplaced:
+				emit_signal("status", "Scroll skipped: the Move before it was to no screen.")
+				return LoopActionT.OnFail.CONTINUE
 			var n := action.roll_notches()
 			var ms := action.roll_duration_ms()
 			_set_tracker(_mouse_pos(), true, "SCROLL")
@@ -472,11 +640,7 @@ func _execute_action(action: LoopActionT) -> int:
 			var gen := _generation
 			while sent < n and is_running and gen == _generation:
 				var k := mini(per_chunk, n - sent)
-				var thread := Thread.new()
-				thread.start(func(): b.scroll(action.scroll_dir, k, k * gap, action.wiggle))
-				while thread.is_alive():
-					await get_tree().process_frame
-				thread.wait_to_finish()
+				await _off_thread(func(): b.scroll(action.scroll_dir, k, k * gap, action.wiggle))
 				if b.last_skipped:
 					_report_skipped(action)
 					break
@@ -572,14 +736,19 @@ func _execute_action(action: LoopActionT) -> int:
 			match action.capture_mode:
 				LoopActionT.CaptureMode.MOUSE:
 					# Where the user's own mouse is (see _user_cursor).
+					var travel_gen := _generation
 					await _travel(_mouse_pos(), _user_cursor, action.roll_duration_ms(), action.wiggle, "CAPTURE MOUSE")
-					emit_signal("status", "Capture: moved to your mouse position (%d, %d)" % [_user_cursor.x, _user_cursor.y])
+					# A stop during the travel has said why, and it did not get there.
+					if is_running and travel_gen == _generation:
+						emit_signal("status", "Capture: moved to your mouse position (%d, %d)" % [_user_cursor.x, _user_cursor.y])
 				LoopActionT.CaptureMode.DETECT:
 					# The last detect's spot. Nothing found yet is not a fault
 					# of the action (the detect may find next pass): carry on.
 					if _has_last_hit:
+						var travel_gen := _generation
 						await _travel(_mouse_pos(), _last_hit, action.roll_duration_ms(), action.wiggle, "CAPTURE DETECT")
-						emit_signal("status", "Capture: moved to the last detect's spot (%d, %d)" % [_last_hit.x, _last_hit.y])
+						if is_running and travel_gen == _generation:
+							emit_signal("status", "Capture: moved to the last detect's spot (%d, %d)" % [_last_hit.x, _last_hit.y])
 					else:
 						emit_signal("status", "Capture: no detect has found anything yet.")
 	return LoopActionT.OnFail.CONTINUE
@@ -604,11 +773,14 @@ func _press_button(action: LoopActionT, p: Vector2i) -> void:
 			backend.mouse_button(action.button, false, p)
 		else:
 			backend.button_here(action.button, false)
-		# Refused by ~Self (it would land on this app): still held, so the
-		# stop lets go of it where it went down.
-		if not backend.last_skipped:
-			_held_buttons.erase(action.button)
+		# Refused by ~Self (it would land on this app): let go of where the
+		# cursor is all the same (never refused) - a button left down for
+		# the rest of the run would drag every later action with it.
 		_report_skipped(action)
+		if (backend.last_skipped or backend.last_failed) and _held_buttons.has(action.button):
+			_let_go(action.button)
+		else:
+			_held_buttons.erase(action.button)
 		return
 	var hold := action.press_mode == LoopActionT.PressMode.HOLD
 	_set_tracker(p, true, "HOLD" if hold else "DOWN")
@@ -630,8 +802,7 @@ func _press_button(action: LoopActionT, p: Vector2i) -> void:
 	# A stop meanwhile has let go already. The release is where the cursor
 	# is now (the user may have moved it), not a jump back to the point.
 	if gen == _generation and _held_buttons.has(action.button):
-		backend.release_button(action.button)
-		_held_buttons.erase(action.button)
+		_let_go(action.button)
 
 
 ## A Key set to Hold, Down or Up: its text read as presses (see
@@ -641,6 +812,10 @@ func _press_button(action: LoopActionT, p: Vector2i) -> void:
 ## group too long for one helper command) is typed once on the way down and
 ## ignored on the way up.
 func _press_keys(action: LoopActionT) -> void:
+	# The run this press belongs to, taken before anything is awaited: a
+	# stop (or a new run) during the typed pieces below must not find this
+	# coroutine letting go of the next run's keys.
+	var gen := _generation
 	var presses: Array = []
 	var typed := PackedStringArray()
 	for stroke in KeyStrokesT.split(action.keys):
@@ -649,60 +824,142 @@ func _press_keys(action: LoopActionT) -> void:
 			typed.append(stroke)
 		else:
 			presses.append({"mods": press["mods"], "keys": press["keys"]})
+	# Each press is a helper call on this thread, and each down one to let go
+	# of on a stop: a Key Down of thousands of characters would hold the UI
+	# (and F8) for as long as they take, twice.
+	if presses.size() > KEY_GROUP_MAX:
+		stop("Stopped: a Key %s holds %d presses; one holds %d at most." % [
+			"Up" if action.press_mode == LoopActionT.PressMode.UP else "Down / Hold", presses.size(), KEY_GROUP_MAX])
+		return
 	if action.press_mode == LoopActionT.PressMode.UP:
 		_set_tracker(tracker_pos, tracker_visible, "KEY UP")
 		presses.reverse()
 		for press in presses:
-			backend.press_keys(press["mods"], press["keys"], false)
-			_forget_held(press)
-		emit_signal("status", "Keys up: \"%s\"." % action.keys)
+			if not _key_up(press):
+				return
+		emit_signal("status", "Keys up: %s." % _keys_status(action.keys))
 		return
 	var hold := action.press_mode == LoopActionT.PressMode.HOLD
 	_set_tracker(tracker_pos, tracker_visible, "KEY HOLD" if hold else "KEY DOWN")
+	# Every press left down is one helper call when the run stops (and at
+	# quit): a loop of Key Downs of ever other keys is kept to a list the
+	# stop gets through at once.
+	var fresh := 0
+	for press in presses:
+		if not _is_held(press):
+			fresh += 1
+	if _held_keys.size() + fresh > HELD_KEYS_MAX:
+		stop("Stopped: Key Downs would leave more than %d presses held at once." % HELD_KEYS_MAX)
+		return
+	# A press or a piece refused by ~Self (this app came to the front) ends
+	# the pressing and typing, but not the run: a Hold then lets go of what
+	# it pressed at once, rather than leaving it down for the rest of it.
+	var skipped := false
 	for press in presses:
 		backend.press_keys(press["mods"], press["keys"], true)
+		# Refused or failed (a key the helper could not press): the run ends
+		# here (see _run_loop), and its stop lets go of what went down -
+		# nothing more is pressed, and no Hold waits out its time first.
+		if backend.keys_refused:
+			return
 		if backend.last_skipped:
 			_report_skipped(action)
-			return
-		_held_keys.append(press)
-	if not typed.is_empty():
-		var gen_typed := _generation
-		for piece in KeyStrokesT.pieces("".join(typed), PLAIN_PIECE_BYTES):
-			if not is_running or gen_typed != _generation:
-				return
-			await _off_thread(backend.send_keys.bind(piece))
-		emit_signal("status", "Keys down: \"%s\" (\"%s\" cannot be held, typed instead)." % [action.keys, "".join(typed)])
+			skipped = true
+			break
+		# Once in the list however often it goes down (a Key Down in a
+		# loop): the stop's one release lets go of it, and a list that grew
+		# every pass would be as many releases, one after another.
+		if not _is_held(press):
+			_held_keys[_held_key(press)] = press
+	if not typed.is_empty() and not skipped and not backend.keys_refused:
+		for stroke in typed:
+			if skipped:
+				break
+			# A group too long to hold is typed by the helper, KEY_GROUP_MAX
+			# keys to a command; anything else by SendKeys, in pieces.
+			var big := KeyStrokesT.parse(stroke)
+			var sends: Array[Callable] = []
+			if not big.is_empty():
+				var keys: PackedStringArray = big["keys"]
+				for at in range(0, keys.size(), KEY_GROUP_MAX):
+					sends.append(backend.hold_keys.bind(big["mods"], keys.slice(at, at + KEY_GROUP_MAX), 0, EXTRA_TAP_MS, 0, 0))
+			else:
+				for piece in KeyStrokesT.pieces(stroke, PLAIN_PIECE_BYTES, PLAIN_PIECE_EVENTS):
+					sends.append(backend.send_keys.bind(piece))
+			for send in sends:
+				if not is_running or gen != _generation:
+					return
+				await _off_thread(send)
+				if backend.keys_refused or gen != _generation:
+					return
+				if backend.last_skipped:
+					_report_skipped(action)
+					skipped = true
+					break
+		if not skipped:
+			emit_signal("status", "Keys down: %s (%s cannot be held, typed instead)." % [_keys_status(action.keys), _keys_status("".join(typed))])
 	if not hold:
-		if typed.is_empty():
-			emit_signal("status", "Keys down: \"%s\"." % action.keys)
+		if typed.is_empty() and not skipped:
+			emit_signal("status", "Keys down: %s." % _keys_status(action.keys))
 		return
-	var ms := action.roll_hold_ms()
-	emit_signal("status", "Keys held %d ms: \"%s\"." % [ms, action.keys])
-	var gen := _generation
-	await _sleep_ms(ms)
-	# A stop meanwhile has let go already.
-	if gen != _generation:
-		return
+	if not skipped:
+		var ms := action.roll_hold_ms()
+		emit_signal("status", "Keys held %d ms: %s." % [ms, _keys_status(action.keys)])
+		await _sleep_ms(ms)
+		# A stop meanwhile has let go already.
+		if gen != _generation:
+			return
 	presses.reverse()
 	for press in presses:
-		if _held_index(press) >= 0:
-			backend.press_keys(press["mods"], press["keys"], false)
-			_forget_held(press)
+		if _is_held(press) and not _key_up(press):
+			return
 
 
-## Where `press` (a {"mods", "keys"}) sits in the held list, or -1.
-func _held_index(press: Dictionary) -> int:
-	for i in range(_held_keys.size() - 1, -1, -1):
-		if _held_keys[i]["mods"] == press["mods"] and _held_keys[i]["keys"] == press["keys"]:
-			return i
-	return -1
+## A Key's text as the status line shows it: cut to a line's worth and
+## marked as the list shows it (LoopAction.ltr_marked), so it reads in the
+## order it types.
+static func _keys_status(text: String) -> String:
+	# Its start and its end (see LoopAction.describe): what runs last in a
+	# long text is as much a part of it as what runs first.
+	var shown := text if text.length() <= 60 else text.left(30) + " … " + text.right(27)
+	return _quote(LoopActionT.ltr_marked(shown))
+
+
+## Text from a loop file (a layer's name, a Key's text) as a status line
+## quotes it: in JSON's quotes (a quote in it is \") and isolated left to
+## right, so it cannot read as the status line's own words ("Stopped: F8
+## pressed." inside a layer name) or turn the line around it.
+static func _quote(s: String) -> String:
+	return char(0x2066) + JSON.stringify(s) + char(0x2069)
+
+
+## Lets go of `press` and drops it from the held list. A release that does
+## not go through ends the run here - its stop tries twice more (the helper
+## it failed on is gone by then: a fresh one, or one-shot letting go of
+## every key) - rather than going on with a Ctrl or a Shift down under
+## every later action. False when it stopped the run.
+func _key_up(press: Dictionary) -> bool:
+	backend.press_keys(press["mods"], press["keys"], false)
+	if not backend.last_failed:
+		_forget_held(press)
+		return true
+	stop("Stopped: a key could not be let go of (see the log).")
+	return false
+
+
+## The key of `press` (a {"mods", "keys"}) in the held list.
+static func _held_key(press: Dictionary) -> String:
+	return "%s|%s" % [press["mods"], ",".join(press["keys"])]
+
+
+## Whether `press` is in the held list.
+func _is_held(press: Dictionary) -> bool:
+	return _held_keys.has(_held_key(press))
 
 
 ## Drops `press` (a {"mods", "keys"} that was let go of) from the held list.
 func _forget_held(press: Dictionary) -> void:
-	var i := _held_index(press)
-	if i >= 0:
-		_held_keys.remove_at(i)
+	_held_keys.erase(_held_key(press))
 
 
 ## A captured action still running in the helper is cut short, so the
@@ -710,10 +967,32 @@ func _forget_held(press: Dictionary) -> void:
 ## for the helper, which would otherwise be the rest of the dwell. Returns
 ## whether there was one to cut short.
 func _interrupt_helper() -> bool:
+	if _detect_thread != null and _detect_thread.is_alive() and _detect_reader != null:
+		_detect_reader.interrupt()
 	if _captured_thread != null and _captured_thread.is_alive() and backend != null:
 		backend.interrupt()
 		return true
+	# Typing on a worker (a group of keys, SendKeys' piece): cut short too,
+	# or the stop's releases would wait for it - a second or so, or the
+	# command's whole timeout if the helper hangs. (The backend lets a path
+	# or wheel piece, a moment's work, run out.)
+	for t in _work_threads:
+		if t.is_alive() and backend != null:
+			backend.interrupt()
+			break
 	return false
+
+
+## Lets go of `button` where the cursor is; it stays in the held list (for
+## the stop to try again) unless that went through.
+func _let_go(button: int) -> void:
+	# Failing, the run ends here (its stop tries twice more, see
+	# _release_held) rather than going on dragging with the button down.
+	backend.release_button(button)
+	if not backend.last_failed:
+		_held_buttons.erase(button)
+		return
+	stop("Stopped: a mouse button could not be let go of (see the log).")
 
 
 ## Lets go of every button and key a Down left pressed (keys in the reverse
@@ -721,12 +1000,25 @@ func _interrupt_helper() -> bool:
 func _release_held() -> void:
 	if backend == null:
 		return
+	# Each release that goes unanswered (its helper died on it) is tried
+	# once more: the second goes to a fresh helper, or one-shot.
 	for b in _held_buttons.keys():
 		backend.release_button(b)
+		if backend.last_failed:
+			backend.release_button(b)
 	_held_buttons.clear()
-	while not _held_keys.is_empty():
-		var press: Dictionary = _held_keys.pop_back()
+	var order := _held_keys.values()
+	_held_keys.clear()
+	order.reverse()
+	for press in order:
 		backend.press_keys(press["mods"], press["keys"], false)
+		if backend.last_failed:
+			backend.press_keys(press["mods"], press["keys"], false)
+			# Failing twice, the rest would too (the second went one-shot,
+			# letting go of every key): not a process per key on this thread.
+			if backend.last_failed:
+				push_warning("Playback: keys could not be let go of at the stop.")
+				break
 
 
 ## A mouse action with "Captures": the backend remembers the cursor, performs
@@ -749,41 +1041,49 @@ func _execute_captured(action: LoopActionT) -> void:
 		LoopActionT.Type.DRAG:
 			kind = "drag"
 			path = MousePathT.make(from, to, ms, action.wiggle)
+	if kind == "click" and _off_screens(action, [from]) or kind == "drag" and _off_screens(action, [from, to]):
+		return
 	var label := kind.to_upper() + " ↩"
 	_set_tracker(from, true, label)
 	var b := backend
 	var gen := _generation
-	var thread := Thread.new()
 	# The helper runs the whole action as one command, the real cursor
 	# pinned to its point the whole time. A stop meanwhile cuts the command
 	# short (see stop): the user has the mouse back at once, not when the
 	# dwell is over.
-	_captured_thread = thread
 	_captured_button = -1 if kind == "move" else action.button
-	thread.start(func() -> Array:
+	_captured_backend = b
+	var thread := _start_worker(func() -> Array:
 		return b.run_captured(kind, action.button, from, to, ms, action.ghost_cursor, path))
+	_captured_thread = thread
 	# The tracker walks the path while the helper moves the real cursor.
 	var started := Time.get_ticks_msec()
 	while thread.is_alive():
 		if ms > 0 and is_running and gen == _generation:
 			_set_tracker(Vector2i(MousePathT.at(path, float(Time.get_ticks_msec() - started) / float(ms)).round()), true, label)
 		await get_tree().process_frame
-	var result: Array = thread.wait_to_finish()
-	_captured_thread = null
-	_captured_button = -1
+	var result: Array = _join_worker(thread)
+	# Still this action's (a stop has only let go of the thread: no new run
+	# starts while this one's workers are alive, see start).
+	if _captured_thread == thread or _captured_thread == null:
+		_captured_thread = null
+		if not (b.last_cut_off and kind != "move"):
+			_captured_button = -1
 	if result.size() != 2:
+		var skipped := gen == _generation and b.last_skipped
+		if b.last_cut_off and kind != "move":
+			# Cut short by a stop, or timed out and ended: the helper may
+			# have died with a click's or a drag's button down (an error
+			# answer has let go of it already), so it is let go of here -
+			# off the main thread, since the first command after a kill
+			# starts a fresh helper (a second or so).
+			await _off_thread(func(): b.release_button(action.button))
+			# Kept for the quit to try again if that did not go through.
+			if not b.last_failed:
+				_captured_button = -1
 		if gen != _generation:
-			# Cut short: the helper was ended mid-action, so a button it had
-			# pressed (a click's, a drag's) is let go of here - off the main
-			# thread, since the first command after a kill starts a fresh
-			# helper (a second or so).
-			if kind != "move":
-				var release := Thread.new()
-				release.start(func(): b.release_button(action.button))
-				while release.is_alive():
-					await get_tree().process_frame
-				release.wait_to_finish()
-		elif b.last_skipped:
+			pass
+		elif skipped:
 			_report_skipped(action)
 		else:
 			emit_signal("status", "%s: could not capture the mouse position" % LoopActionT.type_name(action.type))
@@ -812,6 +1112,9 @@ const KEY_TRAIL_MAX_MS := 60
 ## A group "(abc…)" longer than this is one helper call too long to stop;
 ## SendKeys sends it instead.
 const KEY_GROUP_MAX := 32
+## ~Keys: a group's keys go to the helper this many to a command (about a
+## second at the slowest), so a stop lands within one.
+const KEY_PACED_GROUP := 4
 
 
 ## How long a key SendKeys cannot send (see KeyStrokes.EXTRA) is held when
@@ -824,17 +1127,43 @@ const EXTRA_TAP_MS := 30
 ## at some hundreds of characters a second at best, so the pieces are small
 ## (a piece costs a helper round trip of a millisecond or so).
 const PLAIN_PIECE_BYTES := 24
+## ...and of at most this many keystrokes: "{ENTER 1000}" is a dozen bytes
+## and a thousand presses SendKeys queues at once.
+const PLAIN_PIECE_EVENTS := 24
+## The most presses Key Downs may leave held at once (see _press_keys).
+const HELD_KEYS_MAX := 64
 
 
 ## Runs `work` (a backend call that blocks for as long as the input takes)
 ## on a worker thread, letting frames - and a stop, F8 above all - through
 ## meanwhile.
-func _off_thread(work: Callable) -> void:
-	var thread := Thread.new()
-	thread.start(work)
+func _off_thread(work: Callable) -> Variant:
+	var thread := _start_worker(work)
 	while thread.is_alive():
 		await get_tree().process_frame
-	thread.wait_to_finish()
+	return _join_worker(thread)
+
+
+## Starts `work` on a worker thread kept in `_work_threads` until
+## _join_worker: a coroutine that never resumes (the app quitting under
+## it) leaves its thread to _exit_tree, which joins it rather than letting
+## it be destroyed mid-flight.
+func _start_worker(work: Callable) -> Thread:
+	var thread := Thread.new()
+	_work_threads.append(thread)
+	# Which thread it was, for its command's outcome to be the caller's
+	# after the join (see InputBackend.adopt_flags).
+	thread.start(func() -> Array: return [work.call(), OS.get_thread_caller_id()])
+	return thread
+
+
+func _join_worker(thread: Thread) -> Variant:
+	var done: Variant = thread.wait_to_finish()
+	_work_threads.erase(thread)
+	if not (done is Array and (done as Array).size() == 2):
+		return null
+	InputBackendT.adopt_flags(done[1])
+	return done[0]
 
 
 ## Types a Key action's text the plain way: SendKeys gets it as it is. A
@@ -844,33 +1173,73 @@ func _off_thread(work: Callable) -> void:
 ## modifiers, if any) is one press by the helper, in order. Each stretch
 ## goes in pieces (see PLAIN_PIECE_BYTES); a stop ends the typing between
 ## them.
+## Each piece and press is sent as it comes (a "{WIN 1000}" is a thousand
+## presses, and a text can hold hundreds of those: nothing is built ahead).
 func _type_plain(action: LoopActionT) -> void:
-	var runs: Array = []   # Strings for SendKeys, presses for the helper
+	var gen := _generation
+	var b := backend
 	var plain := ""
 	for stroke in KeyStrokesT.split(action.keys):
 		var press := KeyStrokesT.parse(stroke)
-		if not KeyStrokesT.helper_only(press):
-			plain += stroke
+		# A group of more than KEY_GROUP_MAX keys goes to the helper too, in
+		# slices (below): SendKeys would queue all of it at once.
+		var big_group := not press.is_empty() and (press["keys"] as PackedStringArray).size() > KEY_GROUP_MAX
+		if not KeyStrokesT.helper_only(press) and not big_group:
+			if press.is_empty() or int(press["repeat"]) <= PLAIN_PIECE_EVENTS:
+				plain += stroke
+				continue
+			# "{ENTER 1000}" is a few bytes and a thousand presses: it goes as
+			# "{ENTER 24}"s, so a stop lands between them.
+			if not plain.is_empty():
+				if not await _send_plain(action, b, gen, plain):
+					return
+				plain = ""
+			var head := stroke.substr(0, stroke.rfind(" "))
+			var left := int(press["repeat"])
+			while left > 0:
+				var k := mini(left, PLAIN_PIECE_EVENTS)
+				if not await _send_plain(action, b, gen, "%s %d}" % [head, k]):
+					return
+				left -= k
 			continue
 		if not plain.is_empty():
-			runs.append_array(Array(KeyStrokesT.pieces(plain, PLAIN_PIECE_BYTES)))
+			if not await _send_plain(action, b, gen, plain):
+				return
 			plain = ""
+		# One helper command per KEY_GROUP_MAX keys at most: a stop lands
+		# between commands, and "$(" with hundreds of keys ")" as one would
+		# hold the Windows key for as long as they take.
+		var keys: PackedStringArray = press["keys"]
 		for r in press["repeat"]:
-			runs.append(press)
+			for at in range(0, keys.size(), KEY_GROUP_MAX):
+				if not is_running or gen != _generation:
+					return
+				await _off_thread(b.hold_keys.bind(press["mods"], keys.slice(at, at + KEY_GROUP_MAX), 0, EXTRA_TAP_MS, 0, 0))
+				if not _typed_on(action, b):
+					return
 	if not plain.is_empty():
-		runs.append_array(Array(KeyStrokesT.pieces(plain, PLAIN_PIECE_BYTES)))
-	var gen := _generation
-	var b := backend
-	for run in runs:
+		await _send_plain(action, b, gen, plain)
+
+
+## `plain` to SendKeys in pieces (see PLAIN_PIECE_BYTES), for _type_plain.
+## False once the typing is to end: a stop, or a piece not typed.
+func _send_plain(action: LoopActionT, b: InputBackendT, gen: int, plain: String) -> bool:
+	for piece in KeyStrokesT.pieces(plain, PLAIN_PIECE_BYTES, PLAIN_PIECE_EVENTS):
 		if not is_running or gen != _generation:
-			return
-		if run is String:
-			await _off_thread(b.send_keys.bind(run))
-		else:
-			await _off_thread(b.hold_keys.bind(run["mods"], run["keys"], 0, EXTRA_TAP_MS, 0, 0))
-		if b.last_skipped:
-			_report_skipped(action)
-			return
+			return false
+		await _off_thread(b.send_keys.bind(piece))
+		if not _typed_on(action, b):
+			return false
+	return true
+
+
+## Whether typing may go on after a key command: not when it was skipped
+## (~Self) or refused - what is left of a text is another text.
+func _typed_on(action: LoopActionT, b: InputBackendT) -> bool:
+	if b.last_skipped:
+		_report_skipped(action)
+		return false
+	return not b.keys_refused
 
 
 ## Types a Key action's text one keystroke at a time (see KeyStrokes.split:
@@ -882,41 +1251,48 @@ func _type_plain(action: LoopActionT) -> void:
 func _type_paced(action: LoopActionT) -> void:
 	var gen := _generation
 	var b := backend
-	# One entry per press: a repeated key ("{ENTER 3}") is three presses, so
-	# a stop lands between them and each gets its own timing.
-	var presses: Array = []
+	# One press at a time: a repeated key ("{ENTER 3}") is three presses, so
+	# a stop lands between them and each gets its own timing. Taken as they
+	# come, not listed ahead (a text can make hundreds of thousands).
+	var first := true
 	for stroke in KeyStrokesT.split(action.keys):
-		var press := KeyStrokesT.parse(stroke)
-		if press.is_empty() or (press["keys"] as PackedStringArray).size() > KEY_GROUP_MAX:
-			presses.append(stroke)   # SendKeys sends it as it is
-		else:
-			for r in press["repeat"]:
-				presses.append(press)
-	for i in presses.size():
-		if not is_running or gen != _generation:
-			return
-		var press: Variant = presses[i]
-		# The helper blocks for the whole press, so it runs off the main thread.
-		var thread := Thread.new()
-		if press is String:
-			thread.start(func(): b.send_keys(press))
-		else:
-			var lead := randi_range(KEY_LEAD_MIN_MS, KEY_LEAD_MAX_MS)
-			var hold := randi_range(KEY_HOLD_MIN_MS, KEY_HOLD_MAX_MS)
-			var gap := randi_range(KEY_PAUSE_MIN_MS, KEY_PAUSE_MAX_MS)
-			var trail := randi_range(KEY_TRAIL_MIN_MS, KEY_TRAIL_MAX_MS)
-			thread.start(func(): b.hold_keys(press["mods"], press["keys"], lead, hold, gap, trail))
-		while thread.is_alive():
-			await get_tree().process_frame
-		thread.wait_to_finish()
-		if b.last_skipped:
-			_report_skipped(action)
-			return
-		if i < presses.size() - 1:
-			var pause := randi_range(KEY_PAUSE_MIN_MS, KEY_PAUSE_MAX_MS)
-			if randi_range(1, KEY_PAUSE_LONG_EVERY) == 1:
-				pause = randi_range(KEY_PAUSE_LONG_MIN_MS, KEY_PAUSE_LONG_MAX_MS)
-			await _sleep_ms(pause)
+		var parsed := KeyStrokesT.parse(stroke)
+		# A group of any length goes KEY_PACED_GROUP keys to a command (see
+		# below), its modifiers - the Win key's $ too - with each: only what
+		# is not a press at all goes to SendKeys.
+		var whole := parsed.is_empty()
+		for r in (1 if whole else int(parsed["repeat"])):
+			if not is_running or gen != _generation:
+				return
+			if not first:
+				var pause := randi_range(KEY_PAUSE_MIN_MS, KEY_PAUSE_MAX_MS)
+				if randi_range(1, KEY_PAUSE_LONG_EVERY) == 1:
+					pause = randi_range(KEY_PAUSE_LONG_MIN_MS, KEY_PAUSE_LONG_MAX_MS)
+				await _sleep_ms(pause)
+				if not is_running or gen != _generation:
+					return
+			first = false
+			# The helper blocks for the whole press, so it runs off the main thread.
+			if whole:
+				await _off_thread(b.send_keys.bind(stroke))   # SendKeys sends it as it is
+			else:
+				# A group goes KEY_PACED_GROUP keys to a command: each key is held
+				# and paced here, so a whole group in one would keep pressing
+				# (its modifiers down) for seconds after a stop.
+				var keys: PackedStringArray = parsed["keys"]
+				for at in range(0, keys.size(), KEY_PACED_GROUP):
+					if at > 0 and (not is_running or gen != _generation):
+						return
+					var lead := randi_range(KEY_LEAD_MIN_MS, KEY_LEAD_MAX_MS)
+					var hold := randi_range(KEY_HOLD_MIN_MS, KEY_HOLD_MAX_MS)
+					var gap := randi_range(KEY_PAUSE_MIN_MS, KEY_PAUSE_MAX_MS)
+					var trail := randi_range(KEY_TRAIL_MIN_MS, KEY_TRAIL_MAX_MS)
+					await _off_thread(b.hold_keys.bind(parsed["mods"], keys.slice(at, at + KEY_PACED_GROUP), lead, hold, gap, trail))
+					if not _typed_on(action, b):
+						return
+				continue
+			if not _typed_on(action, b):
+				return
 
 
 ## A move with a duration is sent to the helper in pieces of about this
@@ -929,6 +1305,9 @@ const TRAVEL_CHUNK_MS := 200
 ## bends the route a little), showing the travel on the tracker as `label`.
 ## With `ms` 0 it is a jump. A stop ends the travel where the cursor is.
 func _travel(from: Vector2i, to: Vector2i, ms: int, wiggle: bool, label: String) -> void:
+	# Every travel is to a point on a screen (a Move, a Click's, a Drag's, a
+	# Capture's): the cursor is somewhere again (see _cursor_unplaced).
+	_cursor_unplaced = false
 	var path := MousePathT.make(from, to, ms, wiggle)
 	if path.size() <= 2:
 		# A jump — or, going nowhere with a duration (a drag held in place),
@@ -953,13 +1332,12 @@ func _travel(from: Vector2i, to: Vector2i, ms: int, wiggle: bool, label: String)
 			var piece := path.slice(last, end + 1)
 			var piece_ms := roundi(float(ms) * float(end - last) / float(path.size() - 1))
 			last = end
-			var thread := Thread.new()
-			thread.start(func(): b.move_path(piece, piece_ms))
+			var thread := _start_worker(func(): b.move_path(piece, piece_ms))
 			while thread.is_alive():
 				if is_running and gen == _generation:
 					_set_tracker(Vector2i(MousePathT.at(path, float(Time.get_ticks_msec() - started) / float(ms)).round()), true, label)
 				await get_tree().process_frame
-			thread.wait_to_finish()
+			_join_worker(thread)
 	else:
 		while true:
 			var t := float(Time.get_ticks_msec() - started) / float(ms)
@@ -1037,10 +1415,21 @@ func _detect_once(action: LoopActionT, gen: int) -> Vector2i:
 	await get_tree().process_frame
 	await get_tree().process_frame
 	if not is_running or gen != _generation:
-		detect_rect_pinned = false
+		if gen == _generation:
+			detect_rect_pinned = false
 		return Vector2i(-1, -1)
-	var hit := _find_image(action, rect) if action.type == LoopActionT.Type.IMAGE_DETECT else _find_color(action, rect)
-	detect_rect_pinned = false
+	var hit := Vector2i(-1, -1)
+	if action.type == LoopActionT.Type.IMAGE_DETECT:
+		hit = await _find_image(action, rect)
+		if not is_running or gen != _generation:
+			hit = Vector2i(-1, -1)
+	else:
+		hit = await _find_color(action, rect)
+		if not is_running or gen != _generation:
+			hit = Vector2i(-1, -1)
+	# Only this run's pin (a stop has unpinned it already).
+	if gen == _generation:
+		detect_rect_pinned = false
 	return hit
 
 
@@ -1062,7 +1451,11 @@ func _find_color(action: LoopActionT, rect: Rect2i) -> Vector2i:
 	reader.avoid_pid = 0 if feedback else OS.get_process_id()
 	var step := maxi(1, int(ceil(sqrt(float(rect.size.x * rect.size.y) / float(DETECT_MAX_SAMPLES)))))
 	var tolerance := action.roll_tolerance()
-	var result := reader.find_color(rect, action.color, tolerance, step)
+	var colour := action.color
+	# On a worker thread, as an Image Detect's scan: the read may have to
+	# start the helper first (a second or more), and F8 is read on this one.
+	var result: Dictionary = await _scan_off_thread(reader, func() -> Dictionary:
+		return reader.find_color(rect, colour, tolerance, step))
 	if result.is_empty():
 		print("Pixel detect in [%d, %d, %d×%d]: screen read failed (see warning above) -> not found" % [rect.position.x, rect.position.y, rect.size.x, rect.size.y])
 		return Vector2i(-1, -1)
@@ -1098,7 +1491,10 @@ func _find_image(action: LoopActionT, rect: Rect2i) -> Vector2i:
 	reader.avoid_pid = 0 if feedback else OS.get_process_id()
 	var tolerance := action.roll_tolerance()
 	var mismatch := action.roll_mismatch()
-	var result := reader.find_image(rect, action.image_png, tolerance, action.ignore_colour, mismatch, LoopActionT.IMAGE_EDGE)
+	var png := action.image_png
+	var grey := action.ignore_colour
+	var result: Dictionary = await _scan_off_thread(reader, func() -> Dictionary:
+		return reader.find_image(rect, png, tolerance, grey, mismatch, LoopActionT.IMAGE_EDGE))
 	if result.is_empty():
 		print("Image detect in [%d, %d, %d×%d]: screen read failed (see warning above) -> not found" % [rect.position.x, rect.position.y, rect.size.x, rect.size.y])
 		return Vector2i(-1, -1)
@@ -1108,6 +1504,49 @@ func _find_image(action: LoopActionT, rect: Rect2i) -> Vector2i:
 			rect.position.x, rect.position.y, rect.size.x, rect.size.y, size.x, size.y, tolerance, mismatch,
 			", ignore colour" if action.ignore_colour else ""])
 	return hit
+
+
+## Runs a detect's screen read `scan` (a call on `reader`) on a worker
+## thread, letting frames - and a stop - through meanwhile; a stop ends the
+## read (see _interrupt_helper). Returns what `scan` returned.
+func _scan_off_thread(reader: InputBackendT, scan: Callable) -> Dictionary:
+	var thread := Thread.new()
+	_detect_thread = thread
+	_scan_threads.append(thread)
+	_detect_reader = reader
+	thread.start(scan)
+	while thread.is_alive():
+		await get_tree().process_frame
+	var result: Dictionary = thread.wait_to_finish()
+	_scan_threads.erase(thread)
+	if _detect_thread == thread:
+		_detect_thread = null
+		_detect_reader = null
+	return result
+
+
+## Set when a Move was skipped for having no screen to go to (see MOVE):
+## what presses "where the cursor is" waits for a point that lands.
+var _cursor_unplaced := false
+
+
+## True (and said on the status line) when one of `points` of a press or a
+## drag is on no screen: Windows would press it at the nearest screen's edge
+## (a window's Close button, the taskbar's corner), where nothing shows it.
+func _off_screens(action: LoopActionT, points: Array) -> bool:
+	var count := DisplayServer.get_screen_count()
+	if count <= 0:
+		return false
+	for p in points:
+		var on := false
+		for screen in count:
+			if Rect2i(DisplayServer.screen_get_position(screen), DisplayServer.screen_get_size(screen)).has_point(p):
+				on = true
+				break
+		if not on:
+			emit_signal("status", "%s skipped: its point (%d, %d) is on no screen." % [LoopActionT.type_name(action.type), p.x, p.y])
+			return true
+	return false
 
 
 ## The rect every connected display lies in (screen coordinates), or an

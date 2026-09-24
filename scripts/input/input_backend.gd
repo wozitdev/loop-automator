@@ -8,7 +8,61 @@ class_name InputBackend
 ## a loop cannot drive the app that is running it.
 var avoid_pid: int = 0
 ## True when the most recent input command was skipped because of `avoid_pid`.
-var last_skipped: bool = false
+var last_skipped: bool:
+	get: return _flag("skipped")
+	set(value): _set_flag("skipped", value)
+## True when the most recent input command may not have happened: it failed,
+## or the helper ended without answering (a button meant to come up may
+## still be down).
+var last_failed: bool:
+	get: return _flag("failed")
+	set(value): _set_flag("failed", value)
+
+## The two above, per backend and per thread: a run's worker finishing its
+## piece while a stop's release runs on the main thread would otherwise set
+## the release's outcome to its own (a failed release read as done, and not
+## tried again). A worker's are the caller's once it is joined (see
+## adopt_flags). Thread id -> backend instance id -> name -> value.
+static var _flags := {}
+static var _flags_mutex := Mutex.new()
+
+
+func _flag(name: String) -> bool:
+	_flags_mutex.lock()
+	var mine: Dictionary = _flags.get(OS.get_thread_caller_id(), {}).get(get_instance_id(), {})
+	var value: bool = mine.get(name, false)
+	_flags_mutex.unlock()
+	return value
+
+
+func _set_flag(name: String, value: bool) -> void:
+	_flags_mutex.lock()
+	var thread: Dictionary = _flags.get_or_add(OS.get_thread_caller_id(), {})
+	var mine: Dictionary = thread.get_or_add(get_instance_id(), {})
+	mine[name] = value
+	_flags_mutex.unlock()
+
+
+## Makes what the last commands of thread `id` (a worker just joined) came
+## to, backend by backend, the calling thread's: the caller reads them after
+## the join.
+static func adopt_flags(id: int) -> void:
+	_flags_mutex.lock()
+	var theirs: Dictionary = _flags.get(id, {})
+	_flags.erase(id)
+	var ours: Dictionary = _flags.get_or_add(OS.get_thread_caller_id(), {})
+	for backend_id in theirs:
+		ours[backend_id] = theirs[backend_id]
+	_flags_mutex.unlock()
+## Set when a key command was not sent at all (no way to send it safely);
+## stays set until the engine clears it for a new run.
+var keys_refused: bool = false
+## Set by run_captured when the helper ended without answering (a stop's
+## interrupt, or a timeout): it may have died with the button down.
+var last_cut_off: bool = false
+## Bumped by interrupt() and shutdown(): an image scan in script (find_image,
+## which nothing else can cut short) that started before gives up.
+var scan_generation: int = 0
 
 func backend_name() -> String:
 	return "Abstract"
@@ -30,11 +84,33 @@ func shutdown(_wait: bool = false) -> void:
 func settled() -> bool:
 	return true
 
+## True while the backend is still getting ready (a helper starting) and a
+## command now would wait for that on the calling thread.
+func warming() -> bool:
+	return false
+
+## True when the backend's helper is not running (it died, or a stop ended
+## it) and the next command would start it on the calling thread.
+func helper_down() -> bool:
+	return false
+
+## True when the backend's helper could not be started a moment ago (and
+## is not tried again yet): input would go to a process started per command
+## on the calling thread, a second or so each, nothing able to cut it short.
+func helper_unavailable() -> bool:
+	return false
+
 ## Cuts short a command the backend is in the middle of on another thread
 ## (a captured action runs for its whole dwell as one helper command, the
 ## real cursor pinned meanwhile): the call waiting on it returns with
 ## nothing, and the backend is usable again afterwards. Main thread.
 func interrupt() -> void:
+	pass
+
+## Forgets an interrupt nothing spent (a stop between two commands of an
+## action): a new run's first command is not the one it was meant for.
+## Main thread, with no worker of the last run left.
+func clear_interrupt() -> void:
 	pass
 
 func move_to(pos: Vector2i) -> void:
@@ -184,8 +260,13 @@ func find_image(rect: Rect2i, png: PackedByteArray, tolerance: int, grey: bool =
 	var tc := (th / 2 * tw + tw / 2) * 4
 	var tcx := tw / 2
 	var tcy := th / 2
+	var gen := scan_generation
 	for oy in h - th + 1:
 		for ox in w - tw + 1:
+			# Per offset: with mismatches allowed one offset can cost a whole
+			# template's worth of comparisons.
+			if scan_generation != gen:
+				return {}
 			if allowed == 0 and not _same(data, ((oy + tcy) * w + ox + tcx) * 4, tdata, tc, tolerance, grey):
 				continue
 			if _template_at(data, w, ox, oy, tdata, tw, th, tolerance, grey, allowed, e):

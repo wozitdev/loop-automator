@@ -14,6 +14,7 @@ config/name="Loop Automator"
 config/version="0.0.0-dev"
 config/description="Visual TAS-style builder for automated mouse/keyboard loops with a screen overlay."
 run/main_scene="res://scenes/main.tscn"
+config/disable_project_settings_override=true
 config/features=PackedStringArray("4.7")
 config/icon="res://icon.svg"
 boot_splash/bg_color=Color(0.2039, 0.2353, 0.3059, 1)

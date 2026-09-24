@@ -38,6 +38,13 @@ public class StopKey {
   [DllImport(\"user32.dll\")] static extern bool UnregisterHotKey(IntPtr h, int id);
   [DllImport(\"user32.dll\")] static extern bool PeekMessage(out Msg m, IntPtr h, uint lo, uint hi, uint remove);
   static volatile bool done = false;
+  // F8 with Shift, Ctrl, Alt or Win down too - only while a run is going
+  // ('arm' / 'disarm'): a hotkey fires on its exact modifiers alone, and a
+  // loop holding one (a Key Down of \"^\", a capital's Shift) would make plain
+  // F8 stop nothing; but held while idle, those shortcuts would be taken
+  // from every other program (Alt+F8 in Office, Shift+F8 in a debugger).
+  static volatile bool wantMods = false;
+  static bool haveMods = false;
   public static int Run(uint vk) {
     Msg m;
     PeekMessage(out m, IntPtr.Zero, 0, 0, 0);  // gives this thread a message queue
@@ -48,18 +55,33 @@ public class StopKey {
     Console.Out.WriteLine(\"ready\"); Console.Out.Flush();
     // Stdin closing (or 'quit') ends the loop: the parent is gone or done.
     Thread reader = new Thread(delegate() {
-      try { string l; while ((l = Console.In.ReadLine()) != null && l != \"quit\") { } } catch { }
+      try {
+        string l;
+        while ((l = Console.In.ReadLine()) != null && l != \"quit\") {
+          if (l == \"arm\") wantMods = true;
+          else if (l == \"disarm\") wantMods = false;
+        }
+      } catch { }
       done = true;
     });
     reader.IsBackground = true;
     reader.Start();
     try {
       while (!done) {
+        // (Registered on this thread, the one that reads its messages. A
+        // combination another program owns is left to it.)
+        if (wantMods != haveMods) {
+          haveMods = wantMods;
+          for (uint mods = 1; mods < 16; mods++) {
+            if (haveMods) RegisterHotKey(IntPtr.Zero, 1 + (int)mods, 0x4000 | mods, vk);
+            else UnregisterHotKey(IntPtr.Zero, 1 + (int)mods);
+          }
+        }
         while (PeekMessage(out m, IntPtr.Zero, 0, 0, 1))
           if (m.message == 0x0312) { Console.Out.WriteLine(\"stop\"); Console.Out.Flush(); }  // WM_HOTKEY
         Thread.Sleep(10);
       }
-    } finally { UnregisterHotKey(IntPtr.Zero, 1); }
+    } finally { for (int id = 1; id <= 16; id++) UnregisterHotKey(IntPtr.Zero, id); }
     return 0;
   }
 }
@@ -116,10 +138,20 @@ func poll() -> bool:
 		elif line.begins_with("error"):
 			state = State.UNAVAILABLE
 			reason = line.substr(6).strip_edges()
-	if state == State.STARTING and not OS.is_process_running(_proc["pid"]):
+	# Armed too: a helper that dies later (killed, crashed) holds F8 no more,
+	# and the status line must not go on saying F8 stops the loop.
+	if (state == State.STARTING or state == State.ARMED) and not OS.is_process_running(_proc["pid"]):
 		state = State.UNAVAILABLE
 		reason = "the helper exited (exit code %d)" % OS.get_process_exit_code(_proc["pid"])
 	return pressed
+
+
+## F8 with Shift / Ctrl / Alt / Win down stops too, while `on` (a run is
+## going): see the helper's 'arm'.
+func set_modifiers(on: bool) -> void:
+	if _proc.is_empty():
+		return
+	(_proc["stdio"] as FileAccess).store_line("arm" if on else "disarm")
 
 
 ## Releases F8 and ends the helper.

@@ -13,9 +13,11 @@
 #
 # Supply chain: every action is pinned to a commit, and every download that
 # ends up in a release build (the Godot editor, the export templates, rcedit)
-# is checked against a known hash before it is unpacked or cached — the
-# Godot files against the release's own SHA512-SUMS.txt, rcedit against the
-# hash recorded below. Bump the hash together with RCEDIT_VERSION.
+# is checked against a hash recorded below before it is unpacked or cached.
+# Bump the hashes together with GODOT_VERSION / RCEDIT_VERSION. The release
+# archives get a build provenance attestation (`gh attestation verify`), so
+# a file swapped on the release page afterwards - its checksum line with it -
+# is caught.
 
 name: Build
 
@@ -31,6 +33,12 @@ permissions:
 
 env:
   GODOT_VERSION: 4.7.2-stable
+  # SHA-512 of the Godot downloads, recorded from the release's
+  # SHA512-SUMS.txt when GODOT_VERSION was set: a release (and its sums file)
+  # swapped out afterwards fails the build. Bump together with GODOT_VERSION.
+  GODOT_SHA512_WIN64: 83decd58fdf67b9d657958a1ae6bf1929c20785315a81effe245874cdc57acb709bf868e00778a96984338c1b29dafdb453c6847747694621c6ecf5da2259993
+  GODOT_SHA512_LINUX: 9aa00f7a605200940bce3027a567b782f49bd8e940dd06ae9e987bd65aee1b1467edd56ed84fcdcbdd44354bf613bdbb4e5d2913e925850368e150c59ed54c65
+  GODOT_SHA512_TEMPLATES: ca4d71c4d7b81dfc15d1a98baa07534aa95b03fdda78a0075b06672e1648d2e5f40980c9adc28d23e1b92e732ee7bf3461997aa804af74ec2fcd7a93ccb84079
   RCEDIT_VERSION: v2.0.0
   RCEDIT_SHA256: 3e7801db1a5edbec91b49a24a094aad776cb4515488ea5a4ca2289c400eade2a
 
@@ -46,6 +54,7 @@ jobs:
             os: windows-latest
             preset: Windows Desktop
             godot_archive: win64.exe.zip
+            godot_sha512_var: GODOT_SHA512_WIN64
             godot_binary: win64_console.exe
             templates: windows_release_x86_64.exe windows_release_x86_64_console.exe
             output: Loop Automator.exe
@@ -53,6 +62,7 @@ jobs:
             os: ubuntu-latest
             preset: Linux
             godot_archive: linux.x86_64.zip
+            godot_sha512_var: GODOT_SHA512_LINUX
             godot_binary: linux.x86_64
             templates: linux_release.x86_64
             output: loop-automator.x86_64
@@ -61,6 +71,10 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Nothing here pushes: the token is not left in .git/config for the
+          # steps that run the checked-out project (import, export, smoke test).
+          persist-credentials: false
 
       - name: Work out the version
         id: version
@@ -79,7 +93,13 @@ jobs:
           fi
           echo "version=$version" | tee -a "$GITHUB_OUTPUT"
 
+      # Not for a release build: the cache is saved after the steps that run
+      # the checked-out project (import, smoke test), so a bad commit on main
+      # could leave an altered editor or template in it, and only the
+      # downloads are checked against their hashes. A tag always starts from
+      # verified downloads.
       - name: Cache Godot and export templates
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/godot
@@ -87,6 +107,8 @@ jobs:
           key: godot-${{ env.GODOT_VERSION }}-${{ matrix.name }}-rcedit-${{ env.RCEDIT_VERSION }}-verified
 
       - name: Install Godot and export templates
+        env:
+          GODOT_SHA512_VAR: ${{ matrix.godot_sha512_var }}  # which of the pinned hashes is the editor's
         run: |
           set -euo pipefail
           base="https://github.com/godotengine/godot/releases/download/$GODOT_VERSION"
@@ -96,14 +118,13 @@ jobs:
 
           # Downloads land in the workspace and are verified before anything
           # is unpacked into the (cached) Godot folder, so a bad download can
-          # never be cached. The sums file is fetched fresh every run.
-          curl -sSL --retry 3 -o SHA512-SUMS.txt "$base/SHA512-SUMS.txt"
-          verify() { grep -E " \*?$1\$" SHA512-SUMS.txt | sha512sum -c -; }
+          # never be cached. The hashes are the ones pinned in env above.
+          verify() { echo "$2  $1" | sha512sum -c -; }
 
           if [ ! -f "$godot_dir/Godot_v${GODOT_VERSION}_${{ matrix.godot_binary }}" ]; then
             editor_zip="Godot_v${GODOT_VERSION}_${{ matrix.godot_archive }}"
             curl -sSL --retry 3 -o "$editor_zip" "$base/$editor_zip"
-            verify "$editor_zip"
+            verify "$editor_zip" "${!GODOT_SHA512_VAR}"
             unzip -oq "$editor_zip" -d "$godot_dir"
             rm "$editor_zip"
           fi
@@ -120,7 +141,7 @@ jobs:
           if $need_templates; then
             tpz="Godot_v${GODOT_VERSION}_export_templates.tpz"
             curl -sSL --retry 3 -o "$tpz" "$base/$tpz"
-            verify "$tpz"
+            verify "$tpz" "$GODOT_SHA512_TEMPLATES"
             unzip -oqj "$tpz" "${members[@]}" -d "$templates_dir"
             rm "$tpz"
           fi
@@ -135,7 +156,6 @@ jobs:
             fi
             cygpath -w "$godot_dir" >> "$GITHUB_PATH"
           fi
-          rm SHA512-SUMS.txt
           ls -la "$godot_dir" "$templates_dir"
 
       - name: Export ${{ matrix.preset }}
@@ -178,10 +198,14 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write      # build provenance (attest step)
+      attestations: write
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false  # gh uses GH_TOKEN; git itself never pushes
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -206,6 +230,15 @@ jobs:
 
           (cd release && sha256sum -- * > SHA256SUMS.txt && cat SHA256SUMS.txt)
 
+      # Signed proof, kept by GitHub apart from the release page, that these
+      # archives came from this workflow at this commit:
+      #   gh attestation verify <file> --repo <owner>/loop-automator
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            release/*.zip
+            release/*.tar.gz
+
       - name: Create draft release
         run: |
           set -euo pipefail
@@ -222,7 +255,9 @@ jobs:
 
           Unzip and run **Loop Automator.exe** (Windows) or \`./loop-automator.x86_64\` (Linux).
           Windows SmartScreen may warn that the app is unrecognised because the binary is not
-          code-signed – choose **More info → Run anyway**. Checksums are in \`SHA256SUMS.txt\`.
+          code-signed – choose **More info → Run anyway**. Checksums are in \`SHA256SUMS.txt\`;
+          \`gh attestation verify <file> --repo $GITHUB_REPOSITORY\` checks that a download was built
+          by this repository's workflow.
 
           EOF
           gh api -X POST "repos/$GITHUB_REPOSITORY/releases/generate-notes" \

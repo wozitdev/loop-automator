@@ -14,10 +14,16 @@ const LayerNamesT := preload("res://scripts/model/layer_names.gd")
 const STORE_VERSION := 1
 const STORE_INDEX_PATH := "user://loop_store.json"
 const STORE_LOOPS_DIR := "user://loops"
+## What an imported loop's name starts with (see import_loop), and how much
+## of the file's own name it keeps after it.
+const IMPORTED_MARK := "(imported)"
+const IMPORTED_BASE_CHARS := 60
 
 signal project_replaced                  ## A whole new project was loaded/created
 signal layers_changed                    ## Layers added/removed/reordered/renamed
 signal actions_changed(layer_index: int) ## Action list of a layer changed
+signal limit_reached(message: String)    ## An add or duplicate refused: the loop is full
+signal notice(message: String)           ## Something the user should know (the status line)
 signal action_modified(layer_index: int, action_index: int)
 signal selection_changed                 ## Active layer / action selection changed
 signal overlay_view_changed              ## Overlay layer / show-all toggled
@@ -48,13 +54,55 @@ var _session_projects_by_id: Dictionary = {}
 var _pending_by_id: Dictionary = {}
 
 
+## The process id of the copy of Loop Automator using the data folder, for
+## a second copy to find (see _ready).
+const INSTANCE_PATH := "user://running.pid"
+## Set when another copy is running: this one touches nothing and quits.
+var another_instance := false
+
+
 func _ready() -> void:
+	# One copy at a time: two would give new loops the same number (one's
+	# file written over the other's), each write its own list of loops over
+	# the other's, and the second's F8 would start or stop the first's run.
+	var other := int(FileAccess.get_file_as_string(INSTANCE_PATH).strip_edges())
+	if other > 0 and other != OS.get_process_id() and _is_this_app(other):
+		another_instance = true
+		OS.alert("Loop Automator is already running. Use that window: a second copy would write over its loops.", "Loop Automator")
+		get_tree().quit()
+		return
+	var f := FileAccess.open(INSTANCE_PATH, FileAccess.WRITE)
+	if f != null:
+		f.store_string(str(OS.get_process_id()))
+		f.close()
 	_ensure_store_dirs()
 	_load_or_init_store()
 	if loop_stack.is_empty():
 		create_loop(true)
 	elif not open_loop(active_loop_id):
 		open_loop(loop_stack[0].get("id", -1))
+
+
+## Whether process `pid` is running and is this program (the same exe name:
+## a number a crashed copy left may belong to something else by now).
+## Asked of tasklist, from System32 by its full path (OS.is_process_running
+## knows only the processes this one started).
+static func _is_this_app(pid: int) -> bool:
+	if OS.get_name() != "Windows":
+		return false
+	var tasklist := OS.get_environment("SystemRoot").path_join("System32").path_join("tasklist.exe")
+	if not FileAccess.file_exists(tasklist):
+		return false
+	var out: Array = []
+	if OS.execute(tasklist, PackedStringArray(["/FI", "PID eq %d" % pid, "/FO", "CSV", "/NH"]), out) != 0 or out.is_empty():
+		return false
+	var line := String(out[0]).strip_edges()
+	return line.to_lower().begins_with("\"%s\"," % OS.get_executable_path().get_file().to_lower())
+
+
+func _exit_tree() -> void:
+	if not another_instance and int(FileAccess.get_file_as_string(INSTANCE_PATH).strip_edges()) == OS.get_process_id():
+		DirAccess.remove_absolute(ProjectSettings.globalize_path(INSTANCE_PATH))
 
 
 # ---------------------------------------------------------------- selection
@@ -91,6 +139,8 @@ func selected_action() -> LoopActionT:
 
 # ------------------------------------------------------------------- layers
 func add_layer() -> void:
+	if not _has_room(0, 1):
+		return
 	var l := LoopLayerT.make("Layer %d" % (project.layers.size() + 1), project.layers.size())
 	project.layers.append(l)
 	active_layer_index = project.layers.size() - 1
@@ -143,6 +193,8 @@ func duplicate_layer(index: int) -> void:
 	if index < 0 or index >= project.layers.size():
 		return
 	var source: LoopLayerT = project.layers[index]
+	if not _has_room(source.actions.size(), 1):
+		return
 	# Through the file format, so nothing is shared with the original.
 	var copy := LoopLayerT.from_dict(source.to_dict())
 	var taken: Array = []
@@ -157,6 +209,22 @@ func duplicate_layer(index: int) -> void:
 	_view_follows_active()
 	emit_signal("layers_changed")
 	emit_signal("selection_changed")
+
+
+## Whether the open loop has room for `actions` more actions and `layers`
+## more layers (LOOP_ACTIONS_MAX, LOOP_LAYERS_MAX): a loop past them saves,
+## and exports, as a file no Import takes. Says so (limit_reached) if not.
+func _has_room(actions: int, layers: int = 0) -> bool:
+	var total := 0
+	for l in project.layers:
+		total += l.actions.size()
+	if total + actions > LOOP_ACTIONS_MAX:
+		emit_signal("limit_reached", "The loop is full: %d actions at most." % LOOP_ACTIONS_MAX)
+		return false
+	if project.layers.size() + layers > LOOP_LAYERS_MAX:
+		emit_signal("limit_reached", "The loop is full: %d layers at most." % LOOP_LAYERS_MAX)
+		return false
+	return true
 
 
 func move_layer(index: int, delta: int) -> void:
@@ -187,7 +255,8 @@ func _view_follows_active() -> void:
 func rename_layer(index: int, new_name: String) -> void:
 	if index < 0 or index >= project.layers.size():
 		return
-	project.layers[index].name = LoopLayerT.clean_name(new_name)
+	var name := LoopLayerT.clean_name(new_name)
+	project.layers[index].name = name if not LoopLayerT.is_blank(name) else "Layer %d" % (index + 1)
 	_mark_pending()
 	_sync_loop_name()
 	emit_signal("layers_changed")
@@ -201,8 +270,11 @@ func _sync_loop_name() -> void:
 	var name := project.layers[0].name.strip_edges()
 	if name.is_empty():
 		name = str(active_loop_id)
-	project.name = name
 	var idx := _loop_index_from_id(active_loop_id)
+	# An imported loop keeps its mark whatever its first layer is called.
+	if idx >= 0 and bool(loop_stack[idx].get("imported", false)) and not name.begins_with(IMPORTED_MARK):
+		name = "%s %s" % [IMPORTED_MARK, name]
+	project.name = name
 	if idx < 0 or String(loop_stack[idx].get("name", "")) == name:
 		return
 	loop_stack[idx]["name"] = name
@@ -221,7 +293,7 @@ func loop_names() -> Array:
 # ------------------------------------------------------------------ actions
 func add_action(type: int) -> void:
 	var layer := active_layer()
-	if layer == null:
+	if layer == null or not _has_room(1):
 		return
 	layer.actions.append(LoopActionT.new_of_type(type))
 	selected_action_index = layer.actions.size() - 1
@@ -230,20 +302,41 @@ func add_action(type: int) -> void:
 	emit_signal("selection_changed")
 
 
-## Puts `actions` on the end of the active layer (a recording) and selects
-## the first of them.
-func append_actions(actions: Array) -> void:
-	var layer := active_layer()
-	if layer == null or actions.is_empty():
-		return
+## Puts `actions` on the end of `layer` of loop `loop_id` (a recording, into
+## the layer it was asked about) - which need not be the one open: nothing
+## is switched to, so a question open meanwhile about another layer or loop
+## still means what it says. As many as that loop has room for
+## (LOOP_ACTIONS_MAX: a loop past it would save, and export, as a file no
+## Import takes). Returns how many that was, or -1 if the loop or the layer
+## is gone.
+func append_actions(loop_id: int, layer: LoopLayerT, actions: Array) -> int:
+	var key := str(loop_id)
+	var p: LoopProjectT = project if loop_id == active_loop_id else _session_projects_by_id.get(key)
+	if p == null or layer == null or not p.layers.has(layer) or _loop_index_from_id(loop_id) < 0:
+		return -1
+	if actions.is_empty():
+		return 0
+	var total := 0
+	for l in p.layers:
+		total += l.actions.size()
+	var room := maxi(0, LOOP_ACTIONS_MAX - total)
+	if room == 0:
+		return 0
 	var first := layer.actions.size()
-	for a in actions:
+	for a in actions.slice(0, room):
 		layer.actions.append(a)
-	selected_action_index = first
-	_mark_pending()
-	emit_signal("actions_changed", active_layer_index)
-	emit_signal("selection_changed")
-
+	if loop_id == active_loop_id:
+		_mark_pending()
+		var at := p.layers.find(layer)
+		if at == active_layer_index:
+			selected_action_index = first
+		emit_signal("actions_changed", at)
+		emit_signal("selection_changed")
+	else:
+		_session_projects_by_id[key] = p
+		_pending_by_id[key] = true
+		emit_signal("loop_stack_changed")
+	return mini(room, actions.size())
 
 func remove_action(index: int) -> void:
 	var layer := active_layer()
@@ -258,7 +351,7 @@ func remove_action(index: int) -> void:
 
 func duplicate_action(index: int) -> void:
 	var layer := active_layer()
-	if layer == null or index < 0 or index >= layer.actions.size():
+	if layer == null or index < 0 or index >= layer.actions.size() or not _has_room(1):
 		return
 	layer.actions.insert(index + 1, layer.actions[index].duplicate_action())
 	selected_action_index = index + 1
@@ -281,6 +374,14 @@ func move_action(index: int, delta: int) -> void:
 	_mark_pending()
 	emit_signal("actions_changed", active_layer_index)
 	emit_signal("selection_changed")
+
+
+## A layer's Visible, Enabled or colour was changed in place: the loop is
+## unsaved, as after any other edit (an imported loop is saved on import,
+## and a layer switched off there must not run again after a restart).
+func notify_layer_modified() -> void:
+	_mark_pending()
+	emit_signal("layers_changed")
 
 
 func notify_action_modified() -> void:
@@ -339,7 +440,8 @@ func create_loop(open_now: bool = true, source: LoopProjectT = null) -> int:
 	# not list (the index was lost or reset, and numbering started over).
 	# It is never written over: the new loop takes the next free number, and
 	# the old file stays where Share → Import can bring it back.
-	while FileAccess.file_exists(_loop_file_path(id)):
+	while FileAccess.file_exists(_loop_file_path(id)) or FileAccess.file_exists(_loop_file_path(id) + ".tmp") \
+			or FileAccess.file_exists(_loop_file_path(id) + ".broken"):
 		id += 1
 	_next_loop_id = id + 1
 	var p := source
@@ -368,6 +470,19 @@ func create_loop(open_now: bool = true, source: LoopProjectT = null) -> int:
 ## The most a .loop file may be to be read at all: room for a few dozen
 ## screen-sized templates, well short of what would stall the app.
 const LOOP_FILE_MAX_BYTES := 64 * 1024 * 1024
+## What a loop file may hold, checked before any of it is built: every
+## action is an object of some seventy fields and every template is decoded
+## whole, so a small file of millions of "{}" or of tiny PNGs claiming 2048²
+## would otherwise take gigabytes to read. Far above any loop made here (a
+## long recording is some thousands of actions).
+const LOOP_LAYERS_MAX := 1000
+const LOOP_ACTIONS_MAX := 50000
+## Pixels of every Image Detect template together: a dozen screen-sized
+## ones, or hundreds of button-sized ones.
+const LOOP_TEMPLATE_PIXELS_MAX := 48 * 1024 * 1024
+## Objects, lists and list entries the JSON may have before it is parsed
+## at all (the parse is the first thing to cost memory per value).
+const LOOP_JSON_SEPARATORS_MAX := 4000000
 
 
 ## The loop in a .loop file, or null if `path` is not a readable loop file.
@@ -377,54 +492,139 @@ func _read_loop_file(path: String) -> LoopProjectT:
 	var f := FileAccess.open(path, FileAccess.READ)
 	if f == null:
 		return null
-	return _read_loop(f)
+	return _read_loop(f, true)
 
 
 ## The loop in the open file `f` (closed here), or null if its contents are
-## not a loop (or it is too big to read).
-func _read_loop(f: FileAccess) -> LoopProjectT:
-	if f.get_length() > LOOP_FILE_MAX_BYTES:
+## not a loop (or it is too big to read). `shared`: a file from anywhere
+## (Import), held to the LOOP_* limits. A loop of the store's own was built
+## in this app, which does not hold edits to them: it is read whatever its
+## size, rather than set aside as broken on the next launch.
+func _read_loop(f: FileAccess, shared: bool) -> LoopProjectT:
+	if shared and f.get_length() > LOOP_FILE_MAX_BYTES:
 		f.close()
 		return null
 	var text := f.get_as_text()
 	f.close()
+	if shared and text.count("{") + text.count("[") + text.count(",") > LOOP_JSON_SEPARATORS_MAX:
+		return null
 	var data: Variant = JSON.parse_string(text)
-	if typeof(data) != TYPE_DICTIONARY:
+	if typeof(data) != TYPE_DICTIONARY or (shared and not _within_limits(data)):
 		return null
 	return LoopProjectT.from_dict(data)
 
 
-## What a .loop file holds, for the question asked before it is imported:
-## {"name": its first layer's name, "layers": count, "actions": count,
-## "keys": the text of every Key action, in order}. Empty if the file is
-## not a readable loop file. Nothing is added to the store.
-func peek_loop(path: String) -> Dictionary:
-	var p := _read_loop_file(path)
-	if p == null:
-		return {}
+## Whether a parsed loop file keeps to LOOP_LAYERS_MAX, LOOP_ACTIONS_MAX and
+## LOOP_TEMPLATE_PIXELS_MAX. Templates are measured by the size their PNG
+## header declares, before anything is decoded.
+static func _within_limits(data: Dictionary) -> bool:
+	var layers: Variant = data.get("layers", [])
+	if typeof(layers) != TYPE_ARRAY:
+		return true
+	if (layers as Array).size() > LOOP_LAYERS_MAX:
+		return false
+	var actions := 0
+	var pixels := 0
+	for layer in layers:
+		if typeof(layer) != TYPE_DICTIONARY:
+			continue
+		var list: Variant = (layer as Dictionary).get("actions", [])
+		if typeof(list) != TYPE_ARRAY:
+			continue
+		actions += (list as Array).size()
+		if actions > LOOP_ACTIONS_MAX:
+			return false
+		for a in list:
+			# (Only an Image Detect keeps a template, see LoopAction.from_dict.)
+			if typeof(a) != TYPE_DICTIONARY or typeof((a as Dictionary).get("image")) != TYPE_STRING \
+					or LoopActionT.read_int(a, "type", -1) != LoopActionT.Type.IMAGE_DETECT:
+				continue
+			# The whole string, as the load decodes it (the decoder skips
+			# line breaks, so the first characters are not the first bytes).
+			var declared := LoopActionT.png_size(Marshalls.base64_to_raw(String(a["image"])))
+			# One over the side limit is refused undecoded (see set_image_png).
+			if declared.x > LoopActionT.IMAGE_MAX_SIDE or declared.y > LoopActionT.IMAGE_MAX_SIDE:
+				continue
+			pixels += maxi(0, declared.x) * maxi(0, declared.y)
+			if pixels > LOOP_TEMPLATE_PIXELS_MAX:
+				return false
+	return true
+
+
+## The loop in a .loop file for Import, or null if `path` is not a readable
+## loop file. Nothing is added to the store: what peek_loop shows and what
+## import_loop brings in is this one read, so a file changed on disk while
+## the question is up is never imported unseen.
+func read_import(path: String) -> LoopProjectT:
+	return _read_loop_file(path)
+
+
+## What a loop read for Import holds, for the question asked before it is
+## imported: {"name": its first layer's name, "layers": count, "actions":
+## count, "keys": the text of every Key action, in order}.
+func peek_loop(p: LoopProjectT) -> Dictionary:
 	var actions := 0
 	var keys: Array[String] = []
 	for layer in p.layers:
 		actions += layer.actions.size()
 		for a in layer.actions:
 			if a.type == LoopActionT.Type.KEY:
-				keys.append(a.keys_shown())
+				# As it is typed; the question marks it for showing (see
+				# LoopAction.ltr_marked) after measuring and cutting it.
+				keys.append(a.keys)   # (cleaned when it was read)
 	return {"name": p.layers[0].name, "layers": p.layers.size(), "actions": actions, "keys": keys}
 
 
-## Brings a .loop file into the store as a new loop (written to the store
-## right away, so it is there next time) and opens it. Returns the new
-## loop's id, or -1 if `path` is not a readable loop file.
-func import_loop(path: String) -> int:
-	var source := _read_loop_file(path)
-	if source == null:
-		return -1
+## Brings a loop read by read_import into the store as a new loop (written
+## to the store right away, so it is there next time) and opens it. Returns
+## the new loop's id.
+func import_loop(source: LoopProjectT) -> int:
+	# The Safe dry-run the import question asks for walks every detect
+	# through (see LoopAction.safe_continue): a file that turned that off
+	# could have a guard skip, in Safe, the very layer Live then runs.
+	for layer in source.layers:
+		for a in layer.actions:
+			a.safe_continue = true
+	# Never under the name of a loop already here: a stranger's file named
+	# like one of the user's would sit beside it in the picker, told apart
+	# by nothing but its place.
+	# Compared as they look, not as they are spelled: a no-break space, a
+	# decomposed accent or another case reads the same in the picker.
+	var taken: Array = []
+	for existing in loop_names():
+		taken.append(_name_skeleton(existing))
+	# Always marked as imported, not only when a name matches: a look-alike
+	# letter (a Cyrillic "а") passes any comparison and reads the same.
+	# In front, where a picker or status line cut to its width still shows it.
+	# (Cleaned again after the cut: it can leave a joiner last.)
+	var base := LoopLayerT.clean_name(source.layers[0].name.left(IMPORTED_BASE_CHARS))
+	var name := "%s %s" % [IMPORTED_MARK, base]
+	var n := 2
+	while _name_skeleton(name) in taken:
+		name = "%s %d %s" % [IMPORTED_MARK, n, base]
+		n += 1
+	source.layers[0].name = name
 	var id := create_loop(false, source)
+	# ...and remembered with the loop: it is named after whichever layer is
+	# first, and a layer moved up or the first one deleted must not give it
+	# an unmarked name (see _sync_loop_name).
+	loop_stack[_loop_index_from_id(id)]["imported"] = true
 	var key := str(id)
 	if _write_project_file(_loop_file_path(id), _session_projects_by_id[key]) == OK:
 		_pending_by_id[key] = false
 	_open_project_for_id(id)
 	return id
+
+
+## `name` as it reads rather than as it is spelled, for telling two names
+## apart: no accents, no case, no spaces of any kind.
+static func _name_skeleton(name: String) -> String:
+	if _spaces == null:
+		# (Joiners and selectors too: they show as nothing.)
+		_spaces = RegEx.create_from_string("[\\p{Z}\\s\\x{200C}\\x{200D}\\x{FE0E}\\x{FE0F}]+")
+	var plain := TextServerManager.get_primary_interface().strip_diacritics(name).to_lower()
+	return _spaces.sub(plain, "", true)
+static var _spaces: RegEx = null
 
 
 ## Adds a copy of the current loop to the store and opens it: the same
@@ -439,7 +639,16 @@ func duplicate_loop() -> int:
 	# Through the file format, so nothing is shared with the original.
 	var copy := LoopProjectT.from_dict(project.to_dict())
 	copy.layers[0].name = copy_name(project.layers[0].name, loop_names())
-	return create_loop(true, copy)
+	# A copy of an imported loop is still someone else's loop: it keeps the
+	# mark (see import_loop).
+	var idx := _loop_index_from_id(active_loop_id)
+	var imported := idx >= 0 and bool(loop_stack[idx].get("imported", false))
+	var id := create_loop(false, copy)
+	if imported:
+		loop_stack[_loop_index_from_id(id)]["imported"] = true
+		_save_store_index()
+	_open_project_for_id(id)
+	return id
 
 
 ## "<original> copy", or "<original> copy N" from 2 up when that is in `taken`.
@@ -470,6 +679,13 @@ func delete_loop(loop_id: int) -> bool:
 	var file := String(entry.get("file", ""))
 	if not file.is_empty() and FileAccess.file_exists(file):
 		DirAccess.remove_absolute(ProjectSettings.globalize_path(file))
+	# ...and a copy a save cut short left beside it (it can hold all of the
+	# loop - what Rec recorded typing too): the question says the file goes.
+	# (And one set aside as unreadable - see _read_project_file - which can
+	# hold all of it too.)
+	for leftover in [file + ".tmp", file + ".broken"]:
+		if not file.is_empty() and FileAccess.file_exists(leftover):
+			DirAccess.remove_absolute(ProjectSettings.globalize_path(leftover))
 	if loop_stack.is_empty():
 		active_loop_id = -1
 		create_loop(true)
@@ -524,6 +740,15 @@ func active_loop_is_pending() -> bool:
 	if active_loop_id < 0:
 		return false
 	return bool(_pending_by_id.get(str(active_loop_id), false))
+
+
+## How many loops of the list have changes not saved (see main's close).
+func pending_loop_count() -> int:
+	var n := 0
+	for entry in loop_stack:
+		if loop_is_pending(int(entry.get("id", -1))):
+			n += 1
+	return n
 
 
 func loop_is_pending(loop_id: int) -> bool:
@@ -597,7 +822,15 @@ func _ensure_store_dirs() -> void:
 	DirAccess.make_dir_recursive_absolute(abs_dir)
 
 
+## Set when the loop list on disk could not be read, nor kept aside: it is
+## not written over this session (see _load_or_init_store).
+var _store_index_unreadable := false
+## What the app should say about the loop list at start-up, "" if nothing.
+var store_notice := ""
+
+
 func _load_or_init_store() -> void:
+	_recover_tmp(STORE_INDEX_PATH)
 	if not FileAccess.file_exists(STORE_INDEX_PATH):
 		loop_stack = []
 		active_loop_id = -1
@@ -606,6 +839,12 @@ func _load_or_init_store() -> void:
 		return
 	var f := FileAccess.open(STORE_INDEX_PATH, FileAccess.READ)
 	if f == null:
+		# Held by another program (a backup, a sync): not written over this
+		# session (see _save_store_index) - the list of loops is still there
+		# next time. The loops' own files are untouched either way.
+		push_warning("ProjectData: the loop list could not be opened (error %d); it is left as it is." % FileAccess.get_open_error())
+		_store_index_unreadable = true
+		store_notice = "The list of loops could not be opened (another program has it?): loops made or imported now are saved, but will not be listed after a restart - close that program and restart Loop Automator."
 		loop_stack = []
 		active_loop_id = -1
 		_next_loop_id = 1
@@ -614,6 +853,16 @@ func _load_or_init_store() -> void:
 	f.close()
 	var parsed: Variant = JSON.parse_string(text)
 	if typeof(parsed) != TYPE_DICTIONARY:
+		# Not a list of loops (cut short, edited by hand): kept aside, as a
+		# loop file is (see _read_project_file), before a new one is written.
+		var aside := "%s.broken-%d" % [STORE_INDEX_PATH, int(Time.get_unix_time_from_system())]
+		if DirAccess.rename_absolute(ProjectSettings.globalize_path(STORE_INDEX_PATH), ProjectSettings.globalize_path(aside)) == OK:
+			push_warning("ProjectData: the loop list was not readable; kept as %s." % aside.get_file())
+			store_notice = "The list of loops was damaged and has been set aside as %s; your loop files are still in the loops folder - bring them back with Import." % aside.get_file()
+		else:
+			push_warning("ProjectData: the loop list was not readable, and could not be kept aside; it is left as it is.")
+			_store_index_unreadable = true
+			store_notice = "The list of loops is damaged and could not be set aside: loops made or imported now are saved, but will not be listed after a restart."
 		loop_stack = []
 		active_loop_id = -1
 		_next_loop_id = 1
@@ -632,6 +881,7 @@ func _load_or_init_store() -> void:
 			"id": id,
 			"name": LoopLayerT.clean_name(LoopActionT.read_string(e, "name", str(id))),
 			"file": _store_loop_file(id, LoopActionT.read_string(e, "file", "")),
+			"imported": LoopActionT.read_bool(e, "imported", false),
 		})
 	_next_loop_id = maxi(1, LoopActionT.read_int(data, "next_loop_id", 1))
 	for e in loop_stack:
@@ -642,13 +892,21 @@ func _load_or_init_store() -> void:
 
 
 func _save_store_index() -> void:
+	if _store_index_unreadable:
+		return
 	var payload := {
 		"version": STORE_VERSION,
 		"next_loop_id": _next_loop_id,
 		"active_loop_id": active_loop_id,
 		"loops": loop_stack,
 	}
-	_write_text_file(STORE_INDEX_PATH, JSON.stringify(payload, "\t"))
+	var err := _write_text_file(STORE_INDEX_PATH, JSON.stringify(payload, "\t"))
+	if err != OK:
+		push_warning("ProjectData: the loop list could not be written (error %d)." % err)
+		# After whatever the flow that wrote it says (a Save's "Saved."), and
+		# for the start-up message too if it happened before anyone listened.
+		store_notice = "The list of loops could not be written (disk full?): loops changed since are saved, but the list of them may be out of date after a restart."
+		emit_signal.call_deferred("notice", store_notice)
 
 
 func _loop_index_from_id(loop_id: int) -> int:
@@ -681,13 +939,14 @@ static func _store_loop_file(loop_id: int, raw: String) -> String:
 ## otherwise write over it - and the loop opens empty. One that cannot be
 ## opened at all (held by another program) is left where it is.
 func _read_project_file(path: String, fallback_name: String) -> LoopProjectT:
+	_recover_tmp(path)
 	if FileAccess.file_exists(path):
 		var abs := ProjectSettings.globalize_path(path)
 		var f := FileAccess.open(path, FileAccess.READ)
 		if f == null:
 			push_warning("ProjectData: could not open %s (error %d)." % [abs, FileAccess.get_open_error()])
 		else:
-			var loaded := _read_loop(f)
+			var loaded := _read_loop(f, false)
 			if loaded != null:
 				if loaded.name.strip_edges().is_empty():
 					loaded.name = fallback_name
@@ -706,6 +965,19 @@ func _read_project_file(path: String, fallback_name: String) -> LoopProjectT:
 	return p
 
 
+## Puts `path`'s ".tmp" in its place when `path` itself is missing: on
+## Windows the rename in _write_text_file removes the old file first, so a
+## crash right then leaves the whole new file as the .tmp and nothing else -
+## which the next write of the same file would empty. (A .tmp beside a file
+## that is there is a write cut short, and is left alone.)
+static func _recover_tmp(path: String) -> void:
+	var tmp := path + ".tmp"
+	if FileAccess.file_exists(path) or not FileAccess.file_exists(tmp):
+		return
+	if DirAccess.rename_absolute(ProjectSettings.globalize_path(tmp), ProjectSettings.globalize_path(path)) == OK:
+		push_warning("ProjectData: %s was missing; restored it from %s." % [path.get_file(), tmp.get_file()])
+
+
 func _write_project_file(path: String, value: LoopProjectT) -> Error:
 	return _write_text_file(path, value.to_json())
 
@@ -719,10 +991,15 @@ static func _write_text_file(path: String, text: String) -> Error:
 	var f := FileAccess.open(tmp, FileAccess.WRITE)
 	if f == null:
 		return FileAccess.get_open_error()
-	f.store_string(text)
+	var ok := f.store_string(text)
 	var err := f.get_error()
 	f.close()
 	var abs_tmp := ProjectSettings.globalize_path(tmp)
+	# A write that fails at close (a full disk: a small file is written only
+	# then) is not reported by the file: what is on disk is read back and
+	# must be all of it, or the old file would be replaced by an empty one.
+	if err == OK and (not ok or FileAccess.get_file_as_bytes(tmp) != text.to_utf8_buffer()):
+		err = ERR_FILE_CANT_WRITE
 	if err != OK:
 		DirAccess.remove_absolute(abs_tmp)
 		return err

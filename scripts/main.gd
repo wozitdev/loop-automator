@@ -12,8 +12,10 @@ const UiIconsT := preload("res://scripts/ui_icons.gd")
 ## script import order (the global `class_name` registry may lag on first import).
 const LoopActionT := preload("res://scripts/model/loop_action.gd")
 const LoopLayerT := preload("res://scripts/model/loop_layer.gd")
+const LoopProjectT := preload("res://scripts/model/loop_project.gd")
 const RecorderT := preload("res://scripts/input/recorder.gd")
 const RecordingT := preload("res://scripts/model/recording.gd")
+const KeyStrokesT := preload("res://scripts/model/key_strokes.gd")
 
 ## Record (the Rec button): what the user does is recorded by a helper
 ## that listens system-wide (see Recorder) until F8, then turned into actions
@@ -24,6 +26,9 @@ var _recording: bool = false
 ## Bumped when a recording starts or stops, so a countdown still running
 ## for an earlier one does nothing.
 var _record_gen: int = 0
+## The layer (and its loop) a recording was asked about and goes into.
+var _record_layer = null
+var _record_loop_id: int = -1
 ## The Rec dot: grey until pressed, then red with a slow breath while the
 ## recording is on.
 const REC_IDLE_COLOR := Color(0.5, 0.5, 0.5)
@@ -106,6 +111,9 @@ var picker: PickOverlayT
 var _pick_active: bool = false
 var _pick_was_overlay_visible: bool = false
 var _pick_point_cb: Callable = Callable()
+## The action selected when the pick began (what its callback edits): kept
+## to the editor's limits once the pick lands.
+var _pick_action: LoopActionT = null
 var _pick_rect_cb: Callable = Callable()
 ## The builder is got out of the way (~Edit unchecked) so the desktop it
 ## covers is visible: minimised when a run or a recording starts - the
@@ -143,6 +151,13 @@ var _image_preview: AcceptDialog
 
 
 func _ready() -> void:
+	# Another copy is running (see ProjectData._ready): quitting, nothing built.
+	if ProjectData.another_instance:
+		set_process(false)
+		set_process_input(false)
+		return
+	# Closing asks first while loops have changes not saved (see _notification).
+	get_tree().set_auto_accept_quit(false)
 	_configure_window()
 	_build_ui()
 	_connect_signals()
@@ -153,6 +168,9 @@ func _ready() -> void:
 	_create_overlay()
 	_refresh_edit_lock()
 	_show_splash()
+	_warn_points_unsure.call_deferred()
+	if not ProjectData.store_notice.is_empty():
+		(func(): status_label.text = ProjectData.store_notice).call_deferred()
 
 
 ## How long the splash stays before it fades, and how long the fade takes.
@@ -376,7 +394,7 @@ func _build_toolbar() -> Control:
 	# A RangePair like the editor fields: "~" expands it to a min - max pause.
 	# The controls sit in the toolbar row at a fixed width (no expand).
 	_delay_pair = RangePair.new()
-	_delay_pair.build(hb, ProjectData.project.loop_delay_ms, ProjectData.project.loop_delay_ms_max, 0, 60000, func(l: int, h: int):
+	_delay_pair.build(hb, ProjectData.project.loop_delay_ms, ProjectData.project.loop_delay_ms_max, 0, LoopProjectT.LOOP_DELAY_MS_MAX, func(l: int, h: int):
 		ProjectData.set_loop_delay(l, h))
 	_delay_pair.set_suffix("ms")
 	# Wide enough for the biggest value, 60000 ms, to show whole.
@@ -421,7 +439,7 @@ func _build_toolbar() -> Control:
 	hotkey_check = CheckBox.new()
 	hotkey_check.text = "~F8"
 	hotkey_check.focus_mode = Control.FOCUS_NONE
-	hotkey_check.tooltip_text = "Checked: F8 starts and stops the loop from any window while Loop Automator is open (other programs do not get F8 meanwhile), and this window moves out of the way while a loop runs.\nUnchecked: F8 only works while this window has the focus."
+	hotkey_check.tooltip_text = "Checked: F8 starts and stops the loop from any window while Loop Automator is open (other programs do not get F8 meanwhile; while a loop runs, F8 with Shift, Ctrl, Alt or Win stops it too), and this window moves out of the way while a loop runs.\nUnchecked: F8 only works while this window has the focus."
 	hotkey_check.button_pressed = _load_bool_setting("global_hotkey", true)
 	Playback.set_global_hotkey(hotkey_check.button_pressed)
 	hotkey_check.toggled.connect(func(v):
@@ -511,7 +529,7 @@ func _build_layer_panel() -> Control:
 	layer_visible_check.toggled.connect(func(v):
 		var l := ProjectData.active_layer()
 		if l: l.visible = v
-		ProjectData.emit_signal("layers_changed")
+		ProjectData.notify_layer_modified()
 		ProjectData.emit_signal("overlay_view_changed"))
 	vb.add_child(layer_visible_check)
 
@@ -524,7 +542,7 @@ func _build_layer_panel() -> Control:
 	layer_enabled_check.toggled.connect(func(v):
 		var l := ProjectData.active_layer()
 		if l: l.enabled = v
-		ProjectData.emit_signal("layers_changed"))
+		ProjectData.notify_layer_modified())
 	run_row.add_child(layer_enabled_check)
 	layer_solo_check = CheckBox.new()
 	layer_solo_check.text = "Solo"
@@ -541,10 +559,13 @@ func _build_layer_panel() -> Control:
 	color_row.add_child(cl)
 	layer_color_btn = ColorPickerButton.new()
 	layer_color_btn.custom_minimum_size = Vector2(60, 0)
+	# Opaque, as a load keeps it: a see-through layer would draw its name
+	# and its guides as nothing.
+	layer_color_btn.edit_alpha = false
 	layer_color_btn.color_changed.connect(func(c):
 		var l := ProjectData.active_layer()
-		if l: l.color = c
-		ProjectData.emit_signal("layers_changed")
+		if l: l.color = LoopLayerT.readable(c)   # kept readable, as a load keeps it
+		ProjectData.notify_layer_modified()
 		ProjectData.emit_signal("overlay_view_changed"))
 	color_row.add_child(layer_color_btn)
 	vb.add_child(color_row)
@@ -559,12 +580,26 @@ func _build_action_panel() -> Control:
 	panel.add_child(vb)
 
 	actions_header = _section_label("Actions")
+	# Cut to the panel with an ellipsis: a long layer name (a file may give
+	# one of 200 wide characters) would otherwise push the action editor off
+	# the window.
+	actions_header.clip_text = true
+	actions_header.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+	actions_header.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	actions_header.custom_minimum_size.x = 0
 	vb.add_child(actions_header)
 
 	action_list = ItemList.new()
 	action_list.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	action_list.allow_reselect = true
 	action_list.item_selected.connect(func(i): ProjectData.set_selected_action(i))
+	# Rows are fitted to the list's width (see _row_text): again when that changes.
+	action_list.resized.connect(func():
+		# Once the width has settled (a drag of the window's edge, a panel
+		# that flickers a few pixels and back): a list of tens of thousands.
+		if not _refit_queued and int(action_list.size.x) != _rows_fit_width:
+			_refit_queued = true
+			get_tree().create_timer(0.25).timeout.connect(_refit_rows))
 	vb.add_child(action_list)
 
 	var btns := HBoxContainer.new()
@@ -624,9 +659,11 @@ func _build_editor_panel() -> Control:
 #  Signals
 # ======================================================================
 func _connect_signals() -> void:
+	ProjectData.limit_reached.connect(func(message: String): status_label.text = message)
+	ProjectData.notice.connect(func(message: String): status_label.text = message)
 	ProjectData.layers_changed.connect(_refresh_layers)
 	ProjectData.layers_changed.connect(_refresh_layer_props)
-	ProjectData.layers_changed.connect(_refresh_actions)
+	ProjectData.layers_changed.connect(_refresh_actions_for_layers)
 	ProjectData.layers_changed.connect(_refresh_overlay_label)
 	ProjectData.actions_changed.connect(func(_i): _refresh_actions())
 	ProjectData.selection_changed.connect(_on_selection_changed)
@@ -638,19 +675,43 @@ func _connect_signals() -> void:
 
 	Playback.status.connect(func(m): status_label.text = m)
 	Playback.playback_started.connect(func():
+		# The on-screen keyboard is a window of its own, outside the edit
+		# lock: closed for the run, so nothing edits the loop while it runs.
+		_close_key_capture()
+		# A field being edited lets go of the focus: the Keys field shows its
+		# text marked for right-to-left letters only once it is left, and what
+		# is on screen while the loop runs is to be read the way it types.
+		var focused := get_viewport().gui_get_focus_owner()
+		if focused != null:
+			focused.release_focus()
+		# An open list or colour picker outlives the edit lock (disabling its
+		# button leaves the popup up): closed, so nothing edits the loop - a
+		# running detect's colour, an action added to the running layer -
+		# while it runs.
+		for p in _open_popups():
+			p.hide()
 		_stop_cooldown_token += 1
 		_stop_cooldown_active = false
 		play_btn.icon = UiIconsT.stop()
 		play_btn.text = "Run!"
 		_refresh_edit_lock()
 		# ~Edit unchecked: this window is minimised for the run (the taskbar
-		# brings it back; F8 stops the loop from anywhere with ~F8 on).
+		# brings it back; F8 stops the loop from anywhere with ~F8 on). Not
+		# a Live run without the global F8, though: its stop keys work only
+		# while this window has the focus, and its Stop button would be
+		# out of sight while the loop drives the real mouse and keyboard.
+		if Playback.backend != null and Playback.backend.is_real() and not Playback.global_hotkey_armed():
+			return
 		_lower_builder())
 	Playback.playback_stopped.connect(func():
 		var was_real := Playback.backend != null and Playback.backend.is_real()
 		if was_real:
 			_switch_to_safe_backend_if_needed()
-		_restore_builder_after_pick()
+		# Not while a pick or a sample is under way (a Safe run ending in the
+		# middle of one): it brings the builder back itself once it has read
+		# the screen - before, the read would be of the builder.
+		if not _pick_active and not _sample_pending:
+			_restore_builder_after_pick()
 		await _animate_stop_feedback(was_real))
 	Playback.action_executing.connect(_on_action_executing)
 	# The global F8 while idle (~F8): a start, as the Run button (a pick in
@@ -679,6 +740,12 @@ func _on_selection_changed() -> void:
 
 
 func _on_project_replaced() -> void:
+	# Another loop open (picked, stepped to, the last one deleted): back to
+	# Safe, as after an import - with Live left on, one press of Run or an
+	# idle ~F8 from any window would drive the real mouse and keyboard with
+	# a loop that was not the one Live was chosen for.
+	if not Playback.is_running:
+		_switch_to_safe_backend_if_needed()
 	_delay_pair.set_values(ProjectData.project.loop_delay_ms, ProjectData.project.loop_delay_ms_max)
 	delay_each_check.set_pressed_no_signal(ProjectData.project.delay_after_each_action)
 	_refresh_layers()
@@ -687,6 +754,17 @@ func _on_project_replaced() -> void:
 	_rebuild_editor()
 	_refresh_overlay_label()
 	_refresh_loop_stack_ui()
+	_warn_points_unsure(false)
+
+
+## The loop's points may be off (see LoopProject.points_unsure): said on
+## the status line, after whatever it says already.
+func _warn_points_unsure(after: bool = true) -> void:
+	var off: Vector2i = ProjectData.project.points_unsure if ProjectData.project != null else Vector2i.ZERO
+	if off == Vector2i.ZERO:
+		return
+	var warn := "This loop is from an older version, which counted points from the main screen: some of its points may be off by (%d, %d) - check them on the overlay before a Live run." % [off.x, off.y]
+	status_label.text = warn if status_label.text.is_empty() or not after else status_label.text + " " + warn
 
 
 ## The tint behind the step (and the layer) a run is on. The selection is
@@ -701,14 +779,28 @@ func _on_action_executing(_layer_index: int, _action_index: int) -> void:
 ## Tints the row of the step a run is on in the action list (when its layer
 ## is the one shown) and of its layer in the layer list; clears both when
 ## nothing runs.
+## Only the rows that change are touched (the one tinted last and the one
+## now): a run steps through every action, and a loop may have tens of
+## thousands. (A list rebuilt meanwhile starts untinted.)
 func _refresh_running_marks() -> void:
 	var li := Playback.current_layer_index if Playback.is_running else -1
 	var ai := Playback.current_action_index if Playback.is_running else -1
-	for i in action_list.item_count:
-		var on := li == _shown_layer_index and i == ai
-		action_list.set_item_custom_bg_color(i, RUNNING_TINT if on else Color(0, 0, 0, 0))
-	for i in layer_list.item_count:
-		layer_list.set_item_custom_bg_color(i, RUNNING_TINT if i == li else Color(0, 0, 0, 0))
+	var ai_shown := ai if li == _shown_layer_index else -1
+	_tint_row(action_list, _tinted_action, false)
+	_tint_row(action_list, ai_shown, true)
+	_tint_row(layer_list, _tinted_layer, false)
+	_tint_row(layer_list, li, true)
+	_tinted_action = ai_shown
+	_tinted_layer = li
+
+
+var _tinted_action := -1
+var _tinted_layer := -1
+
+
+static func _tint_row(list: ItemList, i: int, on: bool) -> void:
+	if i >= 0 and i < list.item_count:
+		list.set_item_custom_bg_color(i, RUNNING_TINT if on else Color(0, 0, 0, 0))
 
 
 # ======================================================================
@@ -756,20 +848,262 @@ func _refresh_layer_props() -> void:
 
 func _refresh_actions() -> void:
 	action_list.clear()
+	_rows_fit_width = int(action_list.size.x)
 	var l := ProjectData.active_layer()
 	if l != null:
-		actions_header.text = "Actions — %s" % l.name
+		actions_header.text = "Actions — %s" % _quoted(l.name)
 		for i in l.actions.size():
 			var a: LoopActionT = l.actions[i]
-			action_list.add_item("%d. %s" % [i + 1, a.describe()], UiIconsT.mark(a.enabled))
+			action_list.add_item(_row_text(i, a), UiIconsT.mark(a.enabled))
 			if not a.comment.is_empty():
 				action_list.set_item_tooltip(i, a.comment)
 	else:
 		actions_header.text = "Actions"
 	# Remember which layer is shown so selection_changed knows when to repopulate.
 	_shown_layer_index = ProjectData.active_layer_index
+	_shown_layer = l
 	_refresh_actions_selection()
 	_refresh_running_marks()
+
+
+var _shown_layer: LoopLayerT = null
+
+
+## Action `a`'s row (number `i`) in the list, fitted to the list's width,
+## measured: the list would otherwise cut it at its right edge - a Key
+## text's end, what it types last (Win+R, Enter), or a detect's "no skip",
+## gone behind an ellipsis that reads like the rest of a long harmless row.
+## Too wide, it is cut in the middle of what it describes, both ends kept
+## (see _fit_described).
+func _row_text(i: int, a: LoopActionT) -> String:
+	var number := "%d. " % (i + 1)
+	var described := a.describe()
+	# The icon, the margins and the scroll bar take some of the width.
+	var max_px := action_list.size.x - 64.0
+	if action_list.get_theme_font("font") == null or max_px <= 0.0:
+		return number + described
+	var room := max_px - _px(number)
+	var key := "%d\n%s" % [int(room), described]
+	if not _fit_cache.has(key):
+		if _fit_cache.size() > FIT_CACHE_MAX:
+			_fit_cache.clear()
+		_fit_cache[key] = _fit_described(described, room, a)
+	return number + _fit_cache[key]
+
+
+## Fitted rows by room and text (not by row number: a row inserted near the
+## top would miss every one below it), and each piece's width.
+var _fit_cache := {}
+var _px_cache := {}
+const FIT_CACHE_MAX := 100000
+## The list's width its rows were last fitted to (see _refit_rows).
+var _rows_fit_width := -1
+
+
+## `text`'s width in the list's font, from a cache (the same keys, digits
+## and words come back row after row).
+func _px(text: String) -> float:
+	if _px_cache.has(text):
+		return _px_cache[text]
+	if _px_cache.size() > FIT_CACHE_MAX:
+		_px_cache.clear()
+	var w := action_list.get_theme_font("font").get_string_size(text, HORIZONTAL_ALIGNMENT_LEFT, -1, action_list.get_theme_font_size("font_size")).x
+	_px_cache[text] = w
+	return w
+
+
+## `described` (see LoopAction.describe) as it is if it is at most `room`
+## wide, else cut in the middle: a Key's kind ("Key hold 500 ms: \"") and
+## closing quote are never cut, and its text is cut only between keystrokes
+## (KeyStrokes.split, what typing goes by: "$r" is never an "r", "{ENTER}"
+## never "TER}"); anything else between characters. As much of the start
+## and of the end as fits, by width.
+func _fit_described(described: String, room: float, a: LoopActionT) -> String:
+	var key := a.type == LoopActionT.Type.KEY
+	var head := ""
+	var tail := ""
+	var pieces := PackedStringArray()
+	if key and described.ends_with("\"") and described.find("\"") < described.length() - 1:
+		head = described.left(described.find("\"") + 1)
+		tail = "\""
+		# The text before its direction marks (they would read as keys), a
+		# cut describe made kept as one piece between its two ends: neither
+		# end is split again across it.
+		var parts := a.described_key_parts()
+		for i in parts.size():
+			if i > 0:
+				pieces.append(" … ")
+			pieces.append_array(KeyStrokesT.split(parts[i]))
+	else:
+		key = false
+		for c in described:
+			pieces.append(c)
+	var widths := PackedFloat32Array()
+	var total := _px(head) + _px(tail)
+	for p in pieces:
+		widths.append(_px(p))
+		total += widths[widths.size() - 1]
+	if total <= room:
+		return described
+	# Direction marks either side: a right-to-left letter the cut leaves
+	# last would otherwise take the joiner - and what follows it - its way.
+	var joiner := char(0x200E) + " … " + char(0x200E)
+	var left := room - _px(head) - _px(tail) - _px(joiner)
+	# A long "Key hold 1000–25000 ms: " leaves too little for the text: the
+	# text comes first, the numbers (in the editor) give way - and all of the
+	# text, if it fits then.
+	if key and left < _px("^%(WWW)…") * 2 and head.contains(" ms: "):
+		var body := described.substr(head.length(), described.length() - head.length() - tail.length())
+		var text_px := total - _px(head)   # the text and its closing quote
+		head = head.left(head.find(" ", 4)) + "…: \""
+		left = room - _px(head) - _px(tail) - _px(joiner)
+		if _px(head) + text_px <= room:
+			return head + body + tail
+	var n := pieces.size()
+	# A keystroke at either end wider than half the room (a long group) is
+	# shown squeezed - its start, where its modifiers are, and its end, what
+	# it types last - rather than left out, which would hide a modifier or
+	# the whole end; that end then takes nothing more.
+	var used := 0.0
+	var lo := 0
+	var hi := n
+	var start := ""
+	var end := ""
+	var start_done := false
+	var end_done := false
+	if n > 0 and widths[0] > left / 2.0 and (widths[0] > left or pieces[0].length() > SQUEEZE_CHARS):
+		start = _squeezed(pieces[0], left / 2.0)
+		used += _px(start)
+		lo = 1
+		start_done = true
+	if hi > lo and widths[hi - 1] > left / 2.0 and (widths[hi - 1] > left or pieces[hi - 1].length() > SQUEEZE_CHARS):
+		end = _squeezed(pieces[hi - 1], left / 2.0)
+		used += _px(end)
+		hi -= 1
+		end_done = true
+	# Two end keystrokes that do not fit together (short, but wide): each
+	# over half the room is squeezed to its share - both to half, or one to
+	# what the other leaves.
+	if not start_done and not end_done and hi - lo >= 2 and widths[lo] + widths[hi - 1] > left:
+		var half := left / 2.0
+		if widths[hi - 1] > half:
+			end = _squeezed(pieces[hi - 1], half if widths[lo] > half else left - widths[lo])
+			used += _px(end)
+			hi -= 1
+			end_done = true
+		if widths[lo] > half:
+			# (Leaving the end its whole width when that was not squeezed.)
+			start = _squeezed(pieces[lo], left - used if end_done else left - widths[hi - 1])
+			used += _px(start)
+			lo += 1
+			start_done = true
+	# Then a keystroke from each end in turn, while one fits: neither end is
+	# left out for the other's sake (a wide "{ENTER}" last, a wide start).
+	var first := lo
+	var last := hi
+	var grew := true
+	while grew and first < last:
+		grew = false
+		if not start_done and used + widths[first] <= left:
+			used += widths[first]
+			first += 1
+			grew = true
+		if not end_done and first < last and used + widths[last - 1] <= left:
+			used += widths[last - 1]
+			last -= 1
+			grew = true
+	# An end left empty (its keystroke wider than the half left to it, the
+	# other end squeezed) gets what room is left, squeezed, rather than
+	# nothing: the end first, what is typed last.
+	if not end_done and last == hi and last > first and left - used > _px("…"):
+		end = _squeezed(pieces[last - 1], left - used)
+		used += _px(end)
+		last -= 1
+		end_done = true
+	if not start_done and first == lo and first < last and left - used > _px("…"):
+		start = _squeezed(pieces[first], left - used)
+		used += _px(start)
+		first += 1
+		start_done = true
+	if not start_done:
+		start = "".join(pieces.slice(0, first))
+	if not end_done:
+		end = "".join(pieces.slice(last))
+	if key:
+		start = LoopActionT.ltr_marked(start)
+		end = LoopActionT.ltr_marked(end)
+	return head + start + joiner + end + tail
+
+
+## A keystroke this long (a group) is squeezed rather than kept whole at a
+## row's end when it takes more than half the room; a key's name ("{ENTER}")
+## only when it does not fit at all.
+const SQUEEZE_CHARS := 12
+
+
+## `text` in at most `px`: as much of its start and of its end as fits,
+## "…" between (all of it if it fits).
+func _squeezed(text: String, px: float) -> String:
+	if _px(text) <= px:
+		return text
+	var half := maxf(0.0, (px - _px("…")) / 2.0)
+	return _part_fitting(text, half) + "…" + _end_fitting(text, half)
+
+
+## As much of `text`'s end as is at most `px` wide.
+func _end_fitting(text: String, px: float) -> String:
+	var lo := 0
+	var hi := text.length()
+	while lo < hi:
+		var mid := (lo + hi + 1) / 2
+		if _px(text.right(mid)) <= px:
+			lo = mid
+		else:
+			hi = mid - 1
+	return text.right(lo)
+
+## As much of `text`'s start as is at most `px` wide.
+func _part_fitting(text: String, px: float) -> String:
+	var lo := 0
+	var hi := text.length()
+	while lo < hi:
+		var mid := (lo + hi + 1) / 2
+		if _px(text.left(mid)) <= px:
+			lo = mid
+		else:
+			hi = mid - 1
+	return text.left(lo)
+
+
+## The list's rows again when its width has changed since they were last
+## fitted (a height change, or a width back to what they were fitted to,
+## changes nothing).
+func _refit_rows() -> void:
+	_refit_queued = false
+	var width := int(action_list.size.x)
+	if width == _rows_fit_width:
+		return
+	var l := ProjectData.active_layer()
+	if l == null or l != _shown_layer or l.actions.size() != action_list.item_count:
+		return
+	_rows_fit_width = width
+	for i in l.actions.size():
+		action_list.set_item_text(i, _row_text(i, l.actions[i]))
+
+
+var _refit_queued := false
+
+
+## A layer change (a rename, a colour, Visible / Enabled / Solo - a colour
+## picker sends one per step of a drag) rebuilds the action list only when
+## its rows are no longer the shown layer's: a list of tens of thousands
+## takes seconds to build.
+func _refresh_actions_for_layers() -> void:
+	var l := ProjectData.active_layer()
+	if l == null or l != _shown_layer or l.actions.size() != action_list.item_count:
+		_refresh_actions()
+		return
+	actions_header.text = "Actions — %s" % _quoted(l.name)
 
 
 func _refresh_actions_selection() -> void:
@@ -785,7 +1119,7 @@ func _update_list_item(layer_index: int, index: int) -> void:
 	if layer_index != _shown_layer_index or index < 0 or index >= action_list.item_count:
 		return
 	var a: LoopActionT = ProjectData.project.layers[layer_index].actions[index]
-	action_list.set_item_text(index, "%d. %s" % [index + 1, a.describe()])
+	action_list.set_item_text(index, _row_text(index, a))
 	action_list.set_item_icon(index, UiIconsT.mark(a.enabled))
 
 
@@ -883,7 +1217,7 @@ func _rebuild_editor() -> void:
 		LoopActionT.Type.KEY:
 			_add_keys_field(a)
 		LoopActionT.Type.WAIT:
-			_add_range_field("Delay", a.wait_ms, a.wait_ms_max, 0, 600000, func(lo: int, hi: int):
+			_add_range_field("Delay", a.wait_ms, a.wait_ms_max, 0, LoopActionT.WAIT_MS_MAX, func(lo: int, hi: int):
 				a.wait_ms = lo
 				a.wait_ms_max = hi, "ms")
 		LoopActionT.Type.PIXEL_DETECT:
@@ -920,9 +1254,11 @@ func _after_edit() -> void:
 
 ## A range moved so that it is centred on `centre`, keeping its width: what
 ## a picked point does to an X / Y range (a fixed point simply moves there).
+## Kept inside COORD_MIN .. COORD_MAX (shifted, not cut): past them the box
+## would show its end while the loop ran the value itself.
 static func _recentre_range(lo: int, hi: int, centre: int) -> Vector2i:
-	var span := absi(hi - lo)
-	var new_lo := centre - span / 2
+	var span := mini(absi(hi - lo), LoopActionT.COORD_MAX - LoopActionT.COORD_MIN)
+	var new_lo := clampi(centre - span / 2, LoopActionT.COORD_MIN, LoopActionT.COORD_MAX - span)
 	return Vector2i(new_lo, new_lo + span)
 
 
@@ -935,10 +1271,10 @@ static func _recentre_range(lo: int, hi: int, centre: int) -> Vector2i:
 func _add_point_fields(a: LoopActionT, second: bool) -> Array:
 	var rows: Array = []
 	editor_box.add_child(_section_label("Point" + (" A" if second else "")))
-	rows.append(_add_range_field("X", a.x, a.x_max, -20000, 20000, func(lo: int, hi: int):
+	rows.append(_add_range_field("X", a.x, a.x_max, LoopActionT.COORD_MIN, LoopActionT.COORD_MAX, func(lo: int, hi: int):
 		a.x = lo
 		a.x_max = hi).lo.get_parent())
-	rows.append(_add_range_field("Y", a.y, a.y_max, -20000, 20000, func(lo: int, hi: int):
+	rows.append(_add_range_field("Y", a.y, a.y_max, LoopActionT.COORD_MIN, LoopActionT.COORD_MAX, func(lo: int, hi: int):
 		a.y = lo
 		a.y_max = hi).lo.get_parent())
 	rows.append(_add_point_picks(a, "", func(g: Vector2i):
@@ -954,10 +1290,10 @@ func _add_point_fields(a: LoopActionT, second: bool) -> Array:
 		a.y_max = maxi(a.y, r.end.y - 1)))
 	if second:
 		editor_box.add_child(_section_label("Point B"))
-		_add_range_field("X2", a.x2, a.x2_max, -20000, 20000, func(lo: int, hi: int):
+		_add_range_field("X2", a.x2, a.x2_max, LoopActionT.COORD_MIN, LoopActionT.COORD_MAX, func(lo: int, hi: int):
 			a.x2 = lo
 			a.x2_max = hi)
-		_add_range_field("Y2", a.y2, a.y2_max, -20000, 20000, func(lo: int, hi: int):
+		_add_range_field("Y2", a.y2, a.y2_max, LoopActionT.COORD_MIN, LoopActionT.COORD_MAX, func(lo: int, hi: int):
 			a.y2 = lo
 			a.y2_max = hi)
 		_add_point_picks(a, " B", func(g: Vector2i):
@@ -992,20 +1328,20 @@ func _add_point_picks(_a: LoopActionT, which: String, on_point: Callable, on_rec
 func _add_rect_fields(a: LoopActionT) -> void:
 	editor_box.add_child(_section_label("Detection rect"))
 	# X / Y are unused while the rect follows the mouse, so grey them out.
-	var x_pair := _add_range_field("X", a.x, a.x_max, -20000, 20000, func(lo: int, hi: int):
+	var x_pair := _add_range_field("X", a.x, a.x_max, LoopActionT.COORD_MIN, LoopActionT.COORD_MAX, func(lo: int, hi: int):
 		a.x = lo
 		a.x_max = hi)
-	var y_pair := _add_range_field("Y", a.y, a.y_max, -20000, 20000, func(lo: int, hi: int):
+	var y_pair := _add_range_field("Y", a.y, a.y_max, LoopActionT.COORD_MIN, LoopActionT.COORD_MAX, func(lo: int, hi: int):
 		a.y = lo
 		a.y_max = hi)
 	var set_xy_editable := func(editable: bool):
 		x_pair.set_editable(editable)
 		y_pair.set_editable(editable)
 	set_xy_editable.call(not a.follow_cursor)
-	_add_range_field("Width", a.w, a.w_max, 1, 20000, func(lo: int, hi: int):
+	_add_range_field("Width", a.w, a.w_max, 1, LoopActionT.COORD_MAX, func(lo: int, hi: int):
 		a.w = lo
 		a.w_max = hi)
-	_add_range_field("Height", a.h, a.h_max, 1, 20000, func(lo: int, hi: int):
+	_add_range_field("Height", a.h, a.h_max, 1, LoopActionT.COORD_MAX, func(lo: int, hi: int):
 		a.h = lo
 		a.h_max = hi)
 	# The pick and Follow Cursor side by side.
@@ -1114,7 +1450,7 @@ func _add_scroll_fields(a: LoopActionT) -> void:
 func _add_hold_field(a: LoopActionT) -> void:
 	if a.press_mode != LoopActionT.PressMode.HOLD:
 		return
-	_add_range_field("Hold", a.hold_ms, a.hold_ms_max, 0, 600000, func(lo: int, hi: int):
+	_add_range_field("Hold", a.hold_ms, a.hold_ms_max, 0, LoopActionT.HOLD_MS_MAX, func(lo: int, hi: int):
 		a.hold_ms = lo
 		a.hold_ms_max = hi, "ms")
 
@@ -1132,13 +1468,36 @@ func _add_keys_field(a: LoopActionT) -> void:
 	row.add_child(_press_mode_option(a, "Tap"))
 	var le := LineEdit.new()
 	le.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	le.max_length = LoopActionT.KEYS_MAX_CHARS
-	le.text = a.keys
+	# Room for the left-to-right marks shown around SendKeys characters (see
+	# LoopAction.ltr_marked); the text itself is cut to KEYS_MAX_CHARS by
+	# clean_keys, and the field then shows the cut text.
+	le.max_length = LoopActionT.KEYS_MAX_CHARS * 3
+	# Left to right whatever it holds: SendKeys text is read in the order it
+	# is typed, and a right-to-left run would show "%{F4}" as "{F4}%".
+	le.text_direction = Control.TEXT_DIRECTION_LTR
+	le.text = LoopActionT.ltr_marked(a.keys)
 	le.placeholder_text = "e.g. abc, {ENTER}, ^c"
 	le.text_changed.connect(func(t: String):
-		# Single line, always (a paste could carry line breaks).
-		a.keys = t.replace("\r", "").replace("\n", "")
+		# Single line of what shows, always (a paste could carry line breaks
+		# or invisible control characters, which would be typed as keys).
+		# (The marks the field is shown with are not part of the text.)
+		var typed := t.replace(char(0x200E), "")
+		a.keys = LoopActionT.clean_keys(typed)
+		# The field shows what is kept: a pasted bidi override or invisible
+		# character would otherwise go on showing the text in another order,
+		# or with more in it, than the action holds and types. Written back
+		# without the display marks while it is being edited (they would move
+		# the caret off the characters it was between); they come back when
+		# the field is left.
+		if a.keys != typed:
+			var caret := LoopActionT.clean_keys(t.left(le.caret_column).replace(char(0x200E), "")).length()
+			le.text = a.keys
+			le.caret_column = mini(caret, a.keys.length())
 		_after_edit())
+	le.focus_exited.connect(func():
+		var shown := LoopActionT.ltr_marked(a.keys)
+		if le.text != shown:
+			le.text = shown)
 	row.add_child(le)
 	# Capture: an icon-only button that opens the on-screen keyboard; what is
 	# typed or clicked there lands in the field as SendKeys text.
@@ -1151,7 +1510,7 @@ func _add_keys_field(a: LoopActionT) -> void:
 	editor_box.add_child(row)
 	_add_hold_field(a)
 	var hint := Label.new()
-	hint.text = "Windows SendKeys format: {ENTER} {TAB} {ESC} ^c (Ctrl+C) %{F4} (Alt+F4) $r (Win+R) {SUPER} (Windows key alone) {CTRL} (Ctrl alone) {^} {$} (the character)"
+	hint.text = "Windows SendKeys format: {ENTER} or ~ (Enter) {TAB} {ESC} ^c (Ctrl+C) +a (Shift+A) %{F4} (Alt+F4) $r (Win+R) {SUPER} (Windows key alone) {CTRL} (Ctrl alone) {^} {$} {~} {+} {%} (the character)"
 	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	hint.modulate = Color(1, 1, 1, 0.7)
 	editor_box.add_child(hint)
@@ -1165,12 +1524,15 @@ func _open_key_capture(le: LineEdit, a: LoopActionT) -> void:
 	if _key_capture == null:
 		_key_capture = KeyCaptureT.new()
 		_key_capture.sent.connect(func(t: String):
+			# The field shows what the action keeps (cleaned: a layout can
+			# type a bidi mark or a zero-width joiner as a key of its own).
+			var clean := LoopActionT.clean_keys(t)
 			if is_instance_valid(_key_capture_field):
-				_key_capture_field.text = t
+				_key_capture_field.text = LoopActionT.ltr_marked(clean)
 			if _key_capture_action != null:
-				_key_capture_action.keys = t
+				_key_capture_action.keys = clean
 				_after_edit()
-				status_label.text = "Keys set to %s" % JSON.stringify(t))
+				status_label.text = "Keys set to %s" % _quoted(LoopActionT.ltr_marked(clean)))
 		# The window is resizable; the size it was last closed at is kept.
 		var saved: Variant = _load_setting("key_capture_size", Vector2i.ZERO)
 		if saved is Vector2i and saved.x >= _key_capture.min_size.x and saved.y >= _key_capture.min_size.y:
@@ -1182,7 +1544,7 @@ func _open_key_capture(le: LineEdit, a: LoopActionT) -> void:
 		add_child(_key_capture)
 	_key_capture_field = le
 	_key_capture_action = a
-	_key_capture.open(le.text)
+	_key_capture.open(a.keys)
 
 
 func _close_key_capture() -> void:
@@ -1356,7 +1718,7 @@ func _add_on_fail_field(a: LoopActionT) -> void:
 		func(v: bool):
 			a.wait = v
 			_after_edit())
-	var wpair := _add_range_field_in(wrow, a.wait_ms, a.wait_ms_max, 0, 600000, func(lo: int, hi: int):
+	var wpair := _add_range_field_in(wrow, a.wait_ms, a.wait_ms_max, 0, LoopActionT.WAIT_MS_MAX, func(lo: int, hi: int):
 		a.wait_ms = lo
 		a.wait_ms_max = hi, "ms")
 	wpair.set_editable(a.wait)
@@ -1367,7 +1729,7 @@ func _add_on_fail_field(a: LoopActionT) -> void:
 		func(v: bool):
 			a.wait_timeout = v
 			_after_edit())
-	var tpair := _add_range_field_in(trow, a.wait_timeout_ms, a.wait_timeout_ms_max, 0, 3600000, func(lo: int, hi: int):
+	var tpair := _add_range_field_in(trow, a.wait_timeout_ms, a.wait_timeout_ms_max, 0, LoopActionT.TIMEOUT_MS_MAX, func(lo: int, hi: int):
 		a.wait_timeout_ms = lo
 		a.wait_timeout_ms_max = hi, "ms")
 	var timeout_check := trow.get_child(0) as CheckBox
@@ -1426,7 +1788,7 @@ func _add_stop_field(a: LoopActionT) -> void:
 	# "on pass N" inside the box, so the row fits the panel.
 	var sp := SpinBox.new()
 	sp.min_value = 1
-	sp.max_value = 1000000
+	sp.max_value = LoopActionT.STOP_AFTER_MAX
 	sp.step = 1
 	sp.value = a.stop_after
 	sp.prefix = "on pass"
@@ -1657,7 +2019,7 @@ func _add_duration_field(a: LoopActionT, tip: String = "How long the cursor take
 		func(v: bool):
 			a.wiggle = v
 			_after_edit())
-	_add_range_field_in(row, a.duration_ms, a.duration_ms_max, 0, 60000, func(lo: int, hi: int):
+	_add_range_field_in(row, a.duration_ms, a.duration_ms_max, 0, LoopActionT.DURATION_MS_MAX, func(lo: int, hi: int):
 		a.duration_ms = lo
 		a.duration_ms_max = hi, "ms")
 	return row
@@ -1691,7 +2053,14 @@ func _on_overlay_toggle(pressed: bool) -> void:
 		status_label.text = "Overlay off."
 
 
+## True while the overlay is up and not click-through: it takes the mouse.
+func _overlay_blocks_mouse() -> bool:
+	return overlay != null and overlay.visible and overlay.click_through in [OverlayT.ClickThrough.PENDING, OverlayT.ClickThrough.FAILED]
+
+
 func _on_overlay_click_through_changed(state: int) -> void:
+	if state == OverlayT.ClickThrough.FAILED and Playback.is_running and Playback.backend != null and Playback.backend.is_real():
+		Playback.stop("Stopped: the overlay stopped being click-through (it would take every click).")
 	if _pick_active or not overlay.transparency_available():
 		return
 	match state:
@@ -1713,6 +2082,7 @@ func _begin_point_pick(cb: Callable, sample_colors: bool = false) -> void:
 		return
 	_pick_point_cb = cb
 	_pick_rect_cb = Callable()
+	_pick_action = ProjectData.selected_action()
 	_start_pick(PickOverlayT.PickKind.POINT, sample_colors)
 
 
@@ -1722,6 +2092,7 @@ func _begin_rect_pick(cb: Callable) -> void:
 		return
 	_pick_rect_cb = cb
 	_pick_point_cb = Callable()
+	_pick_action = ProjectData.selected_action()
 	_start_pick(PickOverlayT.PickKind.RECT)
 
 
@@ -1755,9 +2126,9 @@ func _lower_builder(park: bool = false) -> void:
 			return
 		_builder_hidden_for_pick = false
 	var lower := not stay_on_edit_check.button_pressed
-	if lower and stay_on_edit_check.disabled:
+	if lower and Engine.is_embedded_in_editor():
 		status_label.text += "  (Lowering the window is unavailable while embedded in the editor.)"
-	if lower and not stay_on_edit_check.disabled:
+	if lower and not Engine.is_embedded_in_editor():   # (not the box's disabled: a Live run locks it too)
 		var win := get_window()
 		_builder_hidden_for_pick = true
 		_builder_prev_mode = win.mode
@@ -1793,9 +2164,11 @@ func _finish_pick() -> void:
 ## the option out in that case.
 func _refresh_stay_on_edit_check() -> void:
 	var embedded := Engine.is_embedded_in_editor()
-	if stay_on_edit_check.disabled == embedded and not stay_on_edit_check.tooltip_text.is_empty():
+	# (Locked during a Live run like every other control but Run.)
+	var off := embedded or _is_interaction_locked()
+	if stay_on_edit_check.disabled == off and not stay_on_edit_check.tooltip_text.is_empty():
 		return
-	stay_on_edit_check.disabled = embedded
+	stay_on_edit_check.disabled = off
 	if embedded:
 		stay_on_edit_check.tooltip_text = "Unavailable while the game is embedded in the Godot editor (Game tab → turn off Embed Game on Next Play)."
 	else:
@@ -1848,7 +2221,7 @@ func _on_rec_pressed() -> void:
 			return
 		# Asked first: the helper sees every window, and what is typed lands in
 		# the loop file readable - a password too.
-		_confirm("Record what you do with the mouse and keyboard into \"%s\" until you press F8?\nEverything you type is kept in the loop as plain text - stop before typing a password." % layer.name,
+		_confirm("Record what you do with the mouse and keyboard into this layer until you press F8?\n    %s\nEverything you type is kept in the loop as plain text - stop before typing a password." % _quoted(layer.name),
 			_start_recording, "Record")
 
 
@@ -1858,6 +2231,10 @@ func _start_recording() -> void:
 	if ProjectData.active_layer() == null:
 		return
 	_commit_pending_edits()
+	_close_key_capture()
+	# What was asked about is where it goes (see _stop_recording).
+	_record_layer = ProjectData.active_layer()
+	_record_loop_id = ProjectData.active_loop_id
 	_recording = true
 	_record_armed = false
 	_record_gen += 1
@@ -1890,7 +2267,10 @@ func _start_recording() -> void:
 	if _recorder.f8_taken and not Playback.global_hotkey_armed():
 		# Another program holds F8 as its hotkey, so its press never reaches
 		# the recorder (with ~F8 on, the run's helper holds it and ends the
-		# recording itself).
+		# recording itself). The builder comes back, then: minimised, the one
+		# way to stop a recording that sees every key typed would be out of
+		# sight, and so would the line saying so.
+		_restore_builder_after_pick()
 		status_label.text = "Recording… F8 is taken by another program: stop with the button or Esc here."
 	else:
 		status_label.text = "Recording… press F8 to stop."
@@ -1912,17 +2292,28 @@ func _stop_recording(reason: String = "", from_builder: bool = false) -> void:
 		events = []   # ended during the countdown: nothing was being recorded yet
 	elif from_builder and _record_unguarded:
 		events = RecordingT.without_stop_gesture(events)
-	_restore_builder_after_pick()
+	# Not in the middle of a pick or a sample (which bring it back themselves
+	# once they have read the screen).
+	if not _pick_active and not _sample_pending:
+		_restore_builder_after_pick()
 	if not reason.is_empty():
 		status_label.text = reason
 		return
 	var actions := RecordingT.to_actions(events)
-	var layer_name := ProjectData.active_layer().name if ProjectData.active_layer() != null else ""
 	if actions.is_empty():
 		status_label.text = "Recorded nothing."
 		return
-	ProjectData.append_actions(actions)
-	status_label.text = "Recorded %d action%s into \"%s\"." % [actions.size(), "" if actions.size() == 1 else "s", layer_name]
+	# Into the layer the recording was asked about, not whichever is open
+	# now (the builder stays usable with ~Edit) - without switching to it.
+	var added := ProjectData.append_actions(_record_loop_id, _record_layer, actions)
+	if added < 0:
+		status_label.text = "Recording not kept: the layer it was for is gone."
+		return
+	status_label.text = "Recorded %d action%s into %s." % [added, "" if added == 1 else "s", _quoted(_record_layer.name)]
+	if RecordingT.skipped_keys > 0:
+		status_label.text += " %d key press%s with nothing to type it by (Pause, the menu key) %s left out." % [RecordingT.skipped_keys, "" if RecordingT.skipped_keys == 1 else "es", "was" if RecordingT.skipped_keys == 1 else "were"]
+	if added < actions.size():
+		status_label.text += " The loop is full (%d actions): the rest was not kept." % ProjectData.LOOP_ACTIONS_MAX
 	if _recorder.limit_reached:
 		status_label.text += " The recording limit was reached, so it ended there."
 
@@ -1952,8 +2343,15 @@ func _set_rec_icon_color(c: Color) -> void:
 
 
 func _on_point_picked(g: Vector2i) -> void:
+	if not _still_selected(_pick_action):
+		_finish_pick()
+		return
 	if _pick_point_cb.is_valid():
 		_pick_point_cb.call(g)
+	# Within what the editor's boxes take (a pick far off every screen, or
+	# a range re-centred near an end), as a load would keep it.
+	if _pick_action != null:
+		_pick_action.keep_to_limits()
 	status_label.text = "Set point (%d, %d)." % [g.x, g.y]
 	_finish_pick()
 	_after_edit()
@@ -1961,12 +2359,31 @@ func _on_point_picked(g: Vector2i) -> void:
 
 
 func _on_rect_picked(r: Rect2i) -> void:
+	if not _still_selected(_pick_action):
+		_finish_pick()
+		return
 	if _pick_rect_cb.is_valid():
 		_pick_rect_cb.call(r)
+	# Within what the editor's boxes take (a pick far off every screen, or
+	# a range re-centred near an end), as a load would keep it.
+	if _pick_action != null:
+		_pick_action.keep_to_limits()
 	status_label.text = "Set rect [%d, %d, %d×%d]." % [r.position.x, r.position.y, r.size.x, r.size.y]
 	_finish_pick()
 	_after_edit()
 	_rebuild_editor()
+
+
+## Whether `a` (the action a pick or sample was started for) is still the
+## selected action of the open loop: one that is not (another was chosen,
+## or another loop opened, while it was under way) does not get the result,
+## which the list and the editor would not show against it. Says so on the
+## status line.
+func _still_selected(a: LoopActionT) -> bool:
+	if a != null and a == ProjectData.selected_action():
+		return true
+	status_label.text = "Pick dropped: another action was selected while it was under way."
+	return false
 
 
 func _on_pick_canceled() -> void:
@@ -1996,6 +2413,8 @@ func _sample_color_into(a: LoopActionT, g: Vector2i) -> void:
 	# Only now bring the builder back / raise it: it may cover `g`.
 	_sample_pending = false
 	_restore_builder_after_pick()
+	if not _still_selected(a):
+		return
 	if c.a > 0.0:
 		a.color = c
 		status_label.text = "Sampled #%s at (%d, %d)." % [c.to_html(false), g.x, g.y]
@@ -2027,6 +2446,8 @@ func _capture_image_into(a: LoopActionT, r: Rect2i, place: bool) -> void:
 		overlay.show_overlay()
 	_sample_pending = false
 	_restore_builder_after_pick()
+	if not _still_selected(a):
+		return
 	if img == null or not a.set_image_png(img.save_png_to_buffer()):
 		status_label.text = "Couldn't read the screen at [%d, %d, %d×%d]." % [r.position.x, r.position.y, r.size.x, r.size.y]
 		return
@@ -2040,6 +2461,8 @@ func _capture_image_into(a: LoopActionT, r: Rect2i, place: bool) -> void:
 		a.h = maxi(1, r.size.y)
 		a.h_max = a.h
 		a.follow_cursor = false
+		# Within the boxes' limits (see _on_rect_picked, which ran before this).
+		a.keep_to_limits()
 	var size := a.image_size()
 	status_label.text = "Sampled a %d×%d image at (%d, %d)." % [size.x, size.y, r.position.x, r.position.y]
 	_after_edit()
@@ -2090,6 +2513,40 @@ func _read_pixel_threaded(sampler: InputBackend, p: Vector2i) -> Color:
 	return sampler.get_pixel(p)
 
 
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_WM_CLOSE_REQUEST:
+		_on_close_requested()
+
+
+## Closing the window: edits live in memory until Save, so with any loop
+## changed and not saved the user is asked first (Cancel keeps the app open
+## to save them). A recording in progress counts too: it would be lost.
+var _quit_dialog: ConfirmationDialog = null
+func _on_close_requested() -> void:
+	if _quit_dialog != null and is_instance_valid(_quit_dialog):
+		_quit_dialog.grab_focus()
+		return
+	_commit_pending_edits()
+	var n := ProjectData.pending_loop_count()
+	if n == 0 and not _recording:
+		get_tree().quit()
+		return
+	var what := "%d loop%s ha%s changes that are not saved" % [n, "" if n == 1 else "s", "s" if n == 1 else "ve"]
+	if _recording:
+		what = "A recording is in progress" if n == 0 else what + ", and a recording is in progress"
+	_quit_dialog = ConfirmationDialog.new()
+	_quit_dialog.title = "Quit"
+	_quit_dialog.exclusive = false
+	_quit_dialog.dialog_text = "%s. Quit anyway and lose %s?" % [what, "them" if n > 1 or (n == 1 and _recording) else "it"]
+	_quit_dialog.ok_button_text = "Quit without saving"
+	_quit_dialog.confirmed.connect(func(): get_tree().quit())
+	_quit_dialog.canceled.connect(func():
+		_quit_dialog.queue_free()
+		_quit_dialog = null)
+	add_child(_quit_dialog)
+	_quit_dialog.popup_centered()
+
+
 func _exit_tree() -> void:
 	# A Thread must be joined before it is freed.
 	if _hover_thread != null:
@@ -2101,11 +2558,32 @@ func _exit_tree() -> void:
 
 # ------------------------------------------------------- UI preferences
 func _load_setting(key: String, default: Variant) -> Variant:
-	var cfg := ConfigFile.new()
-	if cfg.load(SETTINGS_PATH) != OK:
-		return default
-	return cfg.get_value("ui", key, default)
+	return _settings().get_value("ui", key, default)
 
+
+## The settings file, read. Godot's format can say Object(…) and Resource(…),
+## which reading alone builds - a script's code run, from a file anyone may
+## drop in the data folder - and its parser skips comments and control
+## characters where a check for those words would not look. So the file is
+## read only if every line is one this app writes: "[ui]", or a name set to
+## true, false, a whole number or a Vector2i. Anything else, and it is not
+## read at all (the defaults stand; the next change of a setting writes a
+## clean one).
+func _settings() -> ConfigFile:
+	var cfg := ConfigFile.new()
+	var text := FileAccess.get_file_as_string(SETTINGS_PATH)
+	if text.is_empty():
+		return cfg
+	if _plain_setting == null:
+		_plain_setting = RegEx.create_from_string("^[ \\t]*(\\[ui\\]|[A-Za-z0-9_]+[ \\t]*=[ \\t]*(true|false|-?[0-9]{1,10}|Vector2i\\([ \\t]*-?[0-9]{1,10}[ \\t]*,[ \\t]*-?[0-9]{1,10}[ \\t]*\\)))?[ \\t]*$")
+	for line in text.replace("\r\n", "\n").split("\n"):
+		if _plain_setting.search(line) == null:
+			push_warning("Settings file not read: it holds more than plain values.")
+			return cfg
+	if cfg.parse(text) != OK:
+		return ConfigFile.new()
+	return cfg
+static var _plain_setting: RegEx = null
 
 ## A yes / no setting. The file is the user's to edit, so a value that is
 ## not one (a word, a number) is the default, not a type error at start-up.
@@ -2115,8 +2593,7 @@ func _load_bool_setting(key: String, default: bool) -> bool:
 
 
 func _save_setting(key: String, value: Variant) -> void:
-	var cfg := ConfigFile.new()
-	cfg.load(SETTINGS_PATH)  # missing file is fine: start empty
+	var cfg := _settings()  # missing (or refused) is fine: start empty
 	cfg.set_value("ui", key, value)
 	cfg.save(SETTINGS_PATH)
 
@@ -2151,7 +2628,7 @@ func _refresh_overlay_label() -> void:
 		var idx := clampi(ProjectData.overlay_layer_index, 0, maxi(0, layers.size() - 1))
 		if idx < layers.size():
 			text_full = "View: %d/%d - %s" % [idx + 1, layers.size(), layers[idx].name]
-			text_short = "View: %d/%d - %s" % [idx + 1, layers.size(), _shorten_text(layers[idx].name, 26)]
+			text_short = "View: %d/%d - %s" % [idx + 1, layers.size(), _quoted(layers[idx].name)]
 		else:
 			text_full = "View: -"
 			text_short = text_full
@@ -2177,7 +2654,7 @@ func _refresh_loop_stack_ui() -> void:
 			name = str(id)
 		var dirty_mark := " *" if ProjectData.loop_is_pending(id) else ""
 		# Numbered by place in the list (the store id behind it only ever grows).
-		loop_picker.add_item("%d. %s%s" % [loop_picker.item_count + 1, _shorten_text(name, 28), dirty_mark], id)
+		loop_picker.add_item("%d. %s%s" % [loop_picker.item_count + 1, _quoted(name), dirty_mark], id)
 		if id == previous_id:
 			active_idx = loop_picker.item_count - 1
 	if active_idx >= 0:
@@ -2187,7 +2664,7 @@ func _refresh_loop_stack_ui() -> void:
 	if save_btn != null:
 		# An unsaved change shows as a "*" beside the icon.
 		save_btn.text = "*" if ProjectData.active_loop_is_pending() else ""
-	var loop_name := _shorten_text(ProjectData.active_loop_display_name(), 32)
+	var loop_name := _quoted(ProjectData.active_loop_display_name())
 	var pending_text := " (unsaved)" if ProjectData.active_loop_is_pending() else ""
 	status_label.text = "Loop %d/%d · %s%s" % [_active_loop_number(), maxi(1, total), loop_name, pending_text]
 
@@ -2201,7 +2678,27 @@ func _active_loop_number() -> int:
 func _on_play_pressed() -> void:
 	if _stop_cooldown_active or _recording:
 		return
+	# A pick or a screen sample under way brings the builder back and takes
+	# the focus when it lands: not in the middle of a run it would start.
+	if not Playback.is_running and (_pick_active or _sample_pending or _hover_thread != null):
+		status_label.text = "Not started: a pick or a screen read is still under way."
+		return
 	_commit_pending_edits()
+	# Not Live while the overlay takes the mouse (its click-through still
+	# coming, or failed): every click would land on it - skipped as this
+	# app's - while the keys went on into whatever window has the focus.
+	if not Playback.is_running and Playback.backend != null and Playback.backend.is_real() and _overlay_blocks_mouse():
+		status_label.text = "Not started: the overlay is not click-through (yet) - wait a moment, or turn it off."
+		return
+	# A Live run of a loop whose points may be off (see _warn_points_unsure)
+	# is asked about first; confirmed, its points count as checked.
+	if not Playback.is_running and Playback.backend != null and Playback.backend.is_real() and ProjectData.project.points_unsure != Vector2i.ZERO:
+		var off: Vector2i = ProjectData.project.points_unsure
+		_confirm("This loop is from an older version, which counted points from the main screen. With your screens as they are, some of its points may be off by (%d, %d) - clicks landing somewhere else.\n\nRun it Live anyway? Its points will count as checked from now on." % [off.x, off.y], func():
+			ProjectData.project.points_unsure = Vector2i.ZERO
+			ProjectData.notify_layer_modified()
+			Playback.toggle(), "Run")
+		return
 	Playback.toggle()
 
 
@@ -2249,18 +2746,26 @@ func _run_label() -> String:
 	return "Run?"
 
 
+var _was_locked := false
+
+
 func _refresh_edit_lock() -> void:
 	var locked := _is_interaction_locked()
 	# The window dims while a Live loop runs, ~Self or not. A Pixel Detect
 	# reading Loop Automator's own window (~Self on) then reads the dimmed
 	# colours — the user accounts for that shift; the dim cue is kept.
 	var tint := Color(1, 1, 1, 0.65) if locked else Color(1, 1, 1, 1)
-	if _ui_root != null:
+	# Only when the lock comes on or goes: unlocking re-enables every control
+	# (and rebuilds the editor to grey its own again), which in the middle of
+	# an edit - a Safe run ending, a stop's cooldown - would tear it down.
+	if _ui_root != null and locked != _was_locked:
+		_was_locked = locked
 		_set_controls_locked(_ui_root, locked)
 		_ui_root.modulate = tint
 		if not locked:
 			_refresh_loop_nav()   # the unlock enabled the ◀ ▶ buttons too
 			_refresh_layer_props()   # and Enabled, which Solo may keep greyed
+			_rebuild_editor()   # and the editor's rows its own settings keep greyed
 	if play_btn != null:
 		# Keep this as the only clickable control in lock mode.
 		play_btn.disabled = _stop_cooldown_active
@@ -2383,7 +2888,7 @@ func _on_duplicate_loop() -> void:
 	var id := ProjectData.duplicate_loop()
 	if id < 0:
 		return
-	status_label.text = "Duplicated \"%s\" as loop %d, \"%s\"." % [from, _active_loop_number(), ProjectData.active_loop_display_name()]
+	status_label.text = "Duplicated %s as loop %d, %s." % [_quoted(from), _active_loop_number(), _quoted(ProjectData.active_loop_display_name())]
 
 
 func _confirm_delete_loop() -> void:
@@ -2392,10 +2897,11 @@ func _confirm_delete_loop() -> void:
 		return
 	var layers := ProjectData.project.layers.size()
 	var name := ProjectData.active_loop_display_name()
-	_confirm("Delete loop \"%s\" and its %d layer(s)? Its file is removed too." % [name, layers],
+	_confirm("Delete this loop and its %d layer(s)? Its file is removed too.
+    %s" % [layers, _quoted(name)],
 		func():
 			if ProjectData.delete_loop(id):
-				status_label.text = "Deleted loop \"%s\"." % name)
+				status_label.text = "Deleted loop %s." % _quoted(name))
 
 
 func _on_export() -> void:
@@ -2408,11 +2914,31 @@ func _on_export() -> void:
 		suggested = "loop"
 	dlg.current_file = "%s.loop" % suggested
 	dlg.file_selected.connect(func(path: String):
+		dlg.queue_free()
+		# A loop file is shared as it is: what Rec recorded (passwords too,
+		# as plain text) and every Image Detect's template, a piece of the
+		# screen it was captured from.
+		var peek := ProjectData.peek_loop(ProjectData.project)
+		var templates := 0
+		for layer in ProjectData.project.layers:
+			for a in layer.actions:
+				if a.type == LoopActionT.Type.IMAGE_DETECT and not a.image_png.is_empty():
+					templates += 1
+		var note := ""
+		if not (peek["keys"] as Array).is_empty() or templates > 0:
+			note = "Whoever gets the file can read all of it: the text of its %d Key action(s) (anything Rec recorded you typing, passwords included) and %d Image Detect template(s), each a piece of your screen.\n\n" % [(peek["keys"] as Array).size(), templates]
 		if not path.to_lower().ends_with(".loop"):
 			path += ".loop"
-		var err := ProjectData.export_to(path)
-		status_label.text = "Exported to %s" % path if err == OK else "Export failed (%d)." % err
-		dlg.queue_free())
+			# The dialog asked about the name as typed, not this one.
+			if FileAccess.file_exists(path):
+				note += "A file of that name already exists and will be replaced.\n"
+		var write := func():
+			var err := ProjectData.export_to(path)
+			status_label.text = "Exported to %s" % path if err == OK else "Export failed (%d)." % err
+		if note.is_empty():
+			write.call()
+		else:
+			(func(): _confirm(note + "Export to this file?\n    %s" % _quoted(LoopActionT.plain_text(path.get_file(), LoopLayerT.NAME_MAX_CHARS)), write, "Export")).call_deferred())
 	dlg.popup_centered()
 
 
@@ -2439,33 +2965,79 @@ const IMPORT_KEY_CHARS := 60
 ## actions, and the text of its Key actions, which is what a loop types —
 ## and what a loop can do. Nothing is loaded unless Import is pressed.
 func _ask_import(path: String) -> void:
-	var peek := ProjectData.peek_loop(path)
-	if peek.is_empty():
-		status_label.text = "Import failed: %s is not a readable .loop file." % path.get_file()
+	# Read once: the question describes this copy and Import brings in this
+	# copy, never whatever the file holds by the time Import is pressed.
+	var source := ProjectData.read_import(path)
+	if source == null:
+		status_label.text = "Import failed: %s is not a readable .loop file, or holds more than a loop may (%d layers, %d actions, %d MP of Image Detect templates)." % [_quoted(LoopActionT.plain_text(path.get_file(), LoopLayerT.NAME_MAX_CHARS)), ProjectData.LOOP_LAYERS_MAX, ProjectData.LOOP_ACTIONS_MAX, ProjectData.LOOP_TEMPLATE_PIXELS_MAX / (1024 * 1024)]
 		return
+	var peek := ProjectData.peek_loop(source)
 	var keys: Array = peek["keys"]
-	var text := "Import \"%s\" as a new loop?\n\n" % path.get_file()
+	# Everything from the file is quoted (a name could otherwise go on as
+	# the question's own sentence) and set left to right, as it is typed.
+	# A name goes on a line of its own, indented (_wrap_lines never breaks
+	# those): split across lines, its isolate would end with the line, and
+	# look-alike quotes (“ ”) in it could carry on as the question's text.
+	var text := "Import this file as a new loop?\n    %s\n\n" % _quoted(LoopActionT.plain_text(path.get_file(), LoopLayerT.NAME_MAX_CHARS))
+	text += "Its first layer is named:\n    %s\n\n" % _quoted(String(peek["name"]))
 	text += "A loop is like a script: run in Live mode it can type anything and click anywhere. "
-	text += "This one, \"%s\", has %d layer(s) and %d action(s)" % [peek["name"], peek["layers"], peek["actions"]]
+	text += "This one has %d layer(s) and %d action(s)" % [peek["layers"], peek["actions"]]
 	if keys.is_empty():
 		text += ", none of them Key actions (nothing in it types).\n"
 	else:
-		text += ", including %d Key action(s) that type:\n" % keys.size()
-		for i in mini(keys.size(), IMPORT_KEYS_SHOWN):
-			var k: String = keys[i]
+		# The ones that press more than characters come first: they are the
+		# ones that can run a command (Win+R, then Enter).
+		var special := RegEx.create_from_string("[~^+%${}()]")
+		var pressing: Array = []
+		var plain: Array = []
+		for k in keys:
+			(pressing if special.search(k) != null else plain).append(k)
+		text += ", including %d Key action(s)" % keys.size()
+		if not pressing.is_empty():
+			text += ", %d of them pressing more than characters" % pressing.size()
+		text += ". In their text ~ is Enter, ^ Ctrl, + Shift, % Alt, $ the Windows key and {…} a key by name. They type:\n"
+		var shown := pressing + plain
+		for i in mini(shown.size(), IMPORT_KEYS_SHOWN):
+			var k: String = shown[i]
+			var line := _quoted(LoopActionT.ltr_marked(k))
 			if k.length() > IMPORT_KEY_CHARS:
-				k = k.substr(0, IMPORT_KEY_CHARS - 1) + "…"
-			text += "    •  %s\n" % JSON.stringify(k)
-		if keys.size() > IMPORT_KEYS_SHOWN:
-			text += "    •  … and %d more\n" % (keys.size() - IMPORT_KEYS_SHOWN)
+				# Its start and its end, and how long it is: what runs last
+				# in a long text is as much a part of it as what runs first.
+				# Cut between keystrokes (see LoopAction.stroke_ends): "$r" is never an "r".
+				var ends := LoopActionT.stroke_ends(k, IMPORT_KEY_CHARS / 2, IMPORT_KEY_CHARS / 2)
+				line = "%s … %s  (%d characters)" % [_quoted(LoopActionT.ltr_marked(ends[0])), _quoted(LoopActionT.ltr_marked(ends[1])), k.length()]
+			text += "    •  %s\n" % line
+		if shown.size() > IMPORT_KEYS_SHOWN:
+			text += "    •  … and %d more\n" % (shown.size() - IMPORT_KEYS_SHOWN)
 	text += "\nIt opens in Safe mode. Read its actions there and dry-run it before you ever run it Live."
 	var do_import := func():
-		var id := ProjectData.import_loop(path)
-		if id < 0:
-			status_label.text = "Import failed: %s is not a readable .loop file." % path.get_file()
-		else:
-			status_label.text = "Imported \"%s\" as loop %d." % [ProjectData.active_loop_display_name(), _active_loop_number()]
+		# As the question says: with Live chosen, an idle ~F8 or one press of
+		# Run would drive the real mouse and keyboard with a loop nobody has
+		# read yet.
+		_switch_to_safe_backend_if_needed()
+		ProjectData.import_loop(source)
+		status_label.text = "Imported %s as loop %d." % [_quoted(ProjectData.active_loop_display_name()), _active_loop_number()]
+		_warn_points_unsure()
 	_confirm(text, do_import, "Import")
+
+
+## `s` in quotes (JSON's: a quote inside it is \") and isolated left to
+## right, so neither a quote nor right-to-left letters in it can change how
+## the sentence around it reads.
+## A long one shows its start and end and how long it is: a line the dialog
+## does not wrap would otherwise run off the screen, its end unseen.
+static func _quoted(s: String) -> String:
+	# Measured and cut without the left-to-right marks a Key's text is
+	# shown with (they are put back on each half).
+	var real := s.replace(char(0x200E), "")
+	if real.length() > QUOTED_MAX_CHARS:
+		var half := QUOTED_MAX_CHARS / 2
+		var marked := real != s
+		var head := LoopActionT.ltr_marked(real.left(half)) if marked else real.left(half)
+		var tail := LoopActionT.ltr_marked(real.right(half)) if marked else real.right(half)
+		return "%s … %s  (%d characters)" % [_quoted(head), _quoted(tail), real.length()]
+	return char(0x2066) + JSON.stringify(s) + char(0x2069)
+const QUOTED_MAX_CHARS := 64
 
 
 ## A file dialog for .loop files. It frees itself when cancelled; the
@@ -2488,9 +3060,10 @@ func _confirm_delete_layer() -> void:
 		return
 	var layer: LoopLayerT = ProjectData.project.layers[index]
 	if ProjectData.project.layers.size() <= 1:
-		_inform("\"%s\" is this loop's only layer, and a loop needs at least one.\nDelete its actions instead, add another layer first, or delete the whole loop (trash icon in the toolbar)." % layer.name)
+		_inform("This is the loop's only layer, and a loop needs at least one:\n    %s\nDelete its actions instead, add another layer first, or delete the whole loop (trash icon in the toolbar)." % _quoted(layer.name))
 		return
-	_confirm("Delete layer \"%s\" and its %d action(s)?" % [layer.name, layer.actions.size()],
+	_confirm("Delete this layer and its %d action(s)?
+    %s" % [layer.actions.size(), _quoted(layer.name)],
 		func(): ProjectData.remove_layer(index))
 
 
@@ -2500,7 +3073,8 @@ func _confirm_delete_action() -> void:
 	if layer == null or index < 0 or index >= layer.actions.size():
 		return
 	var action: LoopActionT = layer.actions[index]
-	_confirm("Delete action %d (%s)?" % [index + 1, action.describe()],
+	_confirm("Delete action %d?
+    %s" % [index + 1, _quoted(action.describe())],
 		func(): ProjectData.remove_action(index))
 
 
@@ -2535,7 +3109,7 @@ static func _wrap_lines(text: String, width: int = DIALOG_WRAP) -> String:
 func _inform(text: String) -> void:
 	var dlg := AcceptDialog.new()
 	dlg.title = "Loop Automator"
-	dlg.dialog_text = _wrap_lines(text)
+	dlg.dialog_text = _dialog_text(text)
 	dlg.confirmed.connect(func(): dlg.queue_free())
 	dlg.canceled.connect(func(): dlg.queue_free())
 	add_child(dlg)
@@ -2547,7 +3121,12 @@ func _inform(text: String) -> void:
 func _confirm(text: String, on_ok: Callable, ok_text: String = "Delete") -> void:
 	var dlg := ConfirmationDialog.new()
 	dlg.title = "Confirm"
-	dlg.dialog_text = _wrap_lines(text)
+	# Each indented line (a name or a Key's text, from a file) kept to what
+	# fits the screen, measured, not counted: a line of very wide characters
+	# would otherwise make the dialog wider than the screen - its end, what
+	# a Key types last, off it - and wrapping it would set its rest on the
+	# margin the dialog's own sentences start at.
+	dlg.dialog_text = _dialog_text(text)
 	dlg.ok_button_text = ok_text
 	dlg.confirmed.connect(func():
 		on_ok.call()
@@ -2555,6 +3134,88 @@ func _confirm(text: String, on_ok: Callable, ok_text: String = "Delete") -> void
 	dlg.canceled.connect(func(): dlg.queue_free())
 	add_child(dlg)
 	dlg.popup_centered()
+
+
+const DIALOG_LINE_MAX_PX := 1000
+
+
+## `text` for a dialog: wrapped (see _wrap_lines), each indented line (a
+## name or a Key's text from a file) fitted to the screen (see _fit_line).
+func _dialog_text(text: String) -> String:
+	var screen := DisplayServer.screen_get_usable_rect(DisplayServer.window_get_current_screen())
+	var fit_px := mini(DIALOG_LINE_MAX_PX, screen.size.x - 80)
+	var lines := _wrap_lines(text).split("\n")
+	for i in lines.size():
+		if lines[i].begins_with(" "):
+			lines[i] = _fit_line(lines[i], fit_px)
+	return "\n".join(lines)
+
+
+## `line` as it is if it is at most `max_px` wide in a dialog's font, else
+## with each quoted part (see _quoted: file text) cut to its start and end,
+## as much of both as fits - the app's own words around them never cut.
+func _fit_line(line: String, max_px: int) -> String:
+	var font := get_theme_font("font", "Label")
+	var size := get_theme_font_size("font_size", "Label")
+	if font == null or font.get_string_size(line, HORIZONTAL_ALIGNMENT_LEFT, -1, size).x <= max_px:
+		return line
+	var longest := 0
+	for part in _quoted_parts(line):
+		longest = maxi(longest, (part as String).length())
+	var lo := 1
+	var hi := longest
+	while lo < hi:
+		var mid := (lo + hi + 1) / 2
+		if font.get_string_size(_cut_quoted(line, mid), HORIZONTAL_ALIGNMENT_LEFT, -1, size).x <= max_px:
+			lo = mid
+		else:
+			hi = mid - 1
+	return _cut_quoted(line, lo)
+
+
+## The text inside each quote of `line` (between _quoted's isolate marks
+## and quote marks).
+static func _quoted_parts(line: String) -> Array:
+	var parts := []
+	var at := line.find(char(0x2066))
+	while at >= 0:
+		var end := line.find(char(0x2069), at)
+		if end < 0:
+			break
+		var raw: Variant = JSON.parse_string(line.substr(at + 1, end - at - 1))
+		parts.append(raw if typeof(raw) == TYPE_STRING else "")
+		at = line.find(char(0x2066), end)
+	return parts
+
+
+## `line` with every quoted part longer than 2 × `keep` characters cut to
+## its first and last `keep` - the text itself, not its escaped form, so a
+## cut never splits a \" - each half in quotes of its own, with the " … "
+## and the part's length outside them, where file text cannot put words.
+static func _cut_quoted(line: String, keep: int) -> String:
+	var counted := line.ends_with(" characters)")
+	var out := ""
+	var from := 0
+	var at := line.find(char(0x2066))
+	while at >= 0:
+		var end := line.find(char(0x2069), at)
+		if end < 0:
+			break
+		var segment := line.substr(at, end - at + 1)
+		var raw: Variant = JSON.parse_string(line.substr(at + 1, end - at - 1))
+		if typeof(raw) == TYPE_STRING and (raw as String).length() > 2 * keep + 1:
+			var text: String = raw
+			segment = "%s … %s" % [
+				char(0x2066) + JSON.stringify(text.left(keep)) + char(0x2069),
+				char(0x2066) + JSON.stringify(text.right(keep)) + char(0x2069)]
+			# Its length, unless the line gives the whole text's already (a
+			# part that is itself the start or end of a longer one, see _quoted).
+			if not counted:
+				segment += "  (%d characters)" % text.replace(char(0x200E), "").length()
+		out += line.substr(from, at - from) + segment
+		from = end + 1
+		at = line.find(char(0x2066), from)
+	return out + line.substr(from)
 
 
 func _rename_layer_dialog(index: int) -> void:
@@ -2588,7 +3249,23 @@ func _dialog_open() -> bool:
 	for c in get_children():
 		if c is AcceptDialog and (c as Window).visible:
 			return true
+	# The on-screen keyboard too: F8 pressed there is a key being captured.
+	if _key_capture != null and _key_capture.visible:
+		return true
+	# ...and an open list or colour picker (see playback_started).
+	if not _open_popups().is_empty():
+		return true
 	return _image_preview != null and _image_preview.visible
+
+
+## Every popup of the builder that is open (a dropdown's list, a colour
+## picker, the Add action menu).
+func _open_popups() -> Array:
+	var open: Array = []
+	for p in find_children("*", "Popup", true, false):
+		if (p as Window).visible:
+			open.append(p)
+	return open
 
 
 func _is_editing_text() -> bool:
@@ -2597,16 +3274,19 @@ func _is_editing_text() -> bool:
 
 
 func _input(event: InputEvent) -> void:
+	# While picking on screen the pick window is unfocusable, so its Esc
+	# arrives here. No other hotkey should fire mid-pick, and no key (its
+	# repeats neither) reaches the builder - an arrow key would move the
+	# action list's selection away from the action the pick is for; nor
+	# while a sample is being read.
+	if (_pick_active or _sample_pending) and event is InputEventKey:
+		if _pick_active and event.pressed and not event.echo and event.keycode == KEY_ESCAPE:
+			picker.cancel_pick()
+		get_viewport().set_input_as_handled()
+		return
 	if not (event is InputEventKey and event.pressed and not event.echo):
 		return
 
-	# While picking on screen the pick window is unfocusable, so its Esc arrives
-	# here. No other hotkey should fire mid-pick.
-	if _pick_active:
-		if event.keycode == KEY_ESCAPE:
-			picker.cancel_pick()
-			get_viewport().set_input_as_handled()
-		return
 
 	# While recording, this window's F8 and Esc end it (the helper leaves
 	# out keys that land on Loop Automator itself, unless ~Self; an Esc
@@ -2623,8 +3303,8 @@ func _input(event: InputEvent) -> void:
 	# Global controls that should always work.
 	match event.keycode:
 		KEY_F5:
-			_commit_pending_edits()
-			Playback.toggle()
+			# As the Run button: the same checks before a start.
+			_on_play_pressed()
 			get_viewport().set_input_as_handled()
 			return
 		KEY_F8:

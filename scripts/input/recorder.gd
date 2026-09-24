@@ -103,11 +103,23 @@ public class Rec : NativeWindow {
   static void Out(string s) { Ev e; e.line = s; e.atPoint = false; e.pt = new Pt(); Push(e); }
   static void OutAt(string s, Pt p) { Ev e; e.line = s; e.atPoint = true; e.pt = p; Push(e); }
   static void Push(Ev e) { lock (lines) { if (lines.Count < MaxQueued || !e.atPoint) lines.Enqueue(e); Monitor.Pulse(lines); } }
+  static System.Collections.Generic.HashSet<string> heldButtons = new System.Collections.Generic.HashSet<string>();
+  static System.Collections.Generic.HashSet<int> heldKeys = new System.Collections.Generic.HashSet<int>();
   static void Writer() {
     while (true) {
       Ev e;
       lock (lines) { while (lines.Count == 0) Monitor.Wait(lines); e = lines.Dequeue(); }
-      if (e.atPoint && Guarded(WindowFromPoint(e.pt))) continue;
+      if (e.atPoint) {
+        // A button whose press went out has its release go out too, and the
+        // motion while it is down, wherever they land (a drag let go over
+        // this app's window): dropped, the replay would hold it for good.
+        char kind = e.line[0];
+        string b = (kind == 'd' || kind == 'u') ? e.line.Split(' ')[2] : null;
+        bool owed = (kind == 'u' && heldButtons.Contains(b)) || (kind == 'm' && heldButtons.Count > 0);
+        if (!owed && Guarded(WindowFromPoint(e.pt))) continue;
+        if (kind == 'd') heldButtons.Add(b);
+        else if (kind == 'u') heldButtons.Remove(b);
+      }
       try { Console.Out.WriteLine(e.line); Console.Out.Flush(); } catch { done = true; return; }
     }
   }
@@ -156,12 +168,30 @@ public class Rec : NativeWindow {
       int ext = (kflags & 2) != 0 ? 1 : 0;
       if (vk == 0xFF) return;  // the fake shift some keys are padded with
       // F8 ends the recording (WM_HOTKEY, below) and is never in it.
-      if (vk != 0x77 && (any || !injected) && !Guarded(GetForegroundWindow())) {
-        Out(\"k \" + t + \" \" + vk + \" \" + (up ? 0 : 1) + \" \" + ext);
+      IntPtr fg = GetForegroundWindow();
+      // (A key whose press went out has its release go out too, even with
+      // this app in front by then: dropped, the replay would hold it.)
+      if (vk != 0x77 && (any || !injected) && (!Guarded(fg) || (up && heldKeys.Contains(vk)))) {
+        if (up) heldKeys.Remove(vk); else heldKeys.Add(vk);
+        // The key's own character on the layout of the window typed into
+        // (MAPVK_VK_TO_CHAR; 0 for none, or a dead key): what a digit or
+        // punctuation key types is the layout's (\"+\" on a German keyboard,
+        // \"&\" on a French one), not the US one its code is named for.
+        uint pid; uint tid = GetWindowThreadProcessId(fg, out pid);
+        uint ch = MapVirtualKeyEx((uint)vk, 2, GetKeyboardLayout(tid));
+        // A dead key (the top bit) comes as its accent's character, negated.
+        string chs = (ch & 0x80000000) != 0 ? (-(int)(ch & 0xFFFF)).ToString() : (ch & 0xFFFF).ToString();
+        Out(\"k \" + t + \" \" + vk + \" \" + (up ? 0 : 1) + \" \" + ext + \" \" + chs);
       }
     }
   }
+  [DllImport(\"user32.dll\")] static extern bool SetProcessDPIAware();
+  [DllImport(\"user32.dll\")] static extern uint MapVirtualKeyEx(uint code, uint type, IntPtr hkl);
+  [DllImport(\"user32.dll\")] static extern IntPtr GetKeyboardLayout(uint thread);
   public static int Run(uint guardPid, bool anyInput) {
+    // Screen pixels as Godot counts them (it is DPI aware; powershell.exe
+    // is not): scaled units would put every recorded point off.
+    SetProcessDPIAware();
     guard = guardPid; any = anyInput;
     buf = Marshal.AllocHGlobal(BUF);
     Thread writer = new Thread(Writer); writer.IsBackground = true; writer.Start();
@@ -188,6 +218,8 @@ public class Rec : NativeWindow {
     // there instead - a hotkey's key is not reported as input either.
     hotkey = RegisterHotKey(IntPtr.Zero, 1, 0x4000, 0x77);  // MOD_NOREPEAT, VK_F8
     if (!hotkey) Out(\"nohotkey\");
+    // ...with any modifiers down too, as the run's does (see StopHotkey).
+    else for (uint mods = 1; mods < 16; mods++) RegisterHotKey(IntPtr.Zero, 1 + (int)mods, 0x4000 | mods, 0x77);
     sw = System.Diagnostics.Stopwatch.StartNew();
     Out(\"ready\");
     // Stdin closing (or 'quit') ends the loop: the parent is gone or done.
@@ -207,7 +239,7 @@ public class Rec : NativeWindow {
         Thread.Sleep(1);
       }
     } finally {
-      if (hotkey) UnregisterHotKey(IntPtr.Zero, 1);
+      if (hotkey) for (int id = 1; id <= 16; id++) UnregisterHotKey(IntPtr.Zero, id);
       w.DestroyHandle();
       if (timer) timeEndPeriod(1);
     }
@@ -322,19 +354,23 @@ static func parse_line(line: String) -> Dictionary:
 	if p.size() < 2 or not p[1].is_valid_int():
 		return {}
 	var t := int(p[1])
+	# The helper reports Windows' coordinates; the app works in Godot's (see
+	# WindowsBackend._origin).
+	var o := DisplayServer.screen_get_position(DisplayServer.get_primary_screen())
 	match p[0]:
 		"m":
 			if p.size() >= 4:
-				return {"kind": "m", "t": t, "x": int(p[2]), "y": int(p[3])}
+				return {"kind": "m", "t": t, "x": int(p[2]) + o.x, "y": int(p[3]) + o.y}
 		"d", "u":
 			if p.size() >= 5:
-				return {"kind": p[0], "t": t, "button": int(p[2]), "x": int(p[3]), "y": int(p[4])}
+				return {"kind": p[0], "t": t, "button": int(p[2]), "x": int(p[3]) + o.x, "y": int(p[4]) + o.y}
 		"w":
 			if p.size() >= 6:
-				return {"kind": "w", "t": t, "delta": int(p[2]), "horizontal": p[3] == "1", "x": int(p[4]), "y": int(p[5])}
+				return {"kind": "w", "t": t, "delta": int(p[2]), "horizontal": p[3] == "1", "x": int(p[4]) + o.x, "y": int(p[5]) + o.y}
 		"k":
 			if p.size() >= 5:
-				return {"kind": "k", "t": t, "vk": int(p[2]), "down": p[3] == "1", "extended": p[4] == "1"}
+				return {"kind": "k", "t": t, "vk": int(p[2]), "down": p[3] == "1", "extended": p[4] == "1",
+					"ch": int(p[5]) if p.size() >= 6 and p[5].is_valid_int() else 0}
 	return {}
 
 
