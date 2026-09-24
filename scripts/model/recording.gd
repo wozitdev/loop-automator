@@ -32,6 +32,8 @@ const VK_ESCAPE := 0x1B
 ## Virtual keys that are modifiers, and the letter each is in
 ## KeyStrokes' mods (a helper may report left / right codes; see _vk).
 const MODIFIERS := {0x10: "s", 0x11: "c", 0x12: "a", 0x5B: "w", 0x5C: "w"}
+## The virtual key of each modifier letter.
+const MODIFIER_OF := {"s": 0x10, "c": 0x11, "a": 0x12, "w": 0x5B}
 ## US-layout characters of the OEM virtual keys, the unshifted one; Shift
 ## on them keeps its "+" so the shifted character is the layout's.
 const OEM := {
@@ -89,6 +91,7 @@ static func _items(events: Array) -> Array:
 	var keys := {}         # vk -> its down event (+ "mods", "other")
 	var mods := {}         # modifier vk -> {"t", "used"}
 	var wheel := {}        # the wheel run under way
+	var held: Array = []   # modifiers kept as a Key Down ... Up: {"letter", "t0", "t1"}
 	for e in events:
 		var t: int = e["t"]
 		match e["kind"]:
@@ -202,9 +205,11 @@ static func _items(events: Array) -> Array:
 						var text := _stroke(vk, "", false)
 						if m["mouse"]:
 							# Held for the mouse (Shift-click, Ctrl-wheel): down … up
-							# around it. Keys pressed meanwhile carry it as a prefix.
+							# around it. Keys pressed meanwhile lose it as a prefix
+							# (see the end): the Key Down holds it for them.
 							items.append(_item("keydown", m["t"], m["t"], {"text": text}))
 							items.append(_item("keyup", t, t, {"text": text}))
+							held.append({"letter": MODIFIERS[vk], "t0": m["t"], "t1": t})
 						elif not m["used"]:
 							# A modifier on its own is a keystroke of its own - a
 							# hold if it was held (Shift to sprint, to crouch).
@@ -234,24 +239,25 @@ static func _items(events: Array) -> Array:
 					if text.is_empty():
 						skipped_keys += 1
 						continue
+					var st := {"vk": vk, "mods": k["mods"], "ext": e["extended"], "ch": k["ch"], "at": k["t"]}
 					if k["other"]:
-						items.append(_item("keydown", k["t"], k["t"], {"text": text}))
-						items.append(_item("keyup", t, t, {"text": text}))
+						items.append(_item("keydown", k["t"], k["t"], {"text": text, "stroke": st}))
+						items.append(_item("keyup", t, t, {"text": text, "stroke": st}))
 					elif int(k.get("repeats", 0)) > 0 and (text.ends_with("{BACKSPACE}") or text.ends_with("{DELETE}")):
 						# Backspace or Delete held till it repeated (clearing a field):
 						# the presses it made, counted - injected input does not
 						# repeat by itself, and a hold would press it once.
-						var n := mini(int(k["repeats"]) + 1, KeyStrokesT.REPEAT_MAX)
-						items.append(_item("key", k["t"], t, {"text": text.left(text.length() - 1) + " %d}" % n}))
+						st["n"] = mini(int(k["repeats"]) + 1, KeyStrokesT.REPEAT_MAX)
+						items.append(_item("key", k["t"], t, {"text": _key_text(st), "stroke": st}))
 					elif t - int(k["t"]) >= HOLD_MS:
-						items.append(_item("keyhold", k["t"], t, {"text": text}))
+						items.append(_item("keyhold", k["t"], t, {"text": text, "stroke": st}))
 					else:
 						# Typed: a letter as the layout has it (Cyrillic, Greek),
 						# where a held one stays the key it is (W to walk).
 						# (Only plain typing: a shortcut, Ctrl+C in a Russian
 						# window, is the key - it works on any layout.)
-						var plain: bool = k["mods"] == "" or k["mods"] == "s"
-						items.append(_item("key", k["t"], t, {"text": _stroke(vk, k["mods"], e["extended"], k["ch"], plain)}))
+						st["typed"] = k["mods"] == "" or k["mods"] == "s"
+						items.append(_item("key", k["t"], t, {"text": _key_text(st), "stroke": st}))
 	_flush_move(items, run, keys, mods)
 	if not wheel.is_empty():
 		_end_wheel(items, wheel)
@@ -263,9 +269,45 @@ static func _items(events: Array) -> Array:
 		var k: Dictionary = keys[vk]
 		var text := _stroke(vk, k["mods"], k["extended"], k["ch"])
 		if not text.is_empty():
-			items.append(_item("keydown", k["t"], k["t"], {"text": text}))
+			var st := {"vk": vk, "mods": k["mods"], "ext": k["extended"], "ch": k["ch"], "at": k["t"]}
+			items.append(_item("keydown", k["t"], k["t"], {"text": text, "stroke": st}))
 		else:
 			skipped_keys += 1
+	# A modifier kept as a Key Down ... Up (held for the mouse) is already
+	# down for the keys pressed inside it: their text drops its prefix, so
+	# Ctrl held through ^c and a Move replays as Key Down {CTRL}, c, Move,
+	# Key Up (the helper refuses "^c" while a Key Down holds Ctrl).
+	for h in held:
+		for it in items:
+			var st: Dictionary = it.get("stroke", {})
+			if not st.is_empty() and String(st["mods"]).contains(h["letter"]) \
+					and int(st["at"]) >= int(h["t0"]) and int(st["at"]) <= int(h["t1"]):
+				st["mods"] = String(st["mods"]).replace(h["letter"], "")
+				st["stripped"] = true
+	# A typed key with modifiers still left (Ctrl held for the mouse, Shift
+	# pressed with the S) holds those too, as a down ... up around it: the
+	# helper types nothing that presses a modifier while a Key Down holds one.
+	var out: Array = []
+	for it in items:
+		var st: Dictionary = it.get("stroke", {})
+		if not st.get("stripped", false):
+			out.append(it)
+			continue
+		var wrap: String = st["mods"] if it["kind"] == "key" else ""
+		if not wrap.is_empty():
+			st = st.duplicate()
+			st["mods"] = ""
+		var text := _key_text(st)
+		if text.is_empty():
+			out.append(it)
+			continue
+		it["text"] = text
+		for letter in wrap:
+			out.append(_item("keydown", it["t0"], it["t0"], {"text": _stroke(MODIFIER_OF[letter], "", false)}))
+		out.append(it)
+		for letter in wrap:
+			out.append(_item("keyup", it["t1"], it["t1"], {"text": _stroke(MODIFIER_OF[letter], "", false)}))
+	items = out
 	# By start time; the sort is not stable, so ties keep their order by hand.
 	for i in items.size():
 		items[i]["i"] = i
@@ -334,6 +376,15 @@ static func _vk(vk: int) -> int:
 ## The SendKeys stroke for a key: its modifier prefixes (^ + % $) and the
 ## key - a character (Shift and a letter is the capital), a "{NAME}", or ""
 ## for a key with no name (skipped).
+## A key item's text from its stroke (see _items): typed as the layout has
+## it when it was plain typing, with its repeat count if it has one.
+static func _key_text(st: Dictionary) -> String:
+	var text := _stroke(st["vk"], st["mods"], st["ext"], st["ch"], st.get("typed", false))
+	if st.has("n") and not text.is_empty():
+		text = text.left(text.length() - 1) + " %d}" % int(st["n"])
+	return text
+
+
 static func _stroke(vk: int, mods: String, _extended: bool, ch: int = 0, typed: bool = false) -> String:
 	var prefix := ""
 	var shift := mods.contains("s")
