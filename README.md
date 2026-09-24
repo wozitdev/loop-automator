@@ -334,7 +334,7 @@ pluggable `InputBackend`:
 - **Live** — *experimental*. Drives the real cursor/keyboard and reads
   screen pixels via a small generated PowerShell helper (`input_helper.ps1`,
   see [Generated helpers](#generated-helpers))
-  using `SetCursorPos`, `mouse_event`, `SendKeys`, and `CopyFromScreen`.
+  using `SendInput`, `SendKeys`, and `CopyFromScreen`.
   All of it — input actions and screen reads (Pixel / Image Detect, colour sampling,
   cursor position) — goes to one long-running helper process, so an action or
   a check costs a few milliseconds and a follow-cursor Pixel Detect keeps up
@@ -357,6 +357,7 @@ pluggable `InputBackend`:
 export_presets.cfg         # Godot export presets (Windows Desktop, Linux)
 project.godot              # autoloads, renderer, transparency + native-subwindow settings
 icon.svg
+examples/                  # starter .loop files to Import
 scenes/
   main.tscn                # builder window (UI built in code)
   overlay.tscn             # transparent overlay Window
@@ -377,6 +378,8 @@ scripts/
     loop_action.gd         # one step (+ JSON)
     loop_layer.gd          # a layer of actions (+ JSON)
     loop_project.gd        # the whole loop (+ JSON)
+    key_strokes.gd         # SendKeys text as keystrokes (~Keys, Key down / up)
+    mouse_path.gd          # the route the cursor travels over a duration
     layer_names.gd         # random Bible names for a new loop's first layer
     recording.gd           # a recording (input events) as a layer's actions
   input/
